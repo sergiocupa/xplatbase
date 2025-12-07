@@ -24,7 +24,7 @@
 
 
 #define xpb_allocate(size) xpb_allocate_internal(size, __func__, __FILE__, __LINE__)
-#define xpb_allocate_type(size,type_size) xpb_allocate_type_internal(size,type_size, __func__, __FILE__, __LINE__)
+#define xpb_allocate_type(size,type) xpb_allocate_type_internal(size,sizeof(type), __func__, __FILE__, __LINE__)
 
 
 
