@@ -16,6 +16,7 @@
 #ifndef XPLATBASE_H
 #define XPLATBASE_H
 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,12 +35,16 @@ extern "C" {
 	#endif 
 
 
+#ifndef __cplusplus
     #define false 0
     #define true  1
+#endif
 
-    #define INITIAL_LIST_COUNT 100;
+    #define INITIAL_LIST_COUNT    100;
+	#define INITIAL_STRING_LENGTH 50;
 
-	typedef uint_fast8_t bool;
+
+	typedef uint_fast8_t boolean;
 	typedef uint_fast8_t byte;
 	typedef int16_t      int16;
 	typedef int32_t      int32;
@@ -66,8 +71,6 @@ extern "C" {
 	    #pragma section(".CRT$XCU", read)
 		    __declspec(allocate(".CRT$XCU")) static void (*init_ptr)() = platform_init;
 
-
-
 	#else 
 
 	   // Para tratamento de evento. Tentar capturar antes de encerrar
@@ -81,6 +84,9 @@ extern "C" {
 		}
 
 	#endif
+
+    //#include "../src/thread_handler.h"
+    //#include "../src/atomics.h"
 
 
     typedef struct 
@@ -110,9 +116,9 @@ extern "C" {
 		bool   Active;
 		uint64 Max;
 		uint64 Length;
-		void*  Content;
+		char*  Content;
 	}
-	StringXPB;
+	StringX;
 
 
 	typedef struct
@@ -127,10 +133,18 @@ extern "C" {
 
 
 
+	#define xpb_allocate(size)                      allocate_ext(size, __func__, __FILE__, __LINE__)
+    #define xpb_reallocate(buffer,new_size)         reallocate_ext(buffer,new_size, __func__, __FILE__, __LINE__)
+	#define xpb_allocate_type(size,type)            allocate_type_ext(size,sizeof(type), __func__, __FILE__, __LINE__)
+
+    #define xpb_list_init(_this,initial_count,type) xpb_list_init_ext(_this, initial_count, sizeof(type), __func__, __FILE__, __LINE__)
+    #define xpb_list_new(initial_count,type)        xpb_list_new_ext(initial_count, sizeof(type), __func__, __FILE__, __LINE__)
+    #define xpb_list_add(_this,instance,type)       xpb_list_add_ext(_this,  instance, sizeof(type), __func__, __FILE__, __LINE__)
+
+
+
 
 	//void xpb_event_trigger_error(const CallContextGlobalEvent* ctx, const char* fmt, ...);
-
-
 
 #ifdef __cplusplus
 }

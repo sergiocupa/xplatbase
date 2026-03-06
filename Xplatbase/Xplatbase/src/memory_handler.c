@@ -23,45 +23,52 @@
 
 
 
-#define xpb_allocate(size) xpb_allocate_internal(size, __func__, __FILE__, __LINE__)
-#define xpb_allocate_type(size,type) xpb_allocate_type_internal(size,sizeof(type), __func__, __FILE__, __LINE__)
 
-
-
-static BufferXPB* xpb_allocate_type_internal(uint64 size, uint64 type_size, const char* func, const char* file, int line)
+static void event_trigger(int code, uint64 size, const char* func, const char* file, int line)
 {
-	BufferXPB* buffer = malloc(sizeof(BufferXPB));
-
-	if (!buffer)
+	if (code == -1)
 	{
 		CallContextGlobalEvent ctx = { func, file, line };
-		xpb_event_trigger_error(&ctx, "Falha ao alocar buffer", size);
+		xpb_event_trigger_error(&ctx, "Falha ao alocar o buffer.");
 		return NULL;
 	}
-
-	buffer->Max      = 0;
-	buffer->Size     = size;
-	buffer->TypeSize = type_size;
-	buffer->Data     = malloc(buffer->TypeSize * buffer->Size);
-
-	if (!buffer->Data)
+	if (code == -2)
 	{
 		CallContextGlobalEvent ctx = { func, file, line };
-		xpb_event_trigger_error(&ctx, "Falha ao alocar %zu bytes para o buffer", size);
+		xpb_event_trigger_error(&ctx, "Falha ao alocar %zu bytes para o buffer.", size);
 		return NULL;
 	}
-	return buffer;
 }
 
-static BufferXPB* xpb_allocate_internal(uint64 size, const char* func, const char* file, int line)
+
+int reallocate(BufferXPB* buffer, uint64 new_size)
+{
+	void* nm = realloc(buffer->Data, new_size);
+	if (!nm)
+	{
+		return -1;
+	}
+	buffer->Data = nm;
+	return 0;
+}
+int reallocate_pointer(uint64 new_size, void** pointer)
+{
+	void* nm = realloc(*pointer, new_size);
+	if (!nm)
+	{
+		return -1;
+	}
+	*pointer = nm;
+	return 0;
+}
+
+int allocate(uint64 size, BufferXPB** output)
 {
 	BufferXPB* buffer = malloc(sizeof(BufferXPB));
 
 	if (!buffer)
 	{
-		CallContextGlobalEvent ctx = { func, file, line };
-		xpb_event_trigger_error(&ctx, "Falha ao alocar buffer", size);
-		return NULL;
+		return -1;
 	}
 
 	buffer->Max      = 0;
@@ -71,21 +78,80 @@ static BufferXPB* xpb_allocate_internal(uint64 size, const char* func, const cha
 
 	if (!buffer->Data)
 	{
-		CallContextGlobalEvent ctx = { func, file, line };
-		xpb_event_trigger_error(&ctx, "Falha ao alocar %zu bytes para o buffer", size);
-		return NULL;
+		return -2;
 	}
-	return buffer;
+
+	*output = buffer;
+	return 0;
 }
 
+int allocate_type(uint64 size, uint64 type_size, BufferXPB** output)
+{
+	BufferXPB* buffer = malloc(sizeof(BufferXPB));
 
-static void xpb_release_internal(BufferXPB** buffer)
+	if (!buffer)
+	{
+		return -1;
+	}
+
+	buffer->Max      = 0;
+	buffer->Size     = size;
+	buffer->TypeSize = type_size;
+	buffer->Data     = malloc(buffer->TypeSize * buffer->Size);
+
+	if (!buffer->Data)
+	{
+		return -2;
+	}
+
+	*output = buffer;
+	return 0;
+}
+
+void release(BufferXPB** buffer)
 {
 	if ((*buffer) && (*buffer)->Active)
 	{
 		(*buffer)->Active = false;
 		//free((*buffer)->Data);
 	}
+}
+
+
+
+BufferXPB* allocate_ext(uint64 size, const char* func, const char* file, int line)
+{
+	BufferXPB* buffer = 0;
+	int rs = allocate(size, &buffer);
+
+	if (rs < 0)
+	{
+		event_trigger(rs, size, func, file, line);
+	}
+	return buffer;
+}
+
+BufferXPB* reallocate_ext(BufferXPB* buffer, uint64 new_size, const char* func, const char* file, int line)
+{
+	int rs = reallocate(buffer, new_size);
+	if (rs < 0)
+	{
+		event_trigger(rs, new_size, func, file, line);
+	}
+	return buffer;
+}
+
+
+BufferXPB* allocate_type_ext(uint64 size, uint64 type_size, const char* func, const char* file, int line)
+{
+	BufferXPB* buffer = 0;
+	int rs = allocate_type(size, type_size, &buffer);
+	 
+	if(rs < 0)
+	{
+		event_trigger(rs, size, func, file, line);
+	}
+	return buffer;
 }
 
 

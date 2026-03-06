@@ -14,30 +14,54 @@
 
 #include "../include/xplatbase.h"
 #include "event_handler.h"
+#include "memory_handler.h"
 #include <stdio.h>
 #include <stdlib.h>
 
 
-#define xpb_list_add(_this,obj,type) xpb_list_add_internal(_this, instance, sizeof(type), __func__, __FILE__, __LINE__)
 
-
-void xpb_list_init(ListXPB* list, int32 initial_count, uint64 type_size)
+void xpb_list_init_ext(ListXPB* list, int32 initial_count, uint64 type_size, const char* func, const char* file, int line)
 {
-    list->Max   = initial_count >= 0 ? initial_count : INITIAL_LIST_COUNT;
-    list->Count = 0;
-    list->Items = (void**)malloc(list->Max * sizeof(void*));
+    list->TypeSize = type_size;
+    list->Max      = initial_count >= 0 ? initial_count : INITIAL_LIST_COUNT;
+    list->Count    = 0;
+
+    int rs = allocate(list->Max * sizeof(void*), &list->Items);
+    if (rs < 0)
+    {
+        CallContextGlobalEvent ctx = { func, file, line };
+        xpb_event_trigger_error(&ctx, "Falha ao alocar %zu itens para a lista.", list->Max);
+    }
 }
 
-ListXPB* xpb_list_new(int initial_count)
+ListXPB* xpb_list_new_ext(int initial_count, uint64 type_size, const char* func, const char* file, int line)
 {
-    ListXPB* list = malloc(sizeof(ListXPB));
-    list->Max   = initial_count >= 0 ? initial_count : INITIAL_LIST_COUNT;
-    list->Count = 0;
-    list->Items = (void**)malloc(list->Max * sizeof(void*));
+    ListXPB* list = { 0 };
+
+    int rs = allocate_type(sizeof(ListXPB), type_size, &list);
+    if (rs < 0)
+    {
+        CallContextGlobalEvent ctx = { func, file, line };
+        xpb_event_trigger_error(&ctx, "Falha ao alocar a lista.");
+        return NULL;
+    }
+
+    list->TypeSize = type_size;
+    list->Max      = initial_count >= 0 ? initial_count : INITIAL_LIST_COUNT;
+    list->Count    = 0;
+
+    rs = allocate(list->Max * sizeof(void*), &list->Items);
+    if (rs < 0)
+    {
+        CallContextGlobalEvent ctx = { func, file, line };
+        xpb_event_trigger_error(&ctx, "Falha ao alocar %zu itens para a lista.", list->Max);
+    }
+
     return list;
 }
 
-static void xpb_list_add_internal(ListXPB* list, void* instance, uint64 type_size, const char* func, const char* file, int line)
+
+void xpb_list_add_ext(ListXPB* list, void* instance, uint64 type_size, const char* func, const char* file, int line)
 {
     if (type_size != list->TypeSize)
     {
@@ -50,14 +74,22 @@ static void xpb_list_add_internal(ListXPB* list, void* instance, uint64 type_siz
     if (sz >= list->Max)
     {
         list->Max  *= 2;
-        list->Items = (void**)realloc((void**)list->Items, list->Max * sizeof(void*));
+
+        int rz = reallocate_pointer(list->Max, &list->Items);
+        if (rz < 0)
+        {
+            CallContextGlobalEvent ctx = { func, file, line };
+            xpb_event_trigger_error(&ctx, "Não foi possível realocar novo tamanho dos itens. Informado: %zu | Esperado: %zu", type_size, list->TypeSize);
+            return;
+        }
     }
 
     list->Items[list->Count] = instance;
     list->Count++;
 }
 
-void xpb_list_remove(ListXPB* list, void* obj)
+
+void xpb_list_remove_ext(ListXPB* list, void* obj)
 {
     if (list && list->Active)
     {
@@ -80,6 +112,7 @@ void xpb_list_remove(ListXPB* list, void* obj)
         }
     }
 }
+
 
 void xpb_list_remove_index(ListXPB* list, int index)
 {

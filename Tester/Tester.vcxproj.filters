@@ -3,4 +3,7 @@
   <ItemGroup>
     <ClCompile Include="Tester.c" />
   </ItemGroup>
+  <ItemGroup>
+    <Text Include="Tasks.txt" />
+  </ItemGroup>
 </Project>

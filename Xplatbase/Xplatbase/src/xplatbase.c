@@ -20,7 +20,7 @@
 
 
 
-bool platform_initialized = false;
+boolean platform_initialized = false;
 
 
 

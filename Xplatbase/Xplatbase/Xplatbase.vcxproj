@@ -20,14 +20,28 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\xplatbase.h" />
+    <ClInclude Include="src\atomics.h" />
     <ClInclude Include="src\event_handler.h" />
+    <ClInclude Include="src\memory_handler.h" />
+    <ClInclude Include="src\memory_pool.h" />
+    <ClInclude Include="src\ring_queue.h" />
+    <ClInclude Include="src\task_handler.h" />
+    <ClInclude Include="src\thread_handler.h" />
+    <ClInclude Include="src\thread_pool.h" />
+    <ClInclude Include="src\thread_wait.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\atomics.c" />
     <ClCompile Include="src\event_handler.c" />
     <ClCompile Include="src\list_hander.c" />
     <ClCompile Include="src\memory_handler.c" />
+    <ClCompile Include="src\memory_pool.c" />
+    <ClCompile Include="src\ring_queue.c" />
     <ClCompile Include="src\string_handler.c" />
+    <ClCompile Include="src\task_handler.c" />
     <ClCompile Include="src\thread_handler.c" />
+    <ClCompile Include="src\thread_pool.c" />
+    <ClCompile Include="src\thread_wait.c" />
     <ClCompile Include="src\xplatbase.c" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
@@ -123,8 +137,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>
       </PrecompiledHeaderFile>
-      <LanguageStandard>stdcpp20</LanguageStandard>
-      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+      <LanguageStandard_C>stdclatest</LanguageStandard_C>
+      <CompileAs>CompileAsC</CompileAs>
     </ClCompile>
     <Link>
       <SubSystem>

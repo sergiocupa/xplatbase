@@ -18,6 +18,16 @@
 #include <signal.h>
 
 
+
+
+static void default_handler(const CallContextGlobalEvent* ctx, const char* msg)
+{
+    fprintf(stderr, "\n[ERRO] %s\n", msg);
+    fprintf(stderr, "  Origem: %s()\n", ctx->Func);
+    fprintf(stderr, "  Arquivo: %s:%d\n", ctx->File, ctx->Line);
+}
+
+
 static ErrorHandler g_error_handler = default_handler;
 
 
@@ -76,14 +86,6 @@ void crash_handler(int sig)
 
 
 
-
-
-static void default_handler(const CallContextGlobalEvent* ctx, const char* msg)
-{
-	fprintf(stderr, "\n[ERRO] %s\n", msg);
-	fprintf(stderr, "  Origem: %s()\n", ctx->Func);
-	fprintf(stderr, "  Arquivo: %s:%d\n", ctx->File, ctx->Line);
-}
 
 
 void xpb_event_trigger_error(const CallContextGlobalEvent* ctx, const char* fmt, ...)

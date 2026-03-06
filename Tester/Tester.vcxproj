@@ -103,6 +103,8 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <CompileAs>CompileAsC</CompileAs>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -127,9 +129,7 @@
     <ClCompile Include="Tester.c" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\Xplatbase\Xplatbase\Xplatbase.vcxproj">
-      <Project>{f217b4d5-f6bc-4fce-af5e-beef9fe1f3e8}</Project>
-    </ProjectReference>
+    <Text Include="Tasks.txt" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

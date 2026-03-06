@@ -1,0 +1,12 @@
+
+
+01. DEFINIR TOPOLOGIA
+Baseado em arena, mas fragmentado em fila circular de ocupação. 
+Se o fragmento todo ocupado, passar para o proximo. Na mesma chamada, pós direcionar item na fila, disparar a thread de manutenção da fila (PMT - pool maintenance thread).
+Cria varias pistas, cada pista com tamanho de bloco maior. Inicialmente 3 pistas: uma com 4K, outra com 40K, e outra com 400K.
+  A chamada de alocação, verifica se SIZE for menor que 10x o tamanho do bloco. Este 10x tem que ser testado, para ver qual valore mais performatico.
+
+02.
+O PMT sinalizado, verifica itens da fila, para ver qual bloco esta totalmente marcado como inativo, para ver se pode liberar o bloco todo.
+Verifica se a fila esta ficando muito ocupada, para ver se precisa criar mais blocos.
+De tempos em tempo, é verificado se tem muitos blocos fragmentados, e desfragmenta na ordem dos mais antigos para os mais recentes.
