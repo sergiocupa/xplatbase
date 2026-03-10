@@ -1,6 +1,6 @@
 #include "thread_wait.h"
 #include <stdbool.h>
-#include <stdatomic.h>
+//#include <stdatomic.h>
 
 /* ======================================================================== */
 /*  CPU pause/yield                                                         */

@@ -1,4 +1,4 @@
-#include "../include/xplatbase.h"
+#include "atomics.h"
 
 
 #ifdef XPLATBASE_WIN
@@ -20,19 +20,14 @@ __forceinline int atomic_get(xatomic_int* s)
     return (int)ReadAcquire(s);
 }
 
-__forceinline int atomic_inc(xatomic_int* s)
-{
-    return (int)InterlockedExchangeAdd(s, 1);
-}
-
-__forceinline int atomic_dec(xatomic_int* s)
-{
-    return (int)InterlockedExchangeAdd(s, -1);
-}
-
 __forceinline int atomic_add(xatomic_int* s, int val)
 {
-    return (int)InterlockedExchangeAdd(s, (LONG)val);
+    return (int)InterlockedExchangeAddNoFence(s, (LONG)val);
+}
+
+__forceinline int atomic_sub(xatomic_int* s, int val)
+{
+    return (int)InterlockedExchange(s, -(LONG)val);
 }
 
 __forceinline int atomic_cas(xatomic_int* s, int* expected, int desired)
@@ -66,14 +61,9 @@ inline int atomic_get(xatomic_int* s)
     return atomic_load_explicit(s, memory_order_acquire);
 }
 
-inline int atomic_inc(xatomic_int* s)
+inline int atomic_sub(xatomic_int* s, int val)
 {
-    return atomic_fetch_add_explicit(s, 1, memory_order_relaxed);
-}
-
-inline int atomic_dec(xatomic_int* s)
-{
-    return atomic_fetch_sub_explicit(s, 1, memory_order_relaxed);
+    return atomic_fetch_sub_explicit(s, val, memory_order_relaxed);
 }
 
 inline int atomic_add(xatomic_int* s, int val)
@@ -83,10 +73,7 @@ inline int atomic_add(xatomic_int* s, int val)
 
 inline int atomic_cas(xatomic_int* s, int* expected, int desired)
 {
-    return atomic_compare_exchange_strong_explicit(
-        s, expected, desired,
-        memory_order_acquire,
-        memory_order_relaxed);
+    return atomic_compare_exchange_strong_explicit(s, expected, desired, memory_order_acq_rel, memory_order_relaxed);
 }
 
 

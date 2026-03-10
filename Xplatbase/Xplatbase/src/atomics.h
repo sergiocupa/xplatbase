@@ -22,32 +22,29 @@ extern "C" {
 
 #include "../include/xplatbase.h"
 
-
 #ifdef XPLATBASE_WIN
 
 	typedef volatile LONG xatomic_int;
 
-
 	__forceinline void atomic_initialize(xatomic_int* s, int val);
 	__forceinline void atomic_set(xatomic_int* s, int val);
-	__forceinline int atomic_get(xatomic_int* s);
-	__forceinline int atomic_inc(xatomic_int* s);
-	__forceinline int atomic_dec(xatomic_int* s);
-	__forceinline int atomic_add(xatomic_int* s, int val);
-	__forceinline int atomic_cas(xatomic_int* s, int* expected, int desired);
+	__forceinline int  atomic_get(xatomic_int* s);
+	__forceinline int  atomic_sub(xatomic_int* s, int val);
+	__forceinline int  atomic_add(xatomic_int* s, int val);
+	__forceinline int  atomic_cas(xatomic_int* s, int* expected, int desired);
 
 #else 
 
-	typedef _Atomic int xatomic_int;
+    #include <stdatomic.h>
 
+	typedef _Atomic int xatomic_int;
 
 	inline void atomic_initialize(xatomic_int* s, int val);
 	inline void atomic_set(xatomic_int* s, int val);
-	inline int atomic_get(xatomic_int* s);
-	inline int atomic_inc(xatomic_int* s);
-	inline int atomic_dec(xatomic_int* s);
-	inline int atomic_add(xatomic_int* s, int val);
-	inline int atomic_cas(xatomic_int* s, int* expected, int desired);
+	inline int  atomic_get(xatomic_int* s);
+	inline int  atomic_sub(xatomic_int* s, int val);
+	inline int  atomic_add(xatomic_int* s, int val);
+	inline int  atomic_cas(xatomic_int* s, int* expected, int desired);
 
 #endif
 

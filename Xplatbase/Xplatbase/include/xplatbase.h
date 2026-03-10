@@ -91,7 +91,7 @@ extern "C" {
 
     typedef struct 
 	{
-		bool   Active;
+		boolean Active;
 		uint64 TypeSize;
 		uint64 Max;
 		uint64 Size;
@@ -102,7 +102,7 @@ extern "C" {
 
 	typedef struct
 	{
-		bool    Active;
+		boolean Active;
 		uint64  TypeSize;
 		uint64  Max;
 		uint64  Count;
@@ -113,10 +113,10 @@ extern "C" {
 
 	typedef struct
 	{
-		bool   Active;
-		uint64 Max;
-		uint64 Length;
-		char*  Content;
+		boolean Active;
+		uint64  Max;
+		uint64  Length;
+		char*   Content;
 	}
 	StringX;
 

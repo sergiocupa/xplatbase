@@ -80,7 +80,7 @@ extern "C" {
 
     inline boolean pool_submit(ShardedPool* pool, void (*fn)(void*), void* arg);
     inline boolean pool_init(ShardedPool* pool, int worker_count);
-    inline void pool_shutdown(ShardedPool* pool);
+    inline void    pool_shutdown(ShardedPool* pool);
 
 
 
