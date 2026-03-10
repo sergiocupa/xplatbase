@@ -38,7 +38,7 @@ static fn_NtAlertThreadByThreadId   xwait__alert_fn;
 
 
 /* Init - chamar uma vez */
-inline boolean thread_wait_init(void)
+boolean thread_wait_init(void)
 {
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     if (!ntdll)
@@ -51,20 +51,20 @@ inline boolean thread_wait_init(void)
 }
 
 /* Registrar thread antes de usar */
-inline void thread_wait_prepare(xwait_t* w)
+void thread_wait_prepare(xwait_t* w)
 {
     w->thread_id = GetCurrentThreadId();
 }
 
 /* Dorme ate ser acordada - sem loop, NT nao tem spurious wakeup */
-inline void thread_wait_sleep(xwait_t* w)
+void thread_wait_sleep(xwait_t* w)
 {
     (void)w;
     xwait__wait_fn(NULL, NULL);
 }
 
 /* Dorme com timeout (microsegundos). true = acordou por wake, false = timeout */
-inline boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
+boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
 {
     (void)w;
     LARGE_INTEGER li;
@@ -75,7 +75,7 @@ inline boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
 }
 
 /* Acorda a thread */
-inline void thread_wait_wake(xwait_t* w)
+void thread_wait_wake(xwait_t* w)
 {
     xwait__alert_fn((HANDLE)(ULONG_PTR)w->thread_id);
 }

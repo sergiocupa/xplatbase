@@ -39,11 +39,11 @@ extern "C" {
     #endif
 
 
-    inline boolean thread_wait_init(void);
-    inline void    thread_wait_prepare(xwait_t* w);
-    inline void    thread_wait_sleep(xwait_t* w);
-    inline boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us);
-    inline void    thread_wait_wake(xwait_t* w);
+    XPLATBASE_API boolean thread_wait_init(void);
+    XPLATBASE_API void    thread_wait_prepare(xwait_t* w);
+    XPLATBASE_API void    thread_wait_sleep(xwait_t* w);
+    XPLATBASE_API boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us);
+    XPLATBASE_API void    thread_wait_wake(xwait_t* w);
 
 
 #ifdef __cplusplus

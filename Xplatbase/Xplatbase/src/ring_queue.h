@@ -32,17 +32,17 @@ extern "C" {
     RingQueue;
 
 
-    inline void    ring_queue_init(RingQueue* r, int capacity);
-    inline int     ring_queue_count(RingQueue* r);
-    inline boolean ring_queue_empty(RingQueue* r);
-    inline boolean ring_queue_full(RingQueue* r);
-    inline int     ring_queue_free(RingQueue* r);
-    inline int     ring_queue_pos(RingQueue* r, int index);
-    inline boolean ring_queue_push_(RingQueue* r, void* buffer, const void* item, int item_size);
-    inline boolean ring_queue_pop_(RingQueue* r, void* buffer, void* item, int item_size);
-    inline boolean ring_queue_peek_(RingQueue* r, void* buffer, void* item, int item_size);
-    inline boolean ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item, int item_size);
-    inline boolean ring_queue_pop_mc_(RingQueue* r, void* buffer, void* item, int item_size);
+    XPLATBASE_API void    ring_queue_init(RingQueue* r, int capacity);
+    XPLATBASE_API int     ring_queue_count(RingQueue* r);
+    XPLATBASE_API boolean ring_queue_empty(RingQueue* r);
+    XPLATBASE_API boolean ring_queue_full(RingQueue* r);
+    XPLATBASE_API int     ring_queue_free(RingQueue* r);
+    XPLATBASE_API int     ring_queue_pos(RingQueue* r, int index);
+    XPLATBASE_API boolean ring_queue_push_(RingQueue* r, void* buffer, const void* item, int item_size);
+    XPLATBASE_API boolean ring_queue_pop_(RingQueue* r, void* buffer, void* item, int item_size);
+    XPLATBASE_API boolean ring_queue_peek_(RingQueue* r, void* buffer, void* item, int item_size);
+    XPLATBASE_API boolean ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item, int item_size);
+    XPLATBASE_API boolean ring_queue_pop_mc_(RingQueue* r, void* buffer, void* item, int item_size);
 
 
     #define xring_push(r, buffer, item_ptr)    ring_queue_push_((r), (buffer), (item_ptr), sizeof(*(item_ptr)))

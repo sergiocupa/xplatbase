@@ -1,7 +1,7 @@
 #include "ring_queue.h"
 
 
-inline void ring_queue_init(RingQueue* r, int capacity)
+void ring_queue_init(RingQueue* r, int capacity)
 {
     atomic_set(&r->head, 0);
     atomic_set(&r->tail, 0);
@@ -11,7 +11,7 @@ inline void ring_queue_init(RingQueue* r, int capacity)
 }
 
 
-inline int ring_queue_count(RingQueue* r)
+int ring_queue_count(RingQueue* r)
 {
     int t = atomic_get(&r->tail);
     int h = atomic_get(&r->head);
@@ -19,31 +19,31 @@ inline int ring_queue_count(RingQueue* r)
 }
 
 
-inline boolean ring_queue_empty(RingQueue* r)
+boolean ring_queue_empty(RingQueue* r)
 {
     return ring_queue_count(r) == 0;
 }
 
 
-inline boolean ring_queue_full(RingQueue* r)
+boolean ring_queue_full(RingQueue* r)
 {
     return ring_queue_count(r) >= r->capacity;
 }
 
 
-inline int ring_queue_free(RingQueue* r)
+int ring_queue_free(RingQueue* r)
 {
     return r->capacity - ring_queue_count(r);
 }
 
 
-inline int ring_queue_pos(RingQueue* r, int index)
+int ring_queue_pos(RingQueue* r, int index)
 {
     return index & r->mask;
 }
 
 
-inline boolean ring_queue_push_(RingQueue* r, void* buffer, const void* item, int item_size)
+boolean ring_queue_push_(RingQueue* r, void* buffer, const void* item, int item_size)
 {
     if (ring_queue_full(r))
         return false;
@@ -57,7 +57,7 @@ inline boolean ring_queue_push_(RingQueue* r, void* buffer, const void* item, in
 }
 
 
-inline boolean ring_queue_pop_(RingQueue* r, void* buffer, void* item, int item_size)
+boolean ring_queue_pop_(RingQueue* r, void* buffer, void* item, int item_size)
 {
     if (ring_queue_empty(r)) return false;
 
@@ -70,7 +70,7 @@ inline boolean ring_queue_pop_(RingQueue* r, void* buffer, void* item, int item_
 }
 
 
-inline boolean ring_queue_peek_(RingQueue* r, void* buffer, void* item, int item_size)
+boolean ring_queue_peek_(RingQueue* r, void* buffer, void* item, int item_size)
 {
     if (ring_queue_empty(r)) return false;
 
@@ -82,7 +82,7 @@ inline boolean ring_queue_peek_(RingQueue* r, void* buffer, void* item, int item
 }
 
 
-inline boolean ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item, int item_size)
+boolean ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item, int item_size)
 {
     int t, h;
     do 
@@ -100,7 +100,7 @@ inline boolean ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item,
 }
 
 
-inline boolean ring_queue_pop_mc_(RingQueue* r, void* buffer, void* item, int item_size)
+boolean ring_queue_pop_mc_(RingQueue* r, void* buffer, void* item, int item_size)
 {
     int h, t;
     do 

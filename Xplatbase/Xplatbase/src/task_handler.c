@@ -143,7 +143,7 @@ static inline void pool_wake_all(ShardedPool* pool)
 
 //   ------------------------------------------------------------------    Submit    -------------------------------------------------------------
 
-inline boolean pool_submit(ShardedPool* pool, void (*fn)(void*), void* arg)
+boolean pool_submit(ShardedPool* pool, void (*fn)(void*), void* arg)
 {
     int idx   = atomic_add(&pool->submit_idx,1);
     int count = atomic_get(&pool->shard_count);
@@ -227,7 +227,7 @@ static void* worker_fn(void* arg)
 
 //   ------------------------------------------------------------    Init e Shutdown     ---------------------------------------------------------
 
-inline boolean pool_init(ShardedPool* pool, int worker_count)
+boolean pool_init(ShardedPool* pool, int worker_count)
 {
     memset(pool, 0, sizeof(ShardedPool));
     thread_wait_init();
@@ -278,7 +278,7 @@ inline boolean pool_init(ShardedPool* pool, int worker_count)
     return true;
 }
 
-inline void pool_shutdown(ShardedPool* pool)
+void pool_shutdown(ShardedPool* pool)
 {
     atomic_set(&pool->running, 0);
     atomic_set(&pool->expand_requested, 1);

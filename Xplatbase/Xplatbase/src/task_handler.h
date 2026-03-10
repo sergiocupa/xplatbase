@@ -73,9 +73,6 @@ extern "C" {
     Task;
 
 
-    xatomic_int x = 0;
-
-
     typedef struct _Shard
     {
         Task*     buffer;
@@ -147,9 +144,9 @@ extern "C" {
 
 
 
-    inline boolean pool_submit(ShardedPool* pool, void (*fn)(void*), void* arg);
-    inline boolean pool_init(ShardedPool* pool, int worker_count);
-    inline void    pool_shutdown(ShardedPool* pool);
+    XPLATBASE_API boolean pool_submit(ShardedPool* pool, void (*fn)(void*), void* arg);
+    XPLATBASE_API boolean pool_init(ShardedPool* pool, int worker_count);
+    XPLATBASE_API void    pool_shutdown(ShardedPool* pool);
 
 
 
