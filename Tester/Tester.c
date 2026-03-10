@@ -1,5 +1,5 @@
 /*
- * Benchmark v2: Medição mais precisa com batches
+ * Benchmark v2: Mediï¿½ï¿½o mais precisa com batches
  */
 
 #include <stdio.h>
@@ -143,8 +143,8 @@ static void malloc_test()
 
     printf("\n");
     printf("================================================================================\n");
-    printf("  BENCHMARK: Pool de Memória vs malloc\n");
-    printf("  %d iterações, bloco de %d bytes\n", ITERATIONS, BLOCK_SIZE);
+    printf("  BENCHMARK: Pool de Memï¿½ria vs malloc\n");
+    printf("  %d iteraï¿½ï¿½es, bloco de %d bytes\n", ITERATIONS, BLOCK_SIZE);
     printf("================================================================================\n\n");
 
     /* 1. malloc/free */
@@ -255,17 +255,21 @@ static void malloc_test()
     printf("  Pool           | Speedup | Uso ideal\n");
     printf("  ---------------|---------|------------------------------------------\n");
     printf("  Arena          | ~%.0fx   | Request HTTP (aloca muito, libera tudo)\n", malloc_ns / arena_ns);
-    printf("  Ring Buffer    | ~%.0fx   | Frames de vídeo (FIFO)\n", malloc_ns / ring_ns);
-    printf("  Freelist       | ~%.0fx    | Conexões, objetos de tamanho fixo\n", malloc_ns / freelist_ns);
+    printf("  Ring Buffer    | ~%.0fx   | Frames de vï¿½deo (FIFO)\n", malloc_ns / ring_ns);
+    printf("  Freelist       | ~%.0fx    | Conexï¿½es, objetos de tamanho fixo\n", malloc_ns / freelist_ns);
     printf("  Slab           | ~%.0fx   | Buffers I/O de tamanhos variados\n", malloc_ns / slab_ns);
     printf("\n");
 }
 
 
 
-int main(void) 
+extern void test_task_handler_run(void);
+
+int main(void)
 {
-    malloc_test();
+    //malloc_test();
+
+    test_task_handler_run();
 
 
 

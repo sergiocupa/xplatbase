@@ -26,12 +26,12 @@ extern "C" {
 
 	typedef volatile LONG xatomic_int;
 
-	__forceinline void atomic_initialize(xatomic_int* s, int val);
-	__forceinline void atomic_set(xatomic_int* s, int val);
-	__forceinline int  atomic_get(xatomic_int* s);
-	__forceinline int  atomic_sub(xatomic_int* s, int val);
-	__forceinline int  atomic_add(xatomic_int* s, int val);
-	__forceinline int  atomic_cas(xatomic_int* s, int* expected, int desired);
+	XPLATBASE_API void atomic_initialize(xatomic_int* s, int val);
+	XPLATBASE_API void atomic_set(xatomic_int* s, int val);
+	XPLATBASE_API int  atomic_get(xatomic_int* s);
+	XPLATBASE_API int  atomic_sub(xatomic_int* s, int val);
+	XPLATBASE_API int  atomic_add(xatomic_int* s, int val);
+	XPLATBASE_API int  atomic_cas(xatomic_int* s, int* expected, int desired);
 
 #else 
 

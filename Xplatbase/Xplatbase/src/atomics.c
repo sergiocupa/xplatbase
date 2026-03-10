@@ -5,32 +5,32 @@
 
 
 
-__forceinline void atomic_initialize(xatomic_int* s, int val)
+void atomic_initialize(xatomic_int* s, int val)
 {
     *s = (LONG)val; 
 }
 
-__forceinline void atomic_set(xatomic_int* s, int val)
+void atomic_set(xatomic_int* s, int val)
 {
     InterlockedExchange(s, (LONG)val);
 }
 
-__forceinline int atomic_get(xatomic_int* s)
+int atomic_get(xatomic_int* s)
 {
     return (int)ReadAcquire(s);
 }
 
-__forceinline int atomic_add(xatomic_int* s, int val)
+int atomic_add(xatomic_int* s, int val)
 {
     return (int)InterlockedExchangeAddNoFence(s, (LONG)val);
 }
 
-__forceinline int atomic_sub(xatomic_int* s, int val)
+int atomic_sub(xatomic_int* s, int val)
 {
     return (int)InterlockedExchange(s, -(LONG)val);
 }
 
-__forceinline int atomic_cas(xatomic_int* s, int* expected, int desired)
+int atomic_cas(xatomic_int* s, int* expected, int desired)
 {
     LONG old = InterlockedCompareExchange(s, (LONG)desired, (LONG)*expected);
     if (old == (LONG)*expected)
