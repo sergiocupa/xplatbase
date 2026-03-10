@@ -12,7 +12,22 @@
     <ClInclude Include="include\xplatbase.h">
       <Filter>include</Filter>
     </ClInclude>
+    <ClInclude Include="src\atomics.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="src\event_handler.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ring_queue.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="src\thread_wait.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="src\thread_handler.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="src\task_handler.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="src\memory_handler.h">
@@ -21,54 +36,39 @@
     <ClInclude Include="src\memory_pool.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="src\ring_queue.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="src\task_handler.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="src\thread_handler.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="src\thread_wait.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="src\atomics.h">
-      <Filter>src</Filter>
-    </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\xplatbase.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\atomics.c">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="src\event_handler.c">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="src\ring_queue.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\thread_wait.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\thread_handler.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\task_handler.c">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="src\list_hander.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\string_handler.c">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="src\memory_handler.c">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="src\memory_pool.c">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="src\ring_queue.c">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="src\string_handler.c">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="src\task_handler.c">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="src\thread_handler.c">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="src\thread_wait.c">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="src\xplatbase.c">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="src\atomics.c">
       <Filter>src</Filter>
     </ClCompile>
   </ItemGroup>

@@ -14,7 +14,7 @@
 
 #include "../include/xplatbase.h"
 #include "event_handler.h"
-#include "memory_handler.h"
+//#include "memory_handler.h"
 #include <stdio.h>
 #include <stdlib.h>
 

@@ -1,6 +1,5 @@
 #include "thread_wait.h"
 #include <stdbool.h>
-//#include <stdatomic.h>
 
 /* ======================================================================== */
 /*  CPU pause/yield                                                         */
@@ -39,7 +38,7 @@ static fn_NtAlertThreadByThreadId   xwait__alert_fn;
 
 
 /* Init - chamar uma vez */
-inline bool thread_wait_init(void)
+inline boolean thread_wait_init(void)
 {
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     if (!ntdll)
@@ -65,7 +64,7 @@ inline void thread_wait_sleep(xwait_t* w)
 }
 
 /* Dorme com timeout (microsegundos). true = acordou por wake, false = timeout */
-inline bool thread_wait_sleep_for(xwait_t* w, long long timeout_us)
+inline boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
 {
     (void)w;
     LARGE_INTEGER li;
@@ -94,7 +93,7 @@ inline void thread_wait_wake(xwait_t* w)
 #include <errno.h>
 
 /* Init - futex nao precisa */
-inline bool thread_wait_init(void)
+inline boolean thread_wait_init(void)
 {
     return true;
 }
@@ -116,7 +115,7 @@ inline void thread_wait_sleep(xwait_t* w)
 }
 
 /* Dorme com timeout (microsegundos). true = acordou por wake, false = timeout */
-inline bool thread_wait_sleep_for(xwait_t* w, long long timeout_us)
+inline boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
 {
     struct timespec ts;
     ts.tv_sec = timeout_us / 1000000LL;

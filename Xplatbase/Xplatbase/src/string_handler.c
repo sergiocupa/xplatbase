@@ -13,7 +13,7 @@
 //  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 
 #include "../include/xplatbase.h"
-#include "memory_handler.h"
+//#include "memory_handler.h"
 #include "event_handler.h"
 
 

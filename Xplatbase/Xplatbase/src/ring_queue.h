@@ -20,7 +20,9 @@
 extern "C" {
 #endif
 
-    typedef struct
+    #include "atomics.h"
+
+    typedef struct _RingQueue
     {
         xatomic_int head;
         xatomic_int tail;
@@ -30,17 +32,17 @@ extern "C" {
     RingQueue;
 
 
-    inline void ring_queue_init(RingQueue* r, int capacity);
-    inline int  ring_queue_count(RingQueue* r);
-    inline bool ring_queue_empty(RingQueue* r);
-    inline bool ring_queue_full(RingQueue* r);
-    inline int  ring_queue_free(RingQueue* r);
-    inline int  ring_queue_pos(RingQueue* r, int index);
-    inline bool ring_queue_push_(RingQueue* r, void* buffer, const void* item, int item_size);
-    inline bool ring_queue_pop_(RingQueue* r, void* buffer, void* item, int item_size);
-    inline bool ring_queue_peek_(RingQueue* r, void* buffer, void* item, int item_size);
-    inline bool ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item, int item_size);
-    inline bool ring_queue_pop_mc_(RingQueue* r, void* buffer, void* item, int item_size);
+    inline void    ring_queue_init(RingQueue* r, int capacity);
+    inline int     ring_queue_count(RingQueue* r);
+    inline boolean ring_queue_empty(RingQueue* r);
+    inline boolean ring_queue_full(RingQueue* r);
+    inline int     ring_queue_free(RingQueue* r);
+    inline int     ring_queue_pos(RingQueue* r, int index);
+    inline boolean ring_queue_push_(RingQueue* r, void* buffer, const void* item, int item_size);
+    inline boolean ring_queue_pop_(RingQueue* r, void* buffer, void* item, int item_size);
+    inline boolean ring_queue_peek_(RingQueue* r, void* buffer, void* item, int item_size);
+    inline boolean ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item, int item_size);
+    inline boolean ring_queue_pop_mc_(RingQueue* r, void* buffer, void* item, int item_size);
 
 
     #define xring_push(r, buffer, item_ptr)    ring_queue_push_((r), (buffer), (item_ptr), sizeof(*(item_ptr)))

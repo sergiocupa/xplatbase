@@ -22,6 +22,34 @@ extern "C" {
 
     #include "atomics.h"
     #include "ring_queue.h"
+    #include "thread_wait.h"
+
+
+    /* ── Configuração ── */
+
+    #ifndef INITIAL_SHARD_COUNT
+    #define INITIAL_SHARD_COUNT     8
+    #endif
+    #ifndef MAX_SHARD_COUNT
+    #define MAX_SHARD_COUNT         64
+    #endif
+    #ifndef SHARD_CAPACITY
+    #define SHARD_CAPACITY          1024
+    #endif
+    #ifndef MAX_WORKER_COUNT
+    #define MAX_WORKER_COUNT        64
+    #endif
+
+    /* Pressão: se shard ultrapassar este % de ocupação, acorda o monitor */
+    #ifndef PRESSURE_THRESHOLD
+    #define PRESSURE_THRESHOLD      50
+    #endif
+
+    /* Quantos shards o monitor cria por vez */
+    #ifndef EXPAND_BATCH
+    #define EXPAND_BATCH            2
+    #endif
+
 
 
     #define TASKS_PER_QUEUE  1024
@@ -37,44 +65,85 @@ extern "C" {
     /* ── Cache line padding ── */
     #define CACHE_LINE 64
 
-    typedef struct
+    typedef struct _Task
     {
-        void (*fn)(void* arg);
+        void (*fn)(void*);
         void* arg;
     }
     Task;
 
+
+    xatomic_int x = 0;
+
+
+    typedef struct _Shard
+    {
+        Task*     buffer;
+        RingQueue ring;
+        char      pad[64];
+    }
+    Shard;
+
+
     typedef struct {
+        xwait_t     wait;           /* handle para sleep/wake */
+        xatomic_int sleeping;       /* 1 = dormindo, 0 = acordado */
+    } WorkerCtx;
+
+
+    typedef struct _ShardedPool
+    {
+        /* Shards */
+        Shard* shards[MAX_SHARD_COUNT];
+        xatomic_int  shard_count;
+
+        /* Índices globais */
+        xatomic_int  submit_idx;
+        xatomic_int  running;
+        xatomic_int  pending;
+        xatomic_int  submit_fail_count;
+
+        /* Workers */
+        WorkerCtx   workers[MAX_WORKER_COUNT];
+        int         worker_count;
+
+        #ifdef _WIN32
+           HANDLE      threads[MAX_WORKER_COUNT];
+        #else
+           pthread_t   threads[MAX_WORKER_COUNT];
+        #endif
+
+        void* worker_args[MAX_WORKER_COUNT][2];
+
+        /* Monitor de expansão */
+        xwait_t      monitor_wait;           /* sleep/wake do monitor */
+        xatomic_int  monitor_sleeping;       /* 1 = dormindo */
+        xatomic_int  expand_requested;       /* 1 = alguém pediu expansão */
+        xatomic_int  expand_count;           /* total de shards criados pelo monitor */
+
+        #ifdef _WIN32
+           HANDLE      monitor_thread;
+        #else
+           pthread_t   monitor_thread;
+        #endif
+
+    } ShardedPool;
+
+
+    typedef struct 
+    {
         RingQueue ring;
         Task      buffer[TASKS_PER_QUEUE];
         WorkerCtx worker;
     } Queue;
 
-    typedef struct {
+
+    typedef struct 
+    {
         Queue       queues[QUEUE_COUNT];
         xatomic_int submit_idx;
         xatomic_int running;
     } Pool;
-
-
-    xatomic_int x = 0;
-
-    /* ── Shard: fila independente, tudo atômico, sem lock ── */
-    typedef struct {
-        _Alignas(CACHE_LINE) Task        buffer[TASKS_PER_SHARD];
-        _Alignas(CACHE_LINE) xatomic_int  head;   /* consumidores */
-        _Alignas(CACHE_LINE) xatomic_int  tail;   /* produtores */
-        _Alignas(CACHE_LINE) xatomic_int  count;  /* tarefas disponíveis */
-    } Shard;
-
-    /* ── Pool ── */
-    typedef struct {
-        Shard       shards[SHARD_COUNT];
-        xatomic_int  submit_idx;    /* round-robin para submit */
-        xatomic_int  running;       /* flag de shutdown */
-        xatomic_int  pending;       /* total de tarefas pendentes */
-    } ShardedPool;
-
 
 
 

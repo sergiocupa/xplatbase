@@ -1,5 +1,4 @@
 #include "ring_queue.h"
-#include "atomics.h"
 
 
 inline void ring_queue_init(RingQueue* r, int capacity)
@@ -20,13 +19,13 @@ inline int ring_queue_count(RingQueue* r)
 }
 
 
-inline bool ring_queue_empty(RingQueue* r)
+inline boolean ring_queue_empty(RingQueue* r)
 {
     return ring_queue_count(r) == 0;
 }
 
 
-inline bool ring_queue_full(RingQueue* r)
+inline boolean ring_queue_full(RingQueue* r)
 {
     return ring_queue_count(r) >= r->capacity;
 }
@@ -44,7 +43,7 @@ inline int ring_queue_pos(RingQueue* r, int index)
 }
 
 
-inline bool ring_queue_push_(RingQueue* r, void* buffer, const void* item, int item_size)
+inline boolean ring_queue_push_(RingQueue* r, void* buffer, const void* item, int item_size)
 {
     if (ring_queue_full(r))
         return false;
@@ -58,7 +57,7 @@ inline bool ring_queue_push_(RingQueue* r, void* buffer, const void* item, int i
 }
 
 
-inline bool ring_queue_pop_(RingQueue* r, void* buffer, void* item, int item_size)
+inline boolean ring_queue_pop_(RingQueue* r, void* buffer, void* item, int item_size)
 {
     if (ring_queue_empty(r)) return false;
 
@@ -71,7 +70,7 @@ inline bool ring_queue_pop_(RingQueue* r, void* buffer, void* item, int item_siz
 }
 
 
-inline bool ring_queue_peek_(RingQueue* r, void* buffer, void* item, int item_size)
+inline boolean ring_queue_peek_(RingQueue* r, void* buffer, void* item, int item_size)
 {
     if (ring_queue_empty(r)) return false;
 
@@ -83,7 +82,7 @@ inline bool ring_queue_peek_(RingQueue* r, void* buffer, void* item, int item_si
 }
 
 
-inline bool ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item, int item_size)
+inline boolean ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item, int item_size)
 {
     int t, h;
     do 
@@ -101,7 +100,7 @@ inline bool ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item, in
 }
 
 
-inline bool ring_queue_pop_mc_(RingQueue* r, void* buffer, void* item, int item_size)
+inline boolean ring_queue_pop_mc_(RingQueue* r, void* buffer, void* item, int item_size)
 {
     int h, t;
     do 
@@ -117,3 +116,4 @@ inline bool ring_queue_pop_mc_(RingQueue* r, void* buffer, void* item, int item_
     memcpy(item, (char*)buffer + pos * item_size, item_size);
     return true;
 }
+
