@@ -74,7 +74,7 @@ typedef struct
     int              task_id;
     int              sleep_ms;          /* duracao simulada da task      */
     volatile int     executed;          /* 0=pendente, 1=ok, -1=submit fail */
-    uint64_t         submit_ns;
+    //uint64_t         submit_ns;
     uint64_t         start_ns;
     uint64_t         end_ns;
     uint64_t         exec_duration_ns;
@@ -86,10 +86,8 @@ static void task_fn(void* arg)
 {
     TaskArg* t = (TaskArg*)arg;
 
-    t->start_ns         = tth_get_ns();
-    tth_sleep_ms(t->sleep_ms);
-    t->end_ns           = tth_get_ns();
-    t->exec_duration_ns = t->end_ns - t->start_ns;
+    //t->end_ns           = tth_get_ns();
+   // t->exec_duration_ns = t->end_ns - t->start_ns;
     t->executed         = 1;
 
     tth_counter_inc(t->done_counter);
@@ -146,10 +144,16 @@ static void test_mass_tasks(void)
             args[i].sleep_ms     = rand() % 10;  /* 0-9 ms aleatorio */
             args[i].executed     = 0;
             args[i].done_counter = &done_count;
-            args[i].submit_ns    = tth_get_ns();
+   
+            tth_sleep_ms(args[i].sleep_ms);
+
+            args[i].start_ns = tth_get_ns();
 
             if (!pool_submit(&pool, task_fn, &args[i]))
             {
+                args[i].end_ns           = tth_get_ns();
+                args[i].exec_duration_ns = args[i].end_ns - args[i].start_ns;
+
                 args[i].executed = -1;
                 submit_failed++;
                 tth_counter_inc(&done_count);  /* contabiliza para nao travar o wait */
@@ -197,26 +201,23 @@ static void test_mass_tasks(void)
 
         double wall_ms  = (double)(wall_end - wall_start) / 1e6;
         double total_ms = (double)total_exec               / 1e6;
-        double avg_us   = exec_ok ? (double)total_exec / (double)exec_ok / 1000.0 : 0.0;
-        double min_us   = (min_exec != UINT64_MAX) ? (double)min_exec / 1000.0 : 0.0;
-        double max_us   = (double)max_exec / 1000.0;
+        double avg_us   = exec_ok ? (double)total_exec / (double)exec_ok : 0.0;
+        double min_us   = (min_exec != UINT64_MAX) ? (double)min_exec : 0.0;
+        double max_us = (double)max_exec;
 
         char status = (exec_fail == 0 && submit_failed == 0) ? ' ' : '!';
 
-        printf("[%c] Workers: %2d | Submetidas: %4d | OK: %4d | Falhas exec: %d | Falhas submit: %d\n",
-               status, workers, TEST_TASK_COUNT, exec_ok, exec_fail, submit_failed);
+        printf("[%c] Workers: %2d | Submetidas: %4d | OK: %4d | Falhas exec: %d | Falhas submit: %d\n", status, workers, TEST_TASK_COUNT, exec_ok, exec_fail, submit_failed);
         printf("     Tempo parede : %8.1f ms\n",   wall_ms);
         printf("     Total exec   : %8.1f ms  (soma de todas as tasks)\n", total_ms);
         if (exec_ok > 0)
         {
-            printf("     Media / task : %8.1f us  |  Min: %6.1f us  |  Max: %6.1f us\n",
-                   avg_us, min_us, max_us);
+            printf("     Media / task : %8.1f us  |  Min: %6.1f us  |  Max: %6.1f us\n", avg_us, min_us, max_us);
         }
 
         if (exec_fail > 0 || submit_failed > 0)
         {
-            printf("  *** ATENCAO: %d tasks nao executadas, %d falhas de submit ***\n",
-                   exec_fail, submit_failed);
+            printf("  *** ATENCAO: %d tasks nao executadas, %d falhas de submit ***\n", exec_fail, submit_failed);
         }
 
         printf("\n");

@@ -258,7 +258,10 @@ boolean pool_init(ShardedPool* pool, int worker_count)
     for (int i = 0; i < worker_count; i++) atomic_set(&pool->workers[i].sleeping, 0);
 
 
-    if(!thread_create(&pool->monitor_thread, monitor_expand_fn, pool)) return false;
+    if (!thread_create(&pool->monitor_thread, monitor_expand_fn, pool))
+    {
+        return false;
+    }
 
 
     /* Lança worker threads */
