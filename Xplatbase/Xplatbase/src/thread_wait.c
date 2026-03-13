@@ -36,15 +36,19 @@ typedef NTSTATUS(NTAPI* fn_NtAlertThreadByThreadId)(HANDLE);
 static fn_NtWaitForAlertByThreadId  xwait__wait_fn;
 static fn_NtAlertThreadByThreadId   xwait__alert_fn;
 
+static boolean SpinMode;
+
 
 /* Init - chamar uma vez */
-boolean thread_wait_init(void)
+boolean thread_wait_init(boolean fast_mode)
 {
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     if (!ntdll)
         return false;
 
-    xwait__wait_fn = (fn_NtWaitForAlertByThreadId)GetProcAddress(ntdll, "NtWaitForAlertByThreadId");
+	SpinMode = fast_mode;
+
+    xwait__wait_fn  = (fn_NtWaitForAlertByThreadId)GetProcAddress(ntdll, "NtWaitForAlertByThreadId");
     xwait__alert_fn = (fn_NtAlertThreadByThreadId)GetProcAddress(ntdll, "NtAlertThreadByThreadId");
 
     return (xwait__wait_fn != NULL && xwait__alert_fn != NULL);
@@ -56,11 +60,35 @@ void thread_wait_prepare(xwait_t* w)
     w->thread_id = GetCurrentThreadId();
 }
 
+
+static inline void xwait_spin_sleep(xwait_t* w)
+{
+    while (atomic_get(&w->signal) == 0)
+    {
+        xwait_cpu_pause();
+    }
+
+    atomic_set(&w->signal, 0);
+}
+
+static inline void xwait_spin_wake(xwait_t* w)
+{
+    atomic_set(&w->signal, 1);
+}
+
+
 /* Dorme ate ser acordada - sem loop, NT nao tem spurious wakeup */
 void thread_wait_sleep(xwait_t* w)
 {
-    (void)w;
-    xwait__wait_fn(NULL, NULL);
+    if (SpinMode)
+    {
+        xwait_spin_sleep(w);
+    }
+    else
+    {
+        (void)w;
+        xwait__wait_fn(NULL, NULL);
+    }
 }
 
 /* Dorme com timeout (microsegundos). true = acordou por wake, false = timeout */
@@ -77,7 +105,14 @@ boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
 /* Acorda a thread */
 void thread_wait_wake(xwait_t* w)
 {
-    xwait__alert_fn((HANDLE)(ULONG_PTR)w->thread_id);
+    if (SpinMode)
+    {
+        xwait_spin_wake(w);
+    }
+    else
+    {
+        xwait__alert_fn((HANDLE)(ULONG_PTR)w->thread_id);
+    }
 }
 
 /* ======================================================================== */
@@ -145,21 +180,5 @@ inline void thread_wait_wake(xwait_t* w)
 #error "Plataforma nao suportada. Requer Windows ou Linux."
 #endif
 
-/* ======================================================================== */
-/*  Comum - spin + sleep                                                    */
-/* ======================================================================== */
 
-/* Gira checando *flag por spin_count iteracoes, se nao mudar, dorme */
-//static inline void xwait_sleep_spin(xwait_t* w, atomic_int* flag, int spin_count)
-//{
-//    for (int i = 0; i < spin_count; i++) {
-//        if (atomic_load_explicit(flag, memory_order_acquire))
-//            return;
-//        xwait_cpu_pause();
-//    }
-//
-//    if (atomic_load_explicit(flag, memory_order_acquire))
-//        return;
-//
-//    xwait_sleep(w);
-//}
+
