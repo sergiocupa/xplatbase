@@ -21,25 +21,27 @@ extern "C" {
 #endif
 
     #include "../include/xplatbase.h"
-    #include "thread_wait.h"
+    #include "atomics.h"
 
 
     #ifdef XPLATBASE_WIN
 
         typedef struct {
             DWORD thread_id;
+            xatomic_int signal;
         } xwait_t;
 
     #else 
 
         typedef struct {
             atomic_int futex_val;   /* 0 = sleeping, 1 = signaled */
+            xatomic_int signal;
         } xwait_t;
 
     #endif
 
 
-    XPLATBASE_API boolean thread_wait_init(void);
+    XPLATBASE_API boolean thread_wait_init(boolean fast_mode);
     XPLATBASE_API void    thread_wait_prepare(xwait_t* w);
     XPLATBASE_API void    thread_wait_sleep(xwait_t* w);
     XPLATBASE_API boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us);

@@ -42,6 +42,59 @@
 
 /* ────────────────────────────── timing ────────────────────────────── */
 
+    static double    tsc_ns_ratio = 1.0;   /* cycles → ns */
+    static uint64_t  tsc_overhead = 0;     /* custo de uma chamada __rdtsc */
+
+    static void tsc_calibrate()
+    {
+        /* ── Calibrar frequência: rdtsc vs QPC ── */
+        LARGE_INTEGER freq, t0, t1;
+        QueryPerformanceFrequency(&freq);
+
+        uint64_t c0 = __rdtsc();
+        QueryPerformanceCounter(&t0);
+
+        /* Espera 50ms para ter amostra boa */
+        Sleep(50);
+
+        uint64_t c1 = __rdtsc();
+        QueryPerformanceCounter(&t1);
+
+        double elapsed_ns = (double)(t1.QuadPart - t0.QuadPart) * 1e9 / (double)freq.QuadPart;
+        double elapsed_cycles = (double)(c1 - c0);
+
+        tsc_ns_ratio = elapsed_ns / elapsed_cycles;   /* ns por ciclo */
+
+        /* ── Calibrar overhead: menor de N amostras ── */
+        uint64_t min_overhead = UINT64_MAX;
+        for (int i = 0; i < 1000; i++)
+        {
+            uint64_t a = __rdtsc();
+            uint64_t b = __rdtsc();
+            uint64_t diff = b - a;
+            if (diff < min_overhead)
+                min_overhead = diff;
+        }
+        tsc_overhead = min_overhead;
+    }
+
+    /* Leitura compensada: subtrai overhead e converte para ns */
+    static inline uint64_t tsc_now()
+    {
+        return __rdtsc();
+    }
+
+    static inline double tsc_elapsed_ns(uint64_t start, uint64_t end)
+    {
+        uint64_t cycles = (end - start);
+        if (cycles > tsc_overhead)
+            cycles -= tsc_overhead;
+        else
+            cycles = 0;
+        return (double)cycles * tsc_ns_ratio;
+    }
+
+
 static uint64_t tth_get_ns(void)
 {
 #ifdef _WIN32
@@ -85,25 +138,34 @@ typedef struct
 static void task_fn(void* arg)
 {
     TaskArg* t = (TaskArg*)arg;
-
-    //t->end_ns           = tth_get_ns();
-   // t->exec_duration_ns = t->end_ns - t->start_ns;
+    t->end_ns           = tsc_now();
+    t->exec_duration_ns = tsc_elapsed_ns(t->start_ns, t->end_ns);
     t->executed         = 1;
+    tth_counter_inc(t->done_counter);
+}
 
+void CALLBACK my_task(PTP_CALLBACK_INSTANCE instance, PVOID context, PTP_WORK work)
+{
+    TaskArg* t = (TaskArg*)context;
+    t->end_ns = tsc_now();
+    t->exec_duration_ns = tsc_elapsed_ns(t->start_ns, t->end_ns);
+    t->executed = 1;
     tth_counter_inc(t->done_counter);
 }
 
 /* ──────────────────────────── configuracoes ────────────────────────── */
 
-#define TEST_TASK_COUNT  500
+#define TEST_TASK_COUNT  10000
 
-static int worker_configs[]     = { 2, 4, 8, 16 };
+static int worker_configs[]     = { 8 };// { 2, 4, 8, 16, 32, 64, 128 };
 static int worker_configs_count = (int)(sizeof(worker_configs) / sizeof(worker_configs[0]));
 
 /* ───────────────────────────── mass test ───────────────────────────── */
 
 static void test_mass_tasks(void)
 {
+    tsc_calibrate();
+
     printf("\n");
     printf("================================================================================\n");
     printf("  MASS TASK TEST  -  %d tasks por execucao\n", TEST_TASK_COUNT);
@@ -147,16 +209,13 @@ static void test_mass_tasks(void)
    
             tth_sleep_ms(args[i].sleep_ms);
 
-            args[i].start_ns = tth_get_ns();
+            args[i].start_ns = tsc_now();
 
             if (!pool_submit(&pool, task_fn, &args[i]))
             {
-                args[i].end_ns           = tth_get_ns();
-                args[i].exec_duration_ns = args[i].end_ns - args[i].start_ns;
-
                 args[i].executed = -1;
                 submit_failed++;
-                tth_counter_inc(&done_count);  /* contabiliza para nao travar o wait */
+                tth_counter_inc(&done_count);
             }
         }
 
@@ -166,8 +225,7 @@ static void test_mass_tasks(void)
         {
             if (tth_get_ns() > deadline)
             {
-                printf("[TIMEOUT] workers=%d  done=%ld/%d\n",
-                       workers, (long)tth_counter_read(&done_count), TEST_TASK_COUNT);
+                printf("[TIMEOUT] workers=%d  done=%ld/%d\n", workers, (long)tth_counter_read(&done_count), TEST_TASK_COUNT);
                 break;
             }
             tth_sleep_ms(1);
@@ -201,9 +259,9 @@ static void test_mass_tasks(void)
 
         double wall_ms  = (double)(wall_end - wall_start) / 1e6;
         double total_ms = (double)total_exec               / 1e6;
-        double avg_us   = exec_ok ? (double)total_exec / (double)exec_ok : 0.0;
-        double min_us   = (min_exec != UINT64_MAX) ? (double)min_exec : 0.0;
-        double max_us = (double)max_exec;
+        double avg_us   = exec_ok ? ((double)total_exec / (double)exec_ok) / 1000.0 : 0.0;
+        double min_us   = (min_exec != UINT64_MAX) ? ((double)min_exec / 1000.0) : 0.0;
+        double max_us   = (double)max_exec / 1000.0;
 
         char status = (exec_fail == 0 && submit_failed == 0) ? ' ' : '!';
 
@@ -212,7 +270,7 @@ static void test_mass_tasks(void)
         printf("     Total exec   : %8.1f ms  (soma de todas as tasks)\n", total_ms);
         if (exec_ok > 0)
         {
-            printf("     Media / task : %8.1f us  |  Min: %6.1f us  |  Max: %6.1f us\n", avg_us, min_us, max_us);
+            printf("     Media / task : %8.1f us  |  Min: %8.4f us  |  Max: %8.4f us\n", avg_us, min_us, max_us);
         }
 
         if (exec_fail > 0 || submit_failed > 0)

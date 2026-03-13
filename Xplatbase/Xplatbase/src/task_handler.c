@@ -29,6 +29,7 @@ static inline Shard* shard_create(int capacity)
 static inline void shard_destroy(Shard* s)
 {
     if (!s) return;
+    ring_queue_destroy(&s->ring);
     free(s->buffer);
     free(s);
 }
@@ -92,13 +93,14 @@ static void* monitor_expand_fn(void* arg)
             Shard* s = shard_create(SHARD_CAPACITY);
             if (!s) break;
 
+            pool->shards[current] = s;  /* escreve o ponteiro ANTES de tornar o shard visível */
             if (atomic_cas(&pool->shard_count, &current, current + 1))
             {
-                pool->shards[current] = s;
                 created++;
             }
             else
             {
+                pool->shards[current] = NULL;  /* desfaz se CAS falhou */
                 shard_destroy(s);
                 i--;
             }
@@ -198,6 +200,8 @@ static void* worker_fn(void* arg)
     WorkerCtx* ctx = &pool->workers[worker_id];
     Task         task;
 
+    SetThreadPriority(pool->threads[worker_id], THREAD_PRIORITY_TIME_CRITICAL);
+
     thread_wait_prepare(&ctx->wait);
 
     while (atomic_get(&pool->running))
@@ -230,7 +234,7 @@ static void* worker_fn(void* arg)
 boolean pool_init(ShardedPool* pool, int worker_count)
 {
     memset(pool, 0, sizeof(ShardedPool));
-    thread_wait_init();
+    thread_wait_init(false);
 
     if (worker_count > MAX_WORKER_COUNT) worker_count = MAX_WORKER_COUNT;
 

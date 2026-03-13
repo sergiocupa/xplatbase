@@ -1,4 +1,4 @@
-//  MIT License – Modified for Mandatory Attribution
+//  MIT License ï¿½ Modified for Mandatory Attribution
 //  
 //  Copyright(c) 2025 Sergio Paludo
 //
@@ -7,8 +7,8 @@
 //  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, 
 //  to use, copy, modify, merge, publish, distribute, and sublicense the software, including for commercial purposes, provided that:
 //  
-//     01. The original author’s credit is retained in all copies of the source code;
-//     02. The original author’s credit is included in any code generated, derived, or distributed from this software, including templates, libraries, or code - generating scripts.
+//     01. The original authorï¿½s credit is retained in all copies of the source code;
+//     02. The original authorï¿½s credit is included in any code generated, derived, or distributed from this software, including templates, libraries, or code - generating scripts.
 //  
 //  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 
@@ -24,15 +24,17 @@ extern "C" {
 
     typedef struct _RingQueue
     {
-        xatomic_int head;
-        xatomic_int tail;
-        int         capacity;
-        int         mask;
+        xatomic_int  head;
+        xatomic_int  tail;
+        int          capacity;
+        int          mask;
+        xatomic_int* seqno;   /* sequence number por slot (algoritmo Vyukov MPMC) */
     }
     RingQueue;
 
 
     XPLATBASE_API void    ring_queue_init(RingQueue* r, int capacity);
+    XPLATBASE_API void    ring_queue_destroy(RingQueue* r);
     XPLATBASE_API int     ring_queue_count(RingQueue* r);
     XPLATBASE_API boolean ring_queue_empty(RingQueue* r);
     XPLATBASE_API boolean ring_queue_full(RingQueue* r);
