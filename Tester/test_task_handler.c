@@ -155,10 +155,81 @@ void CALLBACK my_task(PTP_CALLBACK_INSTANCE instance, PVOID context, PTP_WORK wo
 
 /* ──────────────────────────── configuracoes ────────────────────────── */
 
-#define TEST_TASK_COUNT  10000
+#define TEST_TASK_COUNT  100
+
+  // Com mais de 100, comeca ao indicador MAX do tempo de execução filar maior que 5ms.
+  //   Verificar se tem solução, de manter picos maximo com tempo de execução maixo. Criar contador de picos min/max, para avaliar a porcentagem.
+#define TEST_THREADS     10
+
 
 static int worker_configs[]     = { 8 };// { 2, 4, 8, 16, 32, 64, 128 };
 static int worker_configs_count = (int)(sizeof(worker_configs) / sizeof(worker_configs[0]));
+
+/* ──────────────────────── submit thread (paralelo) ─────────────────── */
+
+typedef struct
+{
+    ShardedPool*    pool;
+    TaskArg*        args;           /* fatia de TEST_TASK_COUNT args deste thread */
+    tth_counter_t*  done_counter;
+    tth_counter_t*  submit_failed;
+    int             thread_idx;
+} SubmitThreadArg;
+
+#ifdef _WIN32
+
+    static DWORD WINAPI submit_thread_fn(void* raw)
+    {
+        SubmitThreadArg* sta = (SubmitThreadArg*)raw;
+        for (int i = 0; i < TEST_TASK_COUNT; i++)
+        {
+            TaskArg* t  = &sta->args[i];
+            t->sleep_ms = rand() % 10;
+            tth_sleep_ms(t->sleep_ms);
+            t->start_ns = tsc_now();
+            if (!pool_submit(sta->pool, task_fn, t))
+            {
+                t->executed = -1;
+                tth_counter_inc(sta->submit_failed);
+                tth_counter_inc(sta->done_counter);
+            }
+        }
+        return 0;
+    }
+
+    typedef HANDLE tth_thread_t;
+    #define tth_thread_start(h, arg)  ((h) = CreateThread(NULL, 0, submit_thread_fn, (arg), 0, NULL))
+    #define tth_thread_join(h)        do { WaitForSingleObject((h), INFINITE); CloseHandle(h); } while (0)
+
+#else
+
+    #include <pthread.h>
+
+    static void* submit_thread_fn(void* raw)
+    {
+        SubmitThreadArg* sta = (SubmitThreadArg*)raw;
+        unsigned seed = (unsigned)(uintptr_t)raw;
+        for (int i = 0; i < TEST_TASK_COUNT; i++)
+        {
+            TaskArg* t  = &sta->args[i];
+            t->sleep_ms = rand_r(&seed) % 10;
+            tth_sleep_ms(t->sleep_ms);
+            t->start_ns = tsc_now();
+            if (!pool_submit(sta->pool, task_fn, t))
+            {
+                t->executed = -1;
+                tth_counter_inc(sta->submit_failed);
+                tth_counter_inc(sta->done_counter);
+            }
+        }
+        return NULL;
+    }
+
+    typedef pthread_t tth_thread_t;
+    #define tth_thread_start(h, arg)  pthread_create(&(h), NULL, submit_thread_fn, (arg))
+    #define tth_thread_join(h)        pthread_join((h), NULL)
+
+#endif
 
 /* ───────────────────────────── mass test ───────────────────────────── */
 
@@ -166,15 +237,27 @@ static void test_mass_tasks(void)
 {
     tsc_calibrate();
 
+    int total_tasks = TEST_TASK_COUNT * TEST_THREADS;
+
     printf("\n");
     printf("================================================================================\n");
-    printf("  MASS TASK TEST  -  %d tasks por execucao\n", TEST_TASK_COUNT);
+    printf("  MASS TASK TEST  -  %d threads x %d tasks = %d tasks por execucao\n",
+           TEST_THREADS, TEST_TASK_COUNT, total_tasks);
     printf("================================================================================\n\n");
 
-    TaskArg* args = (TaskArg*)malloc(TEST_TASK_COUNT * sizeof(TaskArg));
+    TaskArg* args = (TaskArg*)malloc(total_tasks * sizeof(TaskArg));
     if (!args)
     {
         printf("[ERROR] malloc falhou para args\n");
+        return;
+    }
+
+    SubmitThreadArg* sta = (SubmitThreadArg*)malloc(TEST_THREADS * sizeof(SubmitThreadArg));
+    tth_thread_t*    handles = (tth_thread_t*)malloc(TEST_THREADS * sizeof(tth_thread_t));
+    if (!sta || !handles)
+    {
+        printf("[ERROR] malloc falhou para thread state\n");
+        free(args); free(sta); free(handles);
         return;
     }
 
@@ -192,44 +275,48 @@ static void test_mass_tasks(void)
             continue;
         }
 
-        tth_counter_t done_count = 0;
-        int           submit_failed = 0;
+        tth_counter_t done_count     = 0;
+        tth_counter_t submit_failed  = 0;
 
-        memset(args, 0, TEST_TASK_COUNT * sizeof(TaskArg));
+        memset(args, 0, total_tasks * sizeof(TaskArg));
+
+        /* Inicializa campos fixos de cada task */
+        for (int i = 0; i < total_tasks; i++)
+        {
+            args[i].task_id      = i;
+            args[i].executed     = 0;
+            args[i].done_counter = &done_count;
+        }
 
         uint64_t wall_start = tth_get_ns();
 
-        /* ── Loop interno: submissao serial de tasks ── */
-        for (int i = 0; i < TEST_TASK_COUNT; i++)
+        /* ── Cria TEST_THREADS threads de submit em paralelo ── */
+        for (int th = 0; th < TEST_THREADS; th++)
         {
-            args[i].task_id      = i;
-            args[i].sleep_ms     = rand() % 10;  /* 0-9 ms aleatorio */
-            args[i].executed     = 0;
-            args[i].done_counter = &done_count;
-   
-            tth_sleep_ms(args[i].sleep_ms);
-
-            args[i].start_ns = tsc_now();
-
-            if (!pool_submit(&pool, task_fn, &args[i]))
-            {
-                args[i].executed = -1;
-                submit_failed++;
-                tth_counter_inc(&done_count);
-            }
+            sta[th].pool          = &pool;
+            sta[th].args          = &args[th * TEST_TASK_COUNT];
+            sta[th].done_counter  = &done_count;
+            sta[th].submit_failed = &submit_failed;
+            sta[th].thread_idx    = th;
+            tth_thread_start(handles[th], &sta[th]);
         }
 
         /* ── Aguarda conclusao de todas as tasks (timeout 30s) ── */
         uint64_t deadline = tth_get_ns() + 30ULL * 1000000000ULL;
-        while (tth_counter_read(&done_count) < TEST_TASK_COUNT)
+        while (tth_counter_read(&done_count) < total_tasks)
         {
             if (tth_get_ns() > deadline)
             {
-                printf("[TIMEOUT] workers=%d  done=%ld/%d\n", workers, (long)tth_counter_read(&done_count), TEST_TASK_COUNT);
+                printf("[TIMEOUT] workers=%d  done=%ld/%d\n",
+                       workers, (long)tth_counter_read(&done_count), total_tasks);
                 break;
             }
             tth_sleep_ms(1);
         }
+
+        /* ── Aguarda todos os submit threads terminarem ── */
+        for (int th = 0; th < TEST_THREADS; th++)
+            tth_thread_join(handles[th]);
 
         uint64_t wall_end = tth_get_ns();
 
@@ -242,7 +329,7 @@ static void test_mass_tasks(void)
         uint64_t min_exec   = UINT64_MAX;
         uint64_t max_exec   = 0;
 
-        for (int i = 0; i < TEST_TASK_COUNT; i++)
+        for (int i = 0; i < total_tasks; i++)
         {
             if (args[i].executed == 1)
             {
@@ -263,24 +350,28 @@ static void test_mass_tasks(void)
         double min_us   = (min_exec != UINT64_MAX) ? ((double)min_exec / 1000.0) : 0.0;
         double max_us   = (double)max_exec / 1000.0;
 
-        char status = (exec_fail == 0 && submit_failed == 0) ? ' ' : '!';
+        long sf = (long)tth_counter_read(&submit_failed);
+        char status = (exec_fail == 0 && sf == 0) ? ' ' : '!';
 
-        printf("[%c] Workers: %2d | Submetidas: %4d | OK: %4d | Falhas exec: %d | Falhas submit: %d\n", status, workers, TEST_TASK_COUNT, exec_ok, exec_fail, submit_failed);
-        printf("     Tempo parede : %8.1f ms\n",   wall_ms);
+        printf("[%c] Workers: %2d | Threads submit: %3d | Submetidas: %5d | OK: %5d | Falhas exec: %d | Falhas submit: %ld\n",
+               status, workers, TEST_THREADS, total_tasks, exec_ok, exec_fail, sf);
+        printf("     Tempo parede : %8.1f ms\n", wall_ms);
         printf("     Total exec   : %8.1f ms  (soma de todas as tasks)\n", total_ms);
         if (exec_ok > 0)
         {
             printf("     Media / task : %8.1f us  |  Min: %8.4f us  |  Max: %8.4f us\n", avg_us, min_us, max_us);
         }
 
-        if (exec_fail > 0 || submit_failed > 0)
+        if (exec_fail > 0 || sf > 0)
         {
-            printf("  *** ATENCAO: %d tasks nao executadas, %d falhas de submit ***\n", exec_fail, submit_failed);
+            printf("  *** ATENCAO: %d tasks nao executadas, %ld falhas de submit ***\n", exec_fail, sf);
         }
 
         printf("\n");
     }
 
+    free(handles);
+    free(sta);
     free(args);
 }
 
