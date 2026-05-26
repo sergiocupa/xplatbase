@@ -1,4 +1,4 @@
-//  MIT License – Modified for Mandatory Attribution
+//  MIT License ï¿½ Modified for Mandatory Attribution
 //  
 //  Copyright(c) 2025 Sergio Paludo
 //
@@ -7,8 +7,8 @@
 //  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, 
 //  to use, copy, modify, merge, publish, distribute, and sublicense the software, including for commercial purposes, provided that:
 //  
-//     01. The original author’s credit is retained in all copies of the source code;
-//     02. The original author’s credit is included in any code generated, derived, or distributed from this software, including templates, libraries, or code - generating scripts.
+//     01. The original authorï¿½s credit is retained in all copies of the source code;
+//     02. The original authorï¿½s credit is included in any code generated, derived, or distributed from this software, including templates, libraries, or code - generating scripts.
 //  
 //  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 
@@ -84,6 +84,25 @@ extern "C" {
 		}
 
 	#endif
+
+    /* Utilitarios de plataforma usados internamente pela lib */
+    #ifdef XPLATBASE_WIN
+        static inline int  xcpu_count(void) { SYSTEM_INFO si; GetSystemInfo(&si); return (int)si.dwNumberOfProcessors; }
+        static inline void xcpu_pause(void) { YieldProcessor(); }
+        static inline void xsleep_ms(int ms) { Sleep((DWORD)(ms < 0 ? 0 : ms)); }
+    #else
+        #include <unistd.h>
+        #include <time.h>
+        static inline int  xcpu_count(void) { return (int)sysconf(_SC_NPROCESSORS_ONLN); }
+        #if defined(__x86_64__) || defined(__i386__)
+            static inline void xcpu_pause(void) { __asm__ __volatile__("pause" ::: "memory"); }
+        #elif defined(__aarch64__) || defined(__arm__)
+            static inline void xcpu_pause(void) { __asm__ __volatile__("yield" ::: "memory"); }
+        #else
+            static inline void xcpu_pause(void) { (void)0; }
+        #endif
+        static inline void xsleep_ms(int ms) { struct timespec ts = { ms/1000, (long)(ms%1000)*1000000L }; nanosleep(&ts, NULL); }
+    #endif
 
     //#include "../src/thread_handler.h"
     //#include "../src/atomics.h"

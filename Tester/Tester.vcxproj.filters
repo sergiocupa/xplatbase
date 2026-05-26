@@ -3,6 +3,9 @@
   <ItemGroup>
     <ClCompile Include="Tester.c" />
     <ClCompile Include="test_task_handler.c" />
+    <ClCompile Include="tbb_wrapper.cpp" />
+    <ClCompile Include="TesteFutex.c" />
+    <ClCompile Include="thread_pool_test.c" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="Tasks.txt" />

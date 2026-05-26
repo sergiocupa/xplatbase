@@ -36,6 +36,12 @@
     <ClInclude Include="src\memory_pool.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="src\thread_activity.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="src\thread_pool.h">
+      <Filter>src</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\xplatbase.c">
@@ -69,6 +75,15 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="src\memory_pool.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\thread_activity_win.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\thread_activity_linux.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\thread_pool.c">
       <Filter>src</Filter>
     </ClCompile>
   </ItemGroup>

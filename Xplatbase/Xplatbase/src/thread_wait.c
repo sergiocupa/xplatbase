@@ -115,11 +115,17 @@ void thread_wait_wake(xwait_t* w)
     }
 }
 
+/* Libera recursos da instancia (no-op no Windows — nada a desalocar) */
+void thread_wait_destroy(xwait_t* w)
+{
+    (void)w;
+}
+
 /* ======================================================================== */
 /*  Linux - futex syscall direta                                            */
 /* ======================================================================== */
 
-#elif 
+#elif defined(__linux__)
 
 #include <linux/futex.h>
 #include <sys/syscall.h>
@@ -128,9 +134,16 @@ void thread_wait_wake(xwait_t* w)
 #include <errno.h>
 
 /* Init - futex nao precisa */
-inline boolean thread_wait_init(void)
+inline boolean thread_wait_init(boolean fast_mode)
 {
+    (void)fast_mode;
     return true;
+}
+
+/* Libera recursos da instancia (no-op no Linux) */
+inline void thread_wait_destroy(xwait_t* w)
+{
+    (void)w;
 }
 
 /* Registrar thread antes de usar */

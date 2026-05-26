@@ -1,15 +1,15 @@
-﻿//  MIT License – Modified for Mandatory Attribution
-//  
+//  MIT License – Modified for Mandatory Attribution
+//
 //  Copyright(c) 2025 Sergio Paludo
 //
 //  github.com/sergiocupa
-//  
-//  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, 
+//
+//  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files,
 //  to use, copy, modify, merge, publish, distribute, and sublicense the software, including for commercial purposes, provided that:
-//  
-//     01. The original author’s credit is retained in all copies of the source code;
-//     02. The original author’s credit is included in any code generated, derived, or distributed from this software, including templates, libraries, or code - generating scripts.
-//  
+//
+//     01. The original author's credit is retained in all copies of the source code;
+//     02. The original author's credit is included in any code generated, derived, or distributed from this software, including templates, libraries, or code - generating scripts.
+//
 //  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 
 
@@ -30,14 +30,8 @@ extern "C" {
     #ifndef INITIAL_SHARD_COUNT
     #define INITIAL_SHARD_COUNT     8
     #endif
-    #ifndef MAX_SHARD_COUNT
-    #define MAX_SHARD_COUNT         64
-    #endif
     #ifndef SHARD_CAPACITY
     #define SHARD_CAPACITY          1024
-    #endif
-    #ifndef MAX_WORKER_COUNT
-    #define MAX_WORKER_COUNT        64
     #endif
 
     /* Pressão: se shard ultrapassar este % de ocupação, acorda o monitor */
@@ -50,17 +44,25 @@ extern "C" {
     #define EXPAND_BATCH            2
     #endif
 
-
-
-    #define TASKS_PER_QUEUE  1024
-
-    /* ── Configuração ── */
-    #define SHARD_COUNT     4
-    #define TASKS_PER_SHARD 1024
-    #define SHARD_MASK      (TASKS_PER_SHARD - 1)
-    #define TOTAL_TASKS     10000
-    #define WORKER_COUNT    8
-    #define QUEUE_COUNT     WORKER_COUNT
+    #ifndef POOL_MAX_SHARDS
+    #define POOL_MAX_SHARDS         1024
+    #endif
+    #ifndef POOL_MAX_WORKERS
+    #define POOL_MAX_WORKERS        1024
+    #endif
+    #ifndef PROACTIVE_SHARD_THRESHOLD
+    #define PROACTIVE_SHARD_THRESHOLD   50
+    #endif
+    #ifndef WORKER_BUSY_THRESHOLD
+    #define WORKER_BUSY_THRESHOLD       70
+    #endif
+    #ifndef MONITOR_TICK_US
+    #define MONITOR_TICK_US             10000
+    #endif
+    /* Ticks de cooldown apos uma expansao (evita expansao em rajada) */
+    #ifndef EXPAND_COOLDOWN_TICKS
+    #define EXPAND_COOLDOWN_TICKS       5
+    #endif
 
     /* ── Cache line padding ── */
     #define CACHE_LINE 64
@@ -91,7 +93,8 @@ extern "C" {
     typedef struct _ShardedPool
     {
         /* Shards */
-        Shard* shards[MAX_SHARD_COUNT];
+        Shard**      shards;
+        int          shard_capacity;
         xatomic_int  shard_count;
 
         /* Índices globais */
@@ -101,16 +104,18 @@ extern "C" {
         xatomic_int  submit_fail_count;
 
         /* Workers */
-        WorkerCtx   workers[MAX_WORKER_COUNT];
-        int         worker_count;
+        WorkerCtx**  workers;
+        int          worker_count;
+        int          worker_capacity;
+        xatomic_int  active_workers;
 
         #ifdef _WIN32
-           HANDLE      threads[MAX_WORKER_COUNT];
+           HANDLE*     threads;
         #else
-           pthread_t   threads[MAX_WORKER_COUNT];
+           pthread_t*  threads;
         #endif
 
-        void* worker_args[MAX_WORKER_COUNT][2];
+        void**       worker_arg_ptrs;
 
         /* Monitor de expansão */
         xwait_t      monitor_wait;           /* sleep/wake do monitor */
@@ -127,25 +132,9 @@ extern "C" {
     } ShardedPool;
 
 
-    typedef struct 
-    {
-        RingQueue ring;
-        Task      buffer[TASKS_PER_QUEUE];
-        WorkerCtx worker;
-    } Queue;
-
-
-    typedef struct 
-    {
-        Queue       queues[QUEUE_COUNT];
-        xatomic_int submit_idx;
-        xatomic_int running;
-    } Pool;
-
-
 
     XPLATBASE_API boolean pool_submit(ShardedPool* pool, void (*fn)(void*), void* arg);
-    XPLATBASE_API boolean pool_init(ShardedPool* pool, int worker_count);
+    XPLATBASE_API boolean pool_init(ShardedPool* pool);
     XPLATBASE_API void    pool_shutdown(ShardedPool* pool);
 
 
