@@ -27,11 +27,10 @@ extern "C" {
     #ifdef XPLATBASE_WIN
 
         typedef struct {
-            DWORD thread_id;
-            xatomic_int signal;
+            xatomic_int signal;   /* 0 = dormindo, 1 = sinalizado (WaitOnAddress/WakeByAddress) */
         } xwait_t;
 
-    #else 
+    #else
 
         typedef struct {
             atomic_int futex_val;   /* 0 = sleeping, 1 = signaled */

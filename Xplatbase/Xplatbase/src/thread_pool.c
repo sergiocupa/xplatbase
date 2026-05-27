@@ -1,718 +1,452 @@
 /*
-thread_pool.c
-
-Implementação do pool de threads fragmentado descrito em thread_pool.h.
-
-Pontos-chave do projeto:
-
-- O worker é desacoplado do Shard. Um Shard possui um worker_id atual; o worker o lê após cada tarefa para saber se foi desanexado.
-- Caminho crítico do worker: esvaziar o anel -> loop de espera -> estacionar (xwait).
-  Isso é feito em worker_idle_phase(), que substitui o par original
-  pool_wake_one()/thread_wait_sleep().
-- Submissão: rodízio entre os shards, solicitação de expansão sob pressão.
-- Monitoramento: thread única executando quatro tarefas:
-    1) detectar workers longos e bloqueados -> transferência
-    2) reabastecer o pool de reserva quando estiver baixo
-    3) juntar-se a workers desanexados que terminaram
-    4) atender à solicitação de expansão (stub)
-------------------------------------------------------------------------- */
+ * thread_pool.c — WSPool (work-stealing)
+ *
+ * Um ring MPMC por worker. Submit: round-robin entre workers.
+ * Idle: worker rouba tasks dos rings dos outros antes de dormir.
+ *
+ * Spin progressivo:
+ *   P1: xcpu_pause × N  (ou RDTSC deadline)  — 0 syscall, 100% CPU
+ *   P2: SwitchToThread × 128                 — cede HT/core, CPU cai
+ *   P3: Sleep(0) × 4                         — cede OS, CPU cai muito
+ *   P4: WaitOnAddress 1ms                     — 0% CPU, wake imediato via WakeByAddressSingle
+ */
 
 #include "thread_pool.h"
-#include "thread_handler.h"
+
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
+#include <stdio.h>
 
- /* -------------------------------------------------------------------------
-  * Internal types.
-  * ------------------------------------------------------------------------- */
+#ifdef XPLATBASE_WIN
+    #include <intrin.h>
+    typedef HANDLE           xpl_thread_t;
+    typedef DWORD WINAPI     xpl_fn_sig(void*);
+    static xpl_thread_t xpl_thread_start(xpl_fn_sig* fn, void* arg) {
+        return CreateThread(NULL, 0, fn, arg, 0, NULL);
+    }
+    static void xpl_thread_join(xpl_thread_t h) {
+        WaitForSingleObject(h, INFINITE); CloseHandle(h);
+    }
+    static void xpl_yield(void)  { SwitchToThread(); }
+    static void xpl_sleep0(void) { Sleep(0); }
+    static uint64_t xpl_tsc(void){ return (uint64_t)__rdtsc(); }
+    #define XPL_FN   DWORD WINAPI
+    #define XPL_RET  return 0
+#else
+    #include <pthread.h>
+    #include <sched.h>
+    #include <time.h>
+    typedef pthread_t        xpl_thread_t;
+    typedef void*            xpl_fn_sig(void*);
+    static xpl_thread_t xpl_thread_start(xpl_fn_sig* fn, void* arg) {
+        pthread_t t; pthread_create(&t, NULL, fn, arg); return t;
+    }
+    static void xpl_thread_join(xpl_thread_t h) { pthread_join(h, NULL); }
+    static void xpl_yield(void)  { sched_yield(); }
+    static void xpl_sleep0(void) { struct timespec z={0,0}; nanosleep(&z,NULL); }
+    static uint64_t xpl_tsc(void) {
+        #if defined(__x86_64__)||defined(__i386__)
+            return (uint64_t)__rdtsc();
+        #else
+            struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+            return (uint64_t)ts.tv_sec*1000000000ULL+(uint64_t)ts.tv_nsec;
+        #endif
+    }
+    #define XPL_FN   static void*
+    #define XPL_RET  return NULL
+#endif
 
-  /* Worker lifecycle states. */
-enum {
-    WSTATE_RESERVE = 0,   /* in reserve pool, thread parked, no shard */
-    WSTATE_ACTIVE = 1,   /* assigned to a shard, running its loop */
-    WSTATE_DETACHED = 2,   /* was active, now stuck on a long task; will exit */
-    WSTATE_EXITING = 3    /* finished, waiting to be joined and freed */
-};
+/* ─────────────────────────────────────────────────────────────────────────
+ * Contagens de spin por fase
+ * ───────────────────────────────────────────────────────────────────────── */
 
-struct Worker {
-    /* Identity & thread. */
-    int               id;
-    void*             thread;
-    xthread_handle_t  thread_handle;   /* for activity sampling from monitor */
+#define SPIN_P1_ITER  512
+#define SPIN_P2_ITER  128
+#define SPIN_P3_ITER    4
 
-    /* Shard assignment (NULL when in reserve or detached after task ends). */
-    Shard* home_shard;
+/* ─────────────────────────────────────────────────────────────────────────
+ * Estados de worker
+ * ───────────────────────────────────────────────────────────────────────── */
 
-    /* Park primitive. */
-    xwait_t           wait;
-    xatomic_int       sleeping;        /* 0/1 */
+#define WSTATE_ACTIVE    0
+#define WSTATE_STOPPING  3
+#define WSTATE_STOPPED   4
 
-    /* Task tracking for activity-based handoff. */
-    xatomic_int       task_in_progress; /* 0/1 */
-    xthread_sample_t  task_start_sample;
+/* ─────────────────────────────────────────────────────────────────────────
+ * Estruturas internas
+ * ───────────────────────────────────────────────────────────────────────── */
 
-    /* Lifecycle. */
-    xatomic_int       state;            /* one of WSTATE_* */
-
-    /* Back-reference for the worker_fn. */
-    ShardedPool* pool;
-
-    /* Linked list pointer (used for reserve & detached lists). */
-    struct Worker* next;
-};
-
-struct Shard {
-    int          id;
+typedef struct WSWorker {
     RingQueue    ring;
-    Task*        buffer;
-    int          capacity;
-
-    /* Currently active worker for this shard. NULL means orphaned
-     * (waiting for monitor to pull from reserve). */
-    xatomic_ptr  active_worker;        /* Worker* */
-};
-
-/* Simple intrusive linked list with a spinlock for reserve & detached. */
-typedef struct 
-{
-    Worker*      head;
-    int          count;
-    xatomic_int  lock;                 /* spinlock; low contention */
-} WorkerList;
+    void*        ring_buf;
+    xwait_t      wait;
+    ShardedPool* pool;
+    xpl_thread_t handle;
+    xatomic_int  state;
+    int          idx;
+} WSWorker;
 
 struct ShardedPool {
-    /* Shards. */
-    Shard**      shards;
-    xatomic_int  shard_count;
-    int          max_shards;
+    WSWorker*    workers;
+    int          worker_count;
 
-    /* Submit round-robin. */
-    xatomic_int  submit_idx;
-
-    /* Stats / signals. */
-    xatomic_int  pending;
-    xatomic_int  expand_requested;
-    xatomic_int  total_submitted;
-    xatomic_int  submit_failures;
-    xatomic_int  total_handoffs;
-
-    /* Reserve & detached lists. */
-    WorkerList   reserve;
-    WorkerList   detached;
-    int          reserve_target;
-
-    /* Monitor. */
-    void*        monitor_thread;
     xatomic_int  shutdown;
-    int          monitor_interval_ms;
+    xatomic_int  submit_seq;
+    xatomic_int  workers_ready;
+    int          expected_ready;
 
-    /* Worker config (passed to new workers). */
+    xatomic_int  stat_submitted;
+    xatomic_int  stat_failures;
+    xatomic_int  stat_stolen;
+
+    uint64_t     spin_budget_cycles;
     int          spin_iterations;
-    int          ring_capacity;
-    xtask_thresholds_t task_thresholds;
-
-    /* Worker id allocator. */
-    xatomic_int   next_worker_id;
 };
 
-/* -------------------------------------------------------------------------
- * Forward declarations of internal functions.
- * ------------------------------------------------------------------------- */
-static void*   worker_fn(void* arg);
-static void    worker_idle_phase(Worker* w);
-static Worker* worker_create(ShardedPool* pool);
-static void    worker_destroy(Worker* w);
-static void    worker_assign_to_shard(Worker* w, Shard* s);
+/* ─────────────────────────────────────────────────────────────────────────
+ * Tenta pop no proprio ring
+ * ───────────────────────────────────────────────────────────────────────── */
 
-static Shard*  shard_create(int id, int capacity);
-static void    shard_destroy(Shard* s);
-static int     shard_usage_pct(const Shard* s);
-
-static void    list_init(WorkerList* l);
-static void    list_push(WorkerList* l, Worker* w);
-static Worker* list_pop(WorkerList* l);
-static Worker* list_pop_finished(WorkerList* l);  /* pops a worker in WSTATE_EXITING */
-
-static void*   monitor_fn(void* arg);
-static void    monitor_check_handoff(ShardedPool* pool);
-static void    monitor_replenish_reserve(ShardedPool* pool);
-static void    monitor_join_finished(ShardedPool* pool);
-static void    monitor_handle_expand(ShardedPool* pool);
-
-
-
-/* -------------------------------------------------------------------------
-* Acorda o trabalhador ativo de um shard se ele estiver em repouso.
-* Chamado pelo comando submit após um push bem-sucedido.
-* ------------------------------------------------------------------------- */
-static inline void shard_wake(Shard* s)
+static bool worker_try_own(WSWorker* w, Task* out)
 {
-    Worker* w = (Worker*)atomic_get_ptr(&s->active_worker);
-    if (!w) return;
-    if (atomic_get(&w->sleeping))
+    return xring_pop_mc(&w->ring, w->ring_buf, out);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Tenta roubar do ring de outro worker (round-robin a partir de idx+1)
+ * ───────────────────────────────────────────────────────────────────────── */
+
+static bool worker_try_steal(WSWorker* w, Task* out)
+{
+    ShardedPool* pool  = w->pool;
+    int          n     = pool->worker_count;
+    int          start = (w->idx + 1) % n;
+
+    for (int i = 0; i < n - 1; i++)
     {
-        thread_wait_wake(&w->wait);
+        WSWorker* victim = &pool->workers[(start + i) % n];
+        if (xring_pop_mc(&victim->ring, victim->ring_buf, out)) 
+        {
+            atomic_add(&pool->stat_stolen, 1);
+            return true;
+        }
     }
+    return false;
+}
+
+static bool worker_try_any(WSWorker* w, Task* out)
+{
+    return worker_try_own(w, out) || worker_try_steal(w, out);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Fases de spin progressivo
+ * ───────────────────────────────────────────────────────────────────────── */
+
+static bool spin_check_state(WSWorker* w)
+{
+    return atomic_get(&w->state) == WSTATE_ACTIVE && !atomic_get(&w->pool->shutdown);
+}
+
+static bool spin_phase1(WSWorker* w, Task* out, uint64_t budget_cycles)
+{
+    if (budget_cycles > 0) 
+    {
+        uint64_t deadline = xpl_tsc() + budget_cycles;
+        int checks = 0;
+        for (;;) 
+        {
+            if (worker_try_any(w, out)) return true;
+            if (!spin_check_state(w))  return false;
+
+            xcpu_pause();
+
+            if (++checks >= 64) 
+            {
+                checks = 0;
+                if (xpl_tsc() >= deadline) return false;
+            }
+        }
+    }
+
+    for (int i = 0; i < SPIN_P1_ITER; i++) 
+    {
+        if (worker_try_any(w, out)) return true;
+        if (!spin_check_state(w))  return false;
+        xcpu_pause();
+    }
+    return false;
+}
+
+static bool spin_phase2(WSWorker* w, Task* out)
+{
+    for (int i = 0; i < SPIN_P2_ITER; i++) 
+    {
+        if (worker_try_any(w, out)) return true;
+        if (!spin_check_state(w))  return false;
+        xpl_yield();
+    }
+    return false;
+}
+
+static bool spin_phase3(WSWorker* w, Task* out)
+{
+    for (int i = 0; i < SPIN_P3_ITER; i++) 
+    {
+        if (worker_try_any(w, out)) return true;
+        if (!spin_check_state(w))  return false;
+        xpl_sleep0();
+    }
+    return false;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * worker_idle: P1 → P2 → P3 → WaitOnAddress 1ms (acordavel por pool_submit)
+ * Retorna true + *out preenchida se encontrou task.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+static bool worker_idle(WSWorker* w, Task* out)
+{
+    /* Reseta signal=0 antes de checar tasks: garante que um wake concorrente
+     * nao se perde — WaitOnAddress so dorme se signal==0 no momento da chamada. */
+    thread_wait_prepare(&w->wait);
+
+    if (worker_try_any(w, out)) return true;
+
+    if (spin_phase1(w, out, w->pool->spin_budget_cycles)) return true;
+    if (!spin_check_state(w)) return false;
+
+    if (spin_phase2(w, out)) return true;
+    if (!spin_check_state(w)) return false;
+
+    if (spin_phase3(w, out)) return true;
+    if (!spin_check_state(w)) return false;
+
+    /* Dorme ate 1ms ou ate pool_submit/pool_shutdown chamarem thread_wait_wake.
+     * WaitOnAddress acorda imediatamente via WakeByAddressSingle, sem depender
+     * da granularidade do timer do Windows (sem timeBeginPeriod). */
+    thread_wait_sleep_for(&w->wait, 1000);
+    return worker_try_any(w, out);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Funcao de thread do worker
+ * ───────────────────────────────────────────────────────────────────────── */
+
+XPL_FN worker_fn(void* raw)
+{
+    WSWorker*    w    = (WSWorker*)raw;
+    ShardedPool* pool = w->pool;
+
+    atomic_add(&pool->workers_ready, 1);
+    fprintf(stderr, "[worker %d] started\n", w->idx);
+
+    Task t;
+    memset(&t, 0, sizeof(t));
+
+    while (!atomic_get(&pool->shutdown) &&
+           atomic_get(&w->state) != WSTATE_STOPPING)
+    {
+        t.fn = NULL;
+        if (worker_try_any(w, &t)) {
+            t.fn(t.arg);
+        } else {
+            if (worker_idle(w, &t) && t.fn) {
+                t.fn(t.arg);
+            }
+        }
+    }
+
+    atomic_set(&w->state, WSTATE_STOPPED);
+    XPL_RET;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * API publica: pool_submit
+ * ───────────────────────────────────────────────────────────────────────── */
+
+bool pool_submit(ShardedPool* pool, task_fn fn, void* arg)
+{
+    int       widx = (int)((unsigned int)atomic_add(&pool->submit_seq, 1) % (unsigned int)pool->worker_count);
+    WSWorker* w = &pool->workers[widx];
+
+    Task t = { fn, arg };
+    if (!xring_push_mp(&w->ring, w->ring_buf, &t))
+    {
+        atomic_add(&pool->stat_failures, 1);
+        return false;
+    }
+
+    atomic_add(&pool->stat_submitted, 1);
+    thread_wait_wake(&w->wait);
+    return true;
 }
 
 
-PoolConfig pool_default_config(void) 
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * API publica: pool_default_config
+ * ───────────────────────────────────────────────────────────────────────── */
+
+PoolConfig pool_default_config(void)
 {
     PoolConfig c;
     memset(&c, 0, sizeof(c));
-
-    c.shard_count         = 0;     /* auto-detect */
+    c.shard_count         = xcpu_count();
     c.max_shards          = POOL_DEFAULT_MAX_SHARDS;
     c.ring_capacity       = POOL_DEFAULT_RING_CAPACITY;
     c.spin_iterations     = POOL_DEFAULT_SPIN_ITERATIONS;
+    c.spin_budget_us      = POOL_DEFAULT_SPIN_BUDGET_US;
     c.reserve_size        = POOL_DEFAULT_RESERVE_SIZE;
     c.monitor_interval_ms = POOL_MONITOR_INTERVAL_MS;
+    c.task_thresholds.long_threshold_ns = (uint64_t)XTASK_DEFAULT_LONG_NS;
+    c.task_thresholds.blocked_ratio_max = XTASK_DEFAULT_BLOCKED_RATIO;
+    c.task_thresholds.cpu_ratio_min     = XTASK_DEFAULT_CPU_RATIO;
     c.task_thresholds_set = false;
     return c;
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * API publica: pool_create
+ * ───────────────────────────────────────────────────────────────────────── */
 
-static void list_init(WorkerList* l) 
+ShardedPool* pool_create(const PoolConfig* cfg)
 {
-    l->head = NULL;
-    l->count = 0;
-    atomic_set(&l->lock, 0);
-}
+    PoolConfig c = cfg ? *cfg : pool_default_config();
+    if (c.shard_count   <= 0) c.shard_count  = xcpu_count();
+    if (c.ring_capacity <= 0) c.ring_capacity = POOL_DEFAULT_RING_CAPACITY;
 
-
-static inline void list_lock(WorkerList* l)
-{
-    int expected = 0;
-    while (!atomic_cas(&l->lock, &expected, 1))
-    {
-        /* Spin com loads simples até parecer livre, só então tenta CAS de novo. */
-        while (atomic_get(&l->lock) != 0)
-        {
-            xcpu_pause();
-        }
-        expected = 0;
-    }
-}
-
-
-static inline void list_unlock(WorkerList* l) 
-{
-    atomic_set(&l->lock, 0);
-}
-
-static void list_push(WorkerList* l, Worker* w) 
-{
-    list_lock(l);
-    w->next = l->head;
-    l->head = w;
-    l->count++;
-    list_unlock(l);
-}
-
-static Worker* list_pop(WorkerList* l) 
-{
-    list_lock(l);
-    Worker* w = l->head;
-    if (w) {
-        l->head = w->next;
-        w->next = NULL;
-        l->count--;
-    }
-    list_unlock(l);
-    return w;
-}
-
-
-static Worker* list_pop_finished(WorkerList* l) 
-{
-    list_lock(l);
-    Worker** pp = &l->head;
-    while (*pp) 
-    {
-        if (atomic_get(&(*pp)->state) == WSTATE_EXITING)
-        {
-            Worker* w = *pp;
-            *pp = w->next;
-            w->next = NULL;
-            l->count--;
-            list_unlock(l);
-            return w;
-        }
-        pp = &(*pp)->next;
-    }
-    list_unlock(l);
-    return NULL;
-}
-
-
-static Shard* shard_create(int id, int capacity)
-{
-    Shard* s = (Shard*)calloc(1, sizeof(Shard));
-    if (!s) return NULL;
-    s->id = id;
-    s->capacity = capacity;
-    s->buffer = (Task*)calloc(capacity, sizeof(Task));
-    if (!s->buffer) { free(s); return NULL; }
-
-    ring_queue_init(&s->ring, capacity);
-
-    atomic_set_ptr(&s->active_worker, NULL);
-    return s;
-}
-
-static void shard_destroy(Shard* s) 
-{
-    if (!s) return;
-    ring_queue_destroy(&s->ring);
-    free(s->buffer);
-    free(s);
-}
-
-static int shard_usage_pct(const Shard* s)
-{
-    int used = ring_queue_count((RingQueue*)&s->ring);
-    return (used * 100) / s->capacity;
-}
-
-
-static Worker* worker_create(ShardedPool* pool) 
-{
-    Worker* w = (Worker*)calloc(1, sizeof(Worker));
-    if (!w) return NULL;
-
-    w->id = atomic_add(&pool->next_worker_id, 1);
-    w->pool = pool;
-    w->home_shard = NULL;
-    atomic_set(&w->state, WSTATE_RESERVE);
-    atomic_set(&w->sleeping, 0);
-    atomic_set(&w->task_in_progress, 0);
-
-    if (thread_create(&w->thread, worker_fn, w) == 0)
-    {
-        thread_wait_destroy(&w->wait);
-        free(w);
-        return NULL;
-    }
-    w->thread_handle = (xthread_handle_t)w->thread;
-
-    return w;
-}
-
-static void worker_destroy(Worker* w) 
-{
-    if (!w) return;
-    thread_wait_destroy(&w->wait);
-    free(w);
-}
-
-/* -------------------------------------------------------------------------
- Atribua um worker de reserva a um shard. O chamador possui o worker (por exemplo,
- acabou de sair da reserva) e deseja que ele comece a atender o shard.
-
- O worker está atualmente parado em worker_fn aguardando atribuição. Nós
- definimos home_shard, fazemos a transição para ACTIVE, publicamos no slot active_worker do shard
- e então o ativamos.
- ------------------------------------------------------------------------- */
-static void worker_assign_to_shard(Worker* w, Shard* s) 
-{
-    w->home_shard = s;
-    atomic_set(&w->state, WSTATE_ACTIVE);
-    atomic_set_ptr(&s->active_worker, w);
-
-    /* Wake the worker out of its initial reserve park. */
-    atomic_set(&w->sleeping, 0);
-    thread_wait_wake(&w->wait);
-}
-
-
-/* -------------------------------------------------------------------------
- Fase ociosa do trabalhador.
-
- Substitui o par original pool_wake_one()/thread_wait_sleep() por
- a sequência integrada drain+spin+park especificada.
-
- Chamado por worker_fn após a conclusão de cada tarefa. Retorna quando o
- trabalhador deve remover outra tarefa (o anel está em execução) OU quando shutdown/
- detach foi sinalizado (o chamador verifica o estado).
- ------------------------------------------------------------------------- */
-static void worker_idle_phase(Worker* w) 
-{
-    Shard* s = w->home_shard;
-    Task   t;
-
-    while (xring_pop(&s->ring, s->buffer, &t))
-    {
-        atomic_sub(&w->pool->pending, 1);
-
-        w->task_start_sample = xthread_sample_self();
-        atomic_set(&w->task_in_progress, 1);
-
-        t.fn(t.arg);
-
-        atomic_set(&w->task_in_progress, 0);
-
-        if (atomic_get(&w->state) != WSTATE_ACTIVE) return;
-        if (atomic_get(&w->pool->shutdown))         return;
-    }
-
-    int spin_iters = w->pool->spin_iterations;
-    for (int i = 0; i < spin_iters; i++) 
-    {
-        if (ring_queue_count(&s->ring) > 0) return; /* work ready */
-        if (atomic_get(&w->state) != WSTATE_ACTIVE)  return;
-        if (atomic_get(&w->pool->shutdown))          return;
-        xcpu_pause();
-    }
-
-    atomic_set(&w->sleeping, 1);
-
-    if (ring_queue_count(&s->ring) > 0 || atomic_get(&w->state) != WSTATE_ACTIVE || atomic_get(&w->pool->shutdown))
-    {
-        atomic_set(&w->sleeping, 0);
-        return;
-    }
-
-    thread_wait_sleep(&w->wait);
-    atomic_set(&w->sleeping, 0);
-}
-
-
-
-/* -------------------------------------------------------------------------
-
- Função da thread de trabalho.
-
- Ciclo de vida:
- - Nascida em WSTATE_RESERVE: estaciona imediatamente, aguarda até ser atribuída.
- - WSTATE_ACTIVE: executa o loop de drenagem/giro/estacionamento vinculado ao home_shard.
- - WSTATE_DETACHED (definido pelo monitor): o chamador está no meio da tarefa; ao retornar
-   da função, sai do loop, transita para EXITING e permite que o monitor
-   entre.
- - WSTATE_EXITING: a função da thread retorna; o monitor entrará.
-
-* ------------------------------------------------------------------------- */
-static void* worker_fn(void* arg)
-{
-    Worker* w = (Worker*)arg;
-    thread_wait_prepare(&w->wait);
-
-    // aguarda fim de todas execucoes
-    while (atomic_get(&w->state) == WSTATE_RESERVE) 
-    {
-        if (atomic_get(&w->pool->shutdown)) 
-        {
-            atomic_set(&w->state, WSTATE_EXITING);
-            return NULL;
-        }
-        atomic_set(&w->sleeping, 1);
-
-        if (atomic_get(&w->state) != WSTATE_RESERVE)
-        {
-            atomic_set(&w->sleeping, 0);
-            break;
-        }
-        thread_wait_sleep(&w->wait);
-        atomic_set(&w->sleeping, 0);
-    }
-
-    while (atomic_get(&w->state) == WSTATE_ACTIVE && !atomic_get(&w->pool->shutdown))
-    {
-        worker_idle_phase(w);
-    }
-
-    atomic_set(&w->state, WSTATE_EXITING);
-    return NULL;
-}
-
-
-bool pool_submit(ShardedPool* pool, task_fn fn, void* arg) 
-{
-    int idx = atomic_add(&pool->submit_idx, 1);
-    int count = atomic_get(&pool->shard_count);
-    Task task = { fn, arg };
-
-    for (int i = 0; i < count; i++) 
-    {
-        Shard* s = pool->shards[(idx + i) % count];
-
-        if (s && xring_push_mp(&s->ring, s->buffer, &task)) 
-        {
-            atomic_add(&pool->pending, 1);
-            atomic_add(&pool->total_submitted, 1);
-            shard_wake(s);
-
-            if (shard_usage_pct(s) >= POOL_PRESSURE_THRESHOLD_PCT)
-            {
-                atomic_set(&pool->expand_requested, 1);
-            }
-            return true;
-        }
-    }
-
-    /* Defense in depth: all shards full. */
-    atomic_add(&pool->submit_failures, 1);
-    atomic_set(&pool->expand_requested, 1);
-    return false;
-}
-
-/* -------------------------------------------------------------------------
-* Monitor: detecção de handover.
-*
-* Para cada shard, amostra a atividade da CPU do worker ativo. Se a tarefa
-* for longa E estiver bloqueada (taxa baixa), execute o handover:
-* 1) Desanexe o worker (estado := DESANEXADO, remova do shard).
-* 2) Retire um novo worker da reserva.
-* 3) Atribua-o ao shard.
-* 4) Adicione o worker antigo à lista de desanexados.
-*
-* Se a reserva estiver vazia, ignore — é melhor suportar a tarefa longa do que
-* travar o monitor criando um worker de forma síncrona. O reabastecimento é executado
-* após isso e reabastecerá para o próximo ciclo.
- * ------------------------------------------------------------------------- */
-static void monitor_check_handoff(ShardedPool* pool)
-{
-    int count = atomic_get(&pool->shard_count);
-    for (int i = 0; i < count; i++) {
-        Shard* s = pool->shards[i];
-        if (!s) continue;
-
-        Worker* w = (Worker*)atomic_get_ptr(&s->active_worker);
-        if (!w) continue;
-        if (!atomic_get(&w->task_in_progress)) continue;
-
-        xthread_sample_t now = xthread_sample_of(w->thread_handle);
-        if (now.wall_ns == 0) continue;  /* sample failed */
-
-        xtask_eval_t eval = xthread_evaluate_task(&w->task_start_sample, &now, &pool->task_thresholds);
-
-        if (!xthread_should_handoff(&eval)) continue;
-
-        /* Try to pull a replacement before committing the handoff.
-         * If reserve is empty, abort — wait for next cycle. */
-        Worker* replacement = list_pop(&pool->reserve);
-        if (!replacement) continue;
-
-        /* Commit: detach old, install new. The old worker, when it
-         * returns from fn, will see state != ACTIVE and exit. */
-        atomic_set(&w->state, WSTATE_DETACHED);
-        atomic_set_ptr(&s->active_worker, NULL);
-
-        worker_assign_to_shard(replacement, s);
-
-        list_push(&pool->detached, w);
-        atomic_add(&pool->total_handoffs, 1);
-    }
-}
-
-
-static void monitor_replenish_reserve(ShardedPool* pool)
-{
-    while (pool->reserve.count < pool->reserve_target) 
-    {
-        Worker* w = worker_create(pool);
-        if (!w) break;  /* OOM or thread create failed; try again later */
-        list_push(&pool->reserve, w);
-    }
-}
-
-
-static void monitor_join_finished(ShardedPool* pool) 
-{
-    Worker* w;
-    while ((w = list_pop_finished(&pool->detached)) != NULL)
-    {
-        thread_join(&w->thread);
-        worker_destroy(w);
-    }
-}
-
-
-static void monitor_handle_expand(ShardedPool* pool) 
-{
-    int expected = 1;
-    if (!atomic_cas(&pool->expand_requested, &expected, 0)) return;
-    (void)pool;
-}
-
-
-static void* monitor_fn(void* arg) 
-{
-    ShardedPool* pool = (ShardedPool*)arg;
-    while (!atomic_get(&pool->shutdown))
-    {
-        xsleep_ms(pool->monitor_interval_ms);
-        monitor_check_handoff(pool);
-        monitor_handle_expand(pool);
-        monitor_replenish_reserve(pool);
-        monitor_join_finished(pool);
-    }
-    return NULL;
-}
-
-/* -------------------------------------------------------------------------
- * Pool create.
- * ------------------------------------------------------------------------- */
-ShardedPool* pool_create(const PoolConfig* user_cfg) 
-{
-    PoolConfig cfg = pool_default_config();
-    if (user_cfg) cfg = *user_cfg;
-    if (cfg.shard_count <= 0) cfg.shard_count = xcpu_count();
-    if (cfg.shard_count <= 0) cfg.shard_count = 4;
-
-    xthread_activity_init();
     thread_wait_init(false);
 
     ShardedPool* pool = (ShardedPool*)calloc(1, sizeof(ShardedPool));
     if (!pool) return NULL;
 
-    pool->max_shards = cfg.max_shards;
-    pool->ring_capacity = cfg.ring_capacity;
-    pool->spin_iterations = cfg.spin_iterations;
-    pool->reserve_target = cfg.reserve_size;
-    pool->monitor_interval_ms = cfg.monitor_interval_ms;
+    pool->worker_count    = c.shard_count;
+    pool->spin_iterations = c.spin_iterations;
 
-    if (cfg.task_thresholds_set) 
-    {
-        pool->task_thresholds = cfg.task_thresholds;
-    }
-    else 
-    {
-        pool->task_thresholds.long_threshold_ns = XTASK_DEFAULT_LONG_NS;
-        pool->task_thresholds.blocked_ratio_max = XTASK_DEFAULT_BLOCKED_RATIO;
-        pool->task_thresholds.cpu_ratio_min = XTASK_DEFAULT_CPU_RATIO;
+    if (c.spin_budget_us > 0) {
+        double cpns = xthread_cycles_per_ns();
+        if (cpns <= 0.0) cpns = 2.4;
+        pool->spin_budget_cycles = (uint64_t)((double)c.spin_budget_us * 1000.0 * cpns);
     }
 
-    list_init(&pool->reserve);
-    list_init(&pool->detached);
+    pool->workers = (WSWorker*)calloc(pool->worker_count, sizeof(WSWorker));
+    if (!pool->workers) { free(pool); return NULL; }
 
-    /* Allocate shards array sized to max_shards (grow-only). */
-    pool->shards = (Shard**)calloc(pool->max_shards, sizeof(Shard*));
-    if (!pool->shards) { free(pool); return NULL; }
-
-    /* Create initial shards and one worker per shard. */
-    for (int i = 0; i < cfg.shard_count; i++) {
-        Shard* s = shard_create(i, pool->ring_capacity);
-        if (!s) goto fail;
-        pool->shards[i] = s;
-
-        Worker* w = worker_create(pool);
-        if (!w) goto fail;
-        worker_assign_to_shard(w, s);
+    size_t ring_buf_size = (size_t)c.ring_capacity * sizeof(Task);
+    for (int i = 0; i < pool->worker_count; i++) {
+        WSWorker* w = &pool->workers[i];
+        w->idx      = i;
+        w->pool     = pool;
+        atomic_set(&w->state, WSTATE_ACTIVE);
+        w->ring_buf = malloc(ring_buf_size);
+        if (!w->ring_buf) { pool_shutdown(pool); return NULL; }
+        ring_queue_init(&w->ring, c.ring_capacity);
+        thread_wait_prepare(&w->wait);
     }
 
-    atomic_set(&pool->shard_count, cfg.shard_count);
-
-    /* Pre-fill reserve. */
-    for (int i = 0; i < pool->reserve_target; i++) 
-    {
-        Worker* w = worker_create(pool);
-        if (!w) break;  /* tolerate; monitor will retry */
-        list_push(&pool->reserve, w);
+    pool->expected_ready = pool->worker_count;
+    for (int i = 0; i < pool->worker_count; i++) {
+        pool->workers[i].handle = xpl_thread_start(worker_fn, &pool->workers[i]);
     }
 
-    /* Spawn monitor. */
-    if (thread_create(&pool->monitor_thread, monitor_fn, pool) == 0)
-    {
-        goto fail;
-    }
+    pool_init(pool);
 
     return pool;
-
-fail:
-    pool_shutdown(pool);
-    return NULL;
 }
 
-/* -------------------------------------------------------------------------
- * Pool shutdown.
- *
- * Order matters:
- *   1) Set shutdown flag.
- *   2) Wake every worker (active, reserve, and any detached not yet
- *      stuck in a task) so they exit their loops.
- *   3) Join monitor (it will stop scheduling new work).
- *   4) Join all workers — including detached, which may take a while
- *      if their long task hasn't finished. This is unavoidable: we
- *      can't kill a thread mid-task.
- *   5) Free shards.
- * ------------------------------------------------------------------------- */
-void pool_shutdown(ShardedPool* pool) 
+/* ─────────────────────────────────────────────────────────────────────────
+ * API publica: pool_init — aguarda workers girando
+ * ───────────────────────────────────────────────────────────────────────── */
+
+void pool_init(ShardedPool* pool)
+{
+    int waited_ms = 0;
+    while (atomic_get(&pool->workers_ready) < pool->expected_ready)
+    {
+        xsleep_ms(1);
+        if (++waited_ms % 2000 == 0)
+            fprintf(stderr, "[pool_init] aguardando workers: %d/%d (%d ms)\n",
+                    atomic_get(&pool->workers_ready), pool->expected_ready, waited_ms);
+    }
+    fprintf(stderr, "[pool_init] todos os workers prontos: %d\n", pool->expected_ready);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * API publica: pool_shutdown
+ * ───────────────────────────────────────────────────────────────────────── */
+
+void pool_shutdown(ShardedPool* pool)
 {
     if (!pool) return;
+
     atomic_set(&pool->shutdown, 1);
 
-    /* Wake everyone. */
-    int count = atomic_get(&pool->shard_count);
-    for (int i = 0; i < count; i++) {
-        Shard* s = pool->shards[i];
-        if (!s) continue;
-        Worker* w = (Worker*)atomic_get_ptr(&s->active_worker);
-        if (w) thread_wait_wake(&w->wait);
-    }
-    /* Drain reserve and wake. */
-    Worker* w;
-    while ((w = list_pop(&pool->reserve)) != NULL) 
-    {
-        atomic_set(&w->state, WSTATE_EXITING); /* nudge it out of reserve loop */
-        thread_wait_wake(&w->wait);
-        thread_join(&w->thread);
-        worker_destroy(w);
-    }
+    if (pool->workers) {
+        for (int i = 0; i < pool->worker_count; i++)
+            atomic_set(&pool->workers[i].state, WSTATE_STOPPING);
 
-    /* Stop monitor. */
-    if (pool->monitor_thread) thread_join(&pool->monitor_thread);
+        /* Reenvia wakes a cada 1ms ate todos marcarem WSTATE_STOPPED. */
+        int pending;
+        int waited_ms = 0;
+        do {
+            pending = 0;
+            for (int i = 0; i < pool->worker_count; i++) {
+                if (atomic_get(&pool->workers[i].state) != WSTATE_STOPPED) {
+                    pending++;
+                    thread_wait_wake(&pool->workers[i].wait);
+                }
+            }
+            if (pending) {
+                xsleep_ms(1);
+                if (++waited_ms % 2000 == 0) {
+                    fprintf(stderr, "[pool_shutdown] %d worker(s) ainda nao pararam (%d ms):\n",
+                            pending, waited_ms);
+                    for (int i = 0; i < pool->worker_count; i++) {
+                        int s = atomic_get(&pool->workers[i].state);
+                        if (s != WSTATE_STOPPED)
+                            fprintf(stderr, "  worker[%d] state=%d\n", i, s);
+                    }
+                }
+            }
+        } while (pending);
+        fprintf(stderr, "[pool_shutdown] todos os workers pararam\n");
 
-    /* Join active workers (still attached to shards). */
-    for (int i = 0; i < count; i++) 
-    {
-        Shard* s = pool->shards[i];
-        if (!s) continue;
-        Worker* aw = (Worker*)atomic_get_ptr(&s->active_worker);
-
-        if (aw)
-        {
-            thread_join(&aw->thread);
-            worker_destroy(aw);
+        /* Todos em WSTATE_STOPPED: join e libera. */
+        for (int i = 0; i < pool->worker_count; i++) {
+            if (pool->workers[i].handle)
+                xpl_thread_join(pool->workers[i].handle);
         }
+        for (int i = 0; i < pool->worker_count; i++) {
+            thread_wait_destroy(&pool->workers[i].wait);
+            free(pool->workers[i].ring_buf);
+            ring_queue_destroy(&pool->workers[i].ring);
+        }
+        free(pool->workers);
     }
 
-    /* Join detached workers (may block until their long tasks finish). */
-    while ((w = list_pop(&pool->detached)) != NULL)
-    {
-        thread_join(&w->thread);
-        worker_destroy(w);
-    }
-
-    /* Free shards. */
-    for (int i = 0; i < count; i++) 
-    {
-        shard_destroy(pool->shards[i]);
-    }
-    free(pool->shards);
     free(pool);
 }
 
-/* -------------------------------------------------------------------------
- * Stats.
- * ------------------------------------------------------------------------- */
-void pool_stats(ShardedPool* pool, PoolStats* out) 
+/* ─────────────────────────────────────────────────────────────────────────
+ * API publica: pool_stats
+ * ───────────────────────────────────────────────────────────────────────── */
+
+void pool_stats(ShardedPool* pool, PoolStats* out)
 {
-    if (!pool || !out) return;
-    int count = atomic_get(&pool->shard_count);
+    memset(out, 0, sizeof(*out));
+    out->shard_count     = pool->worker_count;
+    out->total_submitted = (uint64_t)(unsigned int)atomic_get(&pool->stat_submitted);
+    out->submit_failures = (uint64_t)(unsigned int)atomic_get(&pool->stat_failures);
+    out->total_handoffs  = (uint64_t)(unsigned int)atomic_get(&pool->stat_stolen);
 
-    int active = 0;
-    for (int i = 0; i < count; i++)
-    {
-        Shard* s = pool->shards[i];
-        if (s && atomic_get_ptr(&s->active_worker)) active++;
+    int active  = 0;
+    int pending = 0;
+    for (int i = 0; i < pool->worker_count; i++) {
+        if (atomic_get(&pool->workers[i].state) == WSTATE_ACTIVE) active++;
+        pending += ring_queue_count(&pool->workers[i].ring);
     }
-
-    out->shard_count         = count;
     out->active_worker_count = active;
-    out->reserve_count       = pool->reserve.count;
-    out->detached_count      = pool->detached.count;
-    out->pending_tasks       = atomic_get(&pool->pending);
-    out->total_submitted     = (uint64_t)atomic_get(&pool->total_submitted);
-    out->submit_failures     = (uint64_t)atomic_get(&pool->submit_failures);
-    out->total_handoffs      = (uint64_t)atomic_get(&pool->total_handoffs);
+    out->pending_tasks       = pending;
 }

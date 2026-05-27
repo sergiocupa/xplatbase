@@ -1,12 +1,12 @@
 /*
  * thread_pool_test.c
- * Testes para thread_pool.c
+ * Testes para thread_pool.c (WSPool: work-stealing)
  *
  * Teste 1 - Basico       : init, submete tarefas, verifica execucao e stats
  * Teste 2 - Perf 1 thread: intervalo fixo, sem sleep na task, mede latencia submit->exec
  * Teste 3 - Perf N threads: N threads configuraveis, intervalo aleatorio 1-50ms
- * Teste 4 - Handoff       : tasks rapidas (10ms) + lentas (1000ms), verifica
- *                           que tasks longas saem do worker do shard e vao para detached
+ * Teste 4 - Stealing      : tasks rapidas + lentas; verifica que workers ociosos
+ *                           roubam tasks dos rings de workers ocupados (stolen > 0)
  */
 
 #include <stdio.h>
@@ -126,6 +126,123 @@ static void tp_sleep_random_ms(int min_ms, int max_ms)
 {
     int ms = min_ms + (rand() % (max_ms - min_ms + 1));
     tp_sleep_ms(ms);
+}
+
+/* =========================================================================
+ * Monitor de CPU do processo
+ *   Coleta a cada interval_ms: % CPU = delta_cpu / (delta_wall * ncpus)
+ *   Apresenta avg/min/max no fim.
+ * ========================================================================= */
+
+#define CPU_MON_MAX_SAMPLES  600   /* 60s @ 100ms */
+
+#ifdef _WIN32
+static uint64_t cpu_time_us(void)
+{
+    FILETIME ct, et, kt, ut;
+    GetProcessTimes(GetCurrentProcess(), &ct, &et, &kt, &ut);
+    uint64_t k = ((uint64_t)kt.dwHighDateTime << 32 | (uint64_t)kt.dwLowDateTime) / 10;
+    uint64_t u = ((uint64_t)ut.dwHighDateTime << 32 | (uint64_t)ut.dwLowDateTime) / 10;
+    return k + u;
+}
+static uint64_t wall_time_us(void)
+{
+    static LARGE_INTEGER freq = {0};
+    LARGE_INTEGER c;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&c);
+    return (uint64_t)(c.QuadPart * 1000000ULL / freq.QuadPart);
+}
+#else
+#include <sys/resource.h>
+static uint64_t cpu_time_us(void)
+{
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    return (uint64_t)ru.ru_utime.tv_sec  * 1000000ULL + (uint64_t)ru.ru_utime.tv_usec
+         + (uint64_t)ru.ru_stime.tv_sec  * 1000000ULL + (uint64_t)ru.ru_stime.tv_usec;
+}
+static uint64_t wall_time_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000;
+}
+#endif
+
+typedef struct {
+    tp_thread_t   thread;
+    volatile int  stop;
+    int           interval_ms;
+    int           num_cpus;
+    double        samples[CPU_MON_MAX_SAMPLES];
+    int           count;
+} CpuMonitor;
+
+#ifdef _WIN32
+static DWORD WINAPI cpu_monitor_fn(void* raw)
+#else
+static void* cpu_monitor_fn(void* raw)
+#endif
+{
+    CpuMonitor* m = (CpuMonitor*)raw;
+
+    uint64_t prev_cpu  = cpu_time_us();
+    uint64_t prev_wall = wall_time_us();
+
+    while (!m->stop) {
+        tp_sleep_ms(m->interval_ms);
+        if (m->stop) break;
+
+        uint64_t cur_cpu  = cpu_time_us();
+        uint64_t cur_wall = wall_time_us();
+        uint64_t dcpu     = cur_cpu  - prev_cpu;
+        uint64_t dwall    = cur_wall - prev_wall;
+
+        if (dwall > 0 && m->count < CPU_MON_MAX_SAMPLES)
+            m->samples[m->count++] = (double)dcpu / (double)dwall * 100.0 / m->num_cpus;
+
+        prev_cpu  = cur_cpu;
+        prev_wall = cur_wall;
+    }
+
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+static void cpu_monitor_start(CpuMonitor* m, int interval_ms)
+{
+    memset(m, 0, sizeof(*m));
+    m->interval_ms = interval_ms;
+    m->num_cpus    = xcpu_count();
+    tp_thread_start(m->thread, cpu_monitor_fn, m);
+}
+
+static void cpu_monitor_stop(CpuMonitor* m)
+{
+    m->stop = 1;
+    tp_thread_join(m->thread);
+}
+
+static void cpu_monitor_print(const CpuMonitor* m)
+{
+    if (m->count == 0) {
+        printf("  CPU: sem amostras\n");
+        return;
+    }
+    double sum = 0.0, mn = 1e9, mx = -1.0;
+    for (int i = 0; i < m->count; i++) {
+        sum += m->samples[i];
+        if (m->samples[i] < mn) mn = m->samples[i];
+        if (m->samples[i] > mx) mx = m->samples[i];
+    }
+    printf("  CPU processo (%d amostras @ %dms, %d CPUs): "
+           "avg=%.1f%%  min=%.1f%%  max=%.1f%%\n",
+           m->count, m->interval_ms, m->num_cpus,
+           sum / m->count, mn, mx);
 }
 
 /* =========================================================================
@@ -267,11 +384,109 @@ static int tp_wait_done(tp_counter_t* done, int total, int timeout_ms)
 
 #define T1_TASK_COUNT  20
 
+static void test_basic_run(ShardedPool* pool, const char* label)
+{
+    tp_counter_t done = 0;
+    TpTaskArg args[T1_TASK_COUNT];
+    memset(args, 0, sizeof(args));
+
+    for (int i = 0; i < T1_TASK_COUNT; i++)
+    {
+        args[i].task_id      = i;
+        args[i].done_counter = &done;
+        args[i].submit_tsc   = tsc_now();
+
+        if (!pool_submit(pool, task_cb_plain, &args[i]))
+            args[i].executed = -1;
+    }
+
+    int completed = tp_wait_done(&done, T1_TASK_COUNT, 5000);
+    TP_ASSERT(completed, "todas as tarefas concluidas dentro de 5s");
+
+    int all_ok = 1;
+    for (int i = 0; i < T1_TASK_COUNT; i++)
+        if (args[i].executed != 1) { all_ok = 0; break; }
+    TP_ASSERT(all_ok, "todos os callbacks foram chamados");
+
+    TpLatency r = compute_latency(args, T1_TASK_COUNT);
+    printf("  [%s] ", label);
+    print_latency(&r);
+}
+
 static void test_basic(void)
 {
     printf("\n================================================================================\n");
     printf("  TESTE 1: Basico\n");
     printf("================================================================================\n\n");
+
+    /* --- variante A: config padrao (spin_budget_us = 2000) --- */
+    {
+        fprintf(stderr, "[T1-A] pool_create...\n");
+        ShardedPool* pool = pool_create(NULL);
+        TP_ASSERT(pool != NULL, "pool_create padrao != NULL");
+        if (pool)
+        {
+            fprintf(stderr, "[T1-A] test_basic_run...\n");
+            test_basic_run(pool, "default spin_budget=2000us");
+            fprintf(stderr, "[T1-A] pool_shutdown...\n");
+            pool_shutdown(pool);
+            fprintf(stderr, "[T1-A] done\n");
+        }
+    }
+
+    /* --- variante B: 1 shard (sem rotacao, sem pressao de OS) --- */
+    {
+        fprintf(stderr, "[T1-B] pool_create...\n");
+        PoolConfig cfg      = pool_default_config();
+        cfg.shard_count     = 1;
+        ShardedPool* pool = pool_create(&cfg);
+        TP_ASSERT(pool != NULL, "pool_create 1 shard != NULL");
+        if (pool)
+        {
+            fprintf(stderr, "[T1-B] test_basic_run...\n");
+            test_basic_run(pool, "1 shard, budget=2000us");
+            fprintf(stderr, "[T1-B] pool_shutdown...\n");
+            pool_shutdown(pool);
+            fprintf(stderr, "[T1-B] done\n");
+        }
+    }
+
+    /* --- variante C: shards = ncores/2 (menos pressao, ainda paralelo) --- */
+    {
+        fprintf(stderr, "[T1-C] pool_create...\n");
+        PoolConfig cfg      = pool_default_config();
+        cfg.shard_count     = xcpu_count() / 2;
+        if (cfg.shard_count < 1) cfg.shard_count = 1;
+        ShardedPool* pool = pool_create(&cfg);
+        TP_ASSERT(pool != NULL, "pool_create ncores/2 shards != NULL");
+        if (pool)
+        {
+            char label[64];
+            sprintf(label, "%d shards (ncores/2), budget=2000us", cfg.shard_count);
+            fprintf(stderr, "[T1-C] test_basic_run...\n");
+            test_basic_run(pool, label);
+            fprintf(stderr, "[T1-C] pool_shutdown...\n");
+            pool_shutdown(pool);
+            fprintf(stderr, "[T1-C] done\n");
+        }
+    }
+
+    /* --- variante D: spin=0 contagem (baseline original) --- */
+    {
+        fprintf(stderr, "[T1-D] pool_create...\n");
+        PoolConfig cfg      = pool_default_config();
+        cfg.spin_budget_us  = 0;
+        ShardedPool* pool = pool_create(&cfg);
+        TP_ASSERT(pool != NULL, "pool_create spin=0 (contagem) != NULL");
+        if (pool)
+        {
+            fprintf(stderr, "[T1-D] test_basic_run...\n");
+            test_basic_run(pool, "spin_budget=0 (contagem 2048)");
+            fprintf(stderr, "[T1-D] pool_shutdown...\n");
+            pool_shutdown(pool);
+            fprintf(stderr, "[T1-D] done\n");
+        }
+    }
 
     ShardedPool* pool = pool_create(NULL);
     TP_ASSERT(pool != NULL, "pool_create(NULL) retorna != NULL");
@@ -281,7 +496,7 @@ static void test_basic(void)
     TpTaskArg args[T1_TASK_COUNT];
     memset(args, 0, sizeof(args));
 
-    for (int i = 0; i < T1_TASK_COUNT; i++) 
+    for (int i = 0; i < T1_TASK_COUNT; i++)
     {
         args[i].task_id      = i;
         args[i].done_counter = &done;
@@ -304,10 +519,9 @@ static void test_basic(void)
     TP_ASSERT(stats.total_submitted >= (uint64_t)T1_TASK_COUNT, "total_submitted >= T1_TASK_COUNT");
     TP_ASSERT(stats.submit_failures == 0,                        "sem falhas de submit");
 
-    printf("  Stats: shards=%d  active_workers=%d  reserve=%d  submitted=%llu  handoffs=%llu\n",
+    printf("  Stats: workers=%d  active=%d  submitted=%llu  stolen=%llu\n",
            stats.shard_count,
            stats.active_worker_count,
-           stats.reserve_count,
            (unsigned long long)stats.total_submitted,
            (unsigned long long)stats.total_handoffs);
 
@@ -478,20 +692,15 @@ static void test_multi_thread_perf(int thread_count)
 }
 
 /* =========================================================================
- * TESTE 4: Handoff - tasks rapidas + lentas
+ * TESTE 4: Stealing - tasks rapidas + lentas
  *
- *   Submete T4_FAST_COUNT tasks que dormem T4_FAST_SLEEP_MS (rapidas)
- *   e T4_SLOW_COUNT tasks que dormem T4_SLOW_SLEEP_MS (lentas).
- *
- *   Pool configurado com long_threshold_ns = T4_LONG_THRESHOLD_NS de forma
- *   que as tasks lentas superem o limiar e sejam detectadas pelo monitor.
- *
- *   O monitor desanexa o worker bloqueado do shard e move-o para
- *   pool->detached; um worker da reserva assume o shard.
+ *   Submete T4_FAST_COUNT tasks rapidas e T4_SLOW_COUNT tasks lentas.
+ *   Com poucos workers e tasks lentas ocupando alguns deles, workers
+ *   ociosos devem roubar tasks do ring de workers ocupados.
  *
  *   Verificacoes:
  *     - todos os callbacks foram chamados
- *     - total_handoffs > 0 (tasks lentas saaram do worker ativo do shard)
+ *     - total_handoffs (= stolen) > 0: houve roubo de tasks
  * ========================================================================= */
 
 #define T4_FAST_COUNT        4
@@ -505,18 +714,12 @@ static void test_multi_thread_perf(int thread_count)
 static void test_handoff(void)
 {
     printf("\n================================================================================\n");
-    printf("  TESTE 4: Handoff (tasks rapidas %dms + lentas %dms, threshold=%lldms)\n",
-           T4_FAST_SLEEP_MS, T4_SLOW_SLEEP_MS,
-           (long long)(T4_LONG_THRESHOLD_NS / 1000000LL));
+    printf("  TESTE 4: Stealing (tasks rapidas %dms + lentas %dms)\n",
+           T4_FAST_SLEEP_MS, T4_SLOW_SLEEP_MS);
     printf("================================================================================\n\n");
 
-    PoolConfig cfg                        = pool_default_config();
-    cfg.shard_count                       = 2;   /* poucos shards aumentam chance de conflito */
-    cfg.reserve_size                      = 4;   /* reserva suficiente para handoffs */
-    cfg.task_thresholds.long_threshold_ns = (uint64_t)T4_LONG_THRESHOLD_NS;
-    cfg.task_thresholds.blocked_ratio_max = 0.5;
-    cfg.task_thresholds.cpu_ratio_min     = 0.70;
-    cfg.task_thresholds_set               = true;
+    PoolConfig cfg      = pool_default_config();
+    cfg.shard_count     = 2;   /* poucos workers aumentam chance de roubo */
 
     ShardedPool* pool = pool_create(&cfg);
     TP_ASSERT(pool != NULL, "pool_create com config customizada != NULL");
@@ -577,17 +780,15 @@ static void test_handoff(void)
     TP_ASSERT(all_ok, "todos os callbacks foram chamados (executed == 1)");
 
     TP_ASSERT(final_stats.total_handoffs > 0,
-              "total_handoffs > 0: tasks lentas saaram do worker ativo e foram para detached");
+              "stolen > 0: workers ociosos roubaram tasks dos rings de workers ocupados");
 
     /* --- relatorio --- */
     printf("  Stats apos %dms (snapshot intermediario):\n", snapshot_wait_ms);
-    printf("    handoffs      : %llu\n", (unsigned long long)mid_stats.total_handoffs);
-    printf("    detached_count: %d\n",   mid_stats.detached_count);
-    printf("    reserve_count : %d\n",   mid_stats.reserve_count);
+    printf("    stolen        : %llu\n", (unsigned long long)mid_stats.total_handoffs);
     printf("    active_workers: %d\n",   mid_stats.active_worker_count);
 
     printf("  Stats finais:\n");
-    printf("    total_handoffs  : %llu\n", (unsigned long long)final_stats.total_handoffs);
+    printf("    stolen          : %llu\n", (unsigned long long)final_stats.total_handoffs);
     printf("    submit_failures : %llu\n", (unsigned long long)final_stats.submit_failures);
 
     TpLatency r = compute_latency(args, total);
@@ -621,13 +822,19 @@ void thread_pool_test_run(void)
     printf("  thread_pool_test\n");
     printf("################################################################################\n");
 
+    CpuMonitor cpu_mon;
+    cpu_monitor_start(&cpu_mon, 10);
+
     test_basic();
-    /*test_single_thread_perf();
+    test_single_thread_perf();
     test_multi_thread_perf(T3_THREAD_COUNT);
-    test_handoff();*/
+    test_handoff();
+
+    cpu_monitor_stop(&cpu_mon);
 
     printf("\n================================================================================\n");
     printf("  RESULTADO FINAL: %d / %d asserts passaram\n", g_tests_passed, g_tests_run);
+    cpu_monitor_print(&cpu_mon);
     printf("================================================================================\n\n");
 }
 

@@ -8,9 +8,14 @@
 #include <time.h>
 #include <pthread.h>
 
-void xthread_activity_init(void) 
+void xthread_activity_init(void)
 {
     /* Nothing to calibrate — clocks are already in ns. */
+}
+
+double xthread_cycles_per_ns(void)
+{
+    return 1.0;  /* Linux: activity ja e em ns, sem conversao necessaria */
 }
 
 static inline uint64_t ts_to_ns(struct timespec ts) 

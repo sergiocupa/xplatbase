@@ -57,11 +57,16 @@ static void calibrate_cycles_per_ns(void)
     }
 }
 
-void xthread_activity_init(void) 
+void xthread_activity_init(void)
 {
     if (InterlockedCompareExchange(&g_initialized, 1, 0) != 0) return;
     QueryPerformanceFrequency(&g_qpc_freq);
     calibrate_cycles_per_ns();
+}
+
+double xthread_cycles_per_ns(void)
+{
+    return g_cycles_per_ns;
 }
 
 static inline uint64_t qpc_to_ns(LARGE_INTEGER c) 

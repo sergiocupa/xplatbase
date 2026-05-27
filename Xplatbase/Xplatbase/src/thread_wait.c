@@ -19,103 +19,65 @@
 #endif
 
 /* ======================================================================== */
-/*  Windows - NT direct syscalls                                            */
+/*  Windows - WaitOnAddress / WakeByAddressSingle (equivalente ao futex)   */
 /* ======================================================================== */
 
 #ifdef _WIN32
 
-//#define WIN32_LEAN_AND_MEAN
-//#include <windows.h>
+#pragma comment(lib, "Synchronization.lib")
+#pragma comment(lib, "Winmm.lib")
 
-typedef long NTSTATUS;
-#define XWAIT_STATUS_TIMEOUT  ((NTSTATUS)0x00000102)
-
-typedef NTSTATUS(NTAPI* fn_NtWaitForAlertByThreadId)(PVOID, PLARGE_INTEGER);
-typedef NTSTATUS(NTAPI* fn_NtAlertThreadByThreadId)(HANDLE);
-
-static fn_NtWaitForAlertByThreadId  xwait__wait_fn;
-static fn_NtAlertThreadByThreadId   xwait__alert_fn;
-
-static boolean SpinMode;
-
-
-/* Init - chamar uma vez */
+/* Init - eleva resolucao do timer do Windows para 1ms (afeta Sleep/Wait*).
+ * Por padrao e ~15.6ms — sem isso, Sleep(1) dorme ate 15ms e
+ * WaitOnAddress(timeout=1ms) tambem espera ate 15ms reais. */
 boolean thread_wait_init(boolean fast_mode)
 {
-    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-    if (!ntdll)
-        return false;
-
-	SpinMode = fast_mode;
-
-    xwait__wait_fn  = (fn_NtWaitForAlertByThreadId)GetProcAddress(ntdll, "NtWaitForAlertByThreadId");
-    xwait__alert_fn = (fn_NtAlertThreadByThreadId)GetProcAddress(ntdll, "NtAlertThreadByThreadId");
-
-    return (xwait__wait_fn != NULL && xwait__alert_fn != NULL);
+    (void)fast_mode;
+    static int initialized = 0;
+    if (!initialized) {
+        timeBeginPeriod(1);
+        initialized = 1;
+    }
+    return true;
 }
 
-/* Registrar thread antes de usar */
+/* Reseta o sinal para 0 antes de entrar na fase de espera. */
 void thread_wait_prepare(xwait_t* w)
 {
-    w->thread_id = GetCurrentThreadId();
-}
-
-
-static inline void xwait_spin_sleep(xwait_t* w)
-{
-    while (atomic_get(&w->signal) == 0)
-    {
-        xwait_cpu_pause();
-    }
-
     atomic_set(&w->signal, 0);
 }
 
-static inline void xwait_spin_wake(xwait_t* w)
-{
-    atomic_set(&w->signal, 1);
-}
-
-
-/* Dorme ate ser acordada - sem loop, NT nao tem spurious wakeup */
+/* Dorme ate ser acordada (sem timeout). */
 void thread_wait_sleep(xwait_t* w)
 {
-    if (SpinMode)
-    {
-        xwait_spin_sleep(w);
-    }
-    else
-    {
-        (void)w;
-        xwait__wait_fn(NULL, NULL);
-    }
+    LONG expected = 0;
+    while (atomic_get(&w->signal) == 0)
+        WaitOnAddress(&w->signal, &expected, sizeof(LONG), INFINITE);
+    atomic_set(&w->signal, 0);
 }
 
-/* Dorme com timeout (microsegundos). true = acordou por wake, false = timeout */
+/* Dorme com timeout (microsegundos). true = acordou por wake, false = timeout.
+ * WaitOnAddress: dorme apenas se *address == *compare no momento da chamada,
+ * portanto nao ha race entre wake-antes-de-sleep. */
 boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
 {
-    (void)w;
-    LARGE_INTEGER li;
-    li.QuadPart = -(timeout_us * 10LL);
+    LONG  expected = 0;
+    DWORD ms       = (DWORD)(timeout_us / 1000);
+    if (ms == 0) ms = 1;
 
-    NTSTATUS status = xwait__wait_fn(NULL, &li);
-    return (status != XWAIT_STATUS_TIMEOUT);
+    BOOL woken = WaitOnAddress(&w->signal, &expected, sizeof(LONG), ms);
+    atomic_set(&w->signal, 0);
+    return woken != FALSE;
 }
 
-/* Acorda a thread */
+/* Acorda a thread imediatamente. */
 void thread_wait_wake(xwait_t* w)
 {
-    if (SpinMode)
-    {
-        xwait_spin_wake(w);
-    }
-    else
-    {
-        xwait__alert_fn((HANDLE)(ULONG_PTR)w->thread_id);
-    }
+    atomic_set(&w->signal, 1);
+    WakeByAddressSingle(&w->signal);
 }
 
-/* Libera recursos da instancia (no-op no Windows — nada a desalocar) */
+/* No-op: sem handle para fechar. */
 void thread_wait_destroy(xwait_t* w)
 {
     (void)w;

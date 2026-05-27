@@ -58,11 +58,12 @@ xtask_thresholds_t;
 
 
 
-void xthread_activity_init(void);
+void             xthread_activity_init(void);
 xthread_sample_t xthread_sample_self(void);
 xthread_sample_t xthread_sample_of(xthread_handle_t h);
-xtask_eval_t xthread_evaluate_task(const xthread_sample_t* start, const xthread_sample_t* now, const xtask_thresholds_t* t);
-bool xthread_should_handoff(const xtask_eval_t* eval);
+xtask_eval_t     xthread_evaluate_task(const xthread_sample_t* start, const xthread_sample_t* now, const xtask_thresholds_t* t);
+bool             xthread_should_handoff(const xtask_eval_t* eval);
+double           xthread_cycles_per_ns(void);  /* TSC cycles per nanosecond, calibrado em xthread_activity_init */
     
 
 
