@@ -387,16 +387,29 @@ void pool_shutdown(ShardedPool* pool)
         for (int i = 0; i < pool->worker_count; i++)
             atomic_set(&pool->workers[i].state, WSTATE_STOPPING);
 
-        /* Reenvia wakes a cada 1ms ate todos marcarem WSTATE_STOPPED. */
+        /* Reenvia wakes a cada 1ms ate todos marcarem WSTATE_STOPPED.
+         * Se a thread morreu sem setar STOPPED (crash em t.fn ou similar),
+         * detecta via WaitForSingleObject(handle, 0) e forca STOPPED. */
         int pending;
         int waited_ms = 0;
         do {
             pending = 0;
             for (int i = 0; i < pool->worker_count; i++) {
-                if (atomic_get(&pool->workers[i].state) != WSTATE_STOPPED) {
-                    pending++;
-                    thread_wait_wake(&pool->workers[i].wait);
+                if (atomic_get(&pool->workers[i].state) == WSTATE_STOPPED)
+                    continue;
+
+#ifdef XPLATBASE_WIN
+                if (pool->workers[i].handle &&
+                    WaitForSingleObject(pool->workers[i].handle, 0) == WAIT_OBJECT_0) {
+                    /* Thread saiu (normal ou crash) sem setar STOPPED. Forca. */
+                    atomic_set(&pool->workers[i].state, WSTATE_STOPPED);
+                    fprintf(stderr, "[pool_shutdown] worker[%d] morto sem setar STOPPED — forcando\n", i);
+                    continue;
                 }
+#endif
+
+                pending++;
+                thread_wait_wake(&pool->workers[i].wait);
             }
             if (pending) {
                 xsleep_ms(1);
