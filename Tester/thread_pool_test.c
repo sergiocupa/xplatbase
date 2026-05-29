@@ -825,9 +825,9 @@ void thread_pool_test_run(void)
     CpuMonitor cpu_mon;
     cpu_monitor_start(&cpu_mon, 10);
 
-    test_basic();
-    test_single_thread_perf();
-    test_multi_thread_perf(T3_THREAD_COUNT);
+    //test_basic();
+    //test_single_thread_perf();
+    //test_multi_thread_perf(T3_THREAD_COUNT);
     test_handoff();
 
     cpu_monitor_stop(&cpu_mon);

@@ -245,8 +245,7 @@ XPL_FN worker_fn(void* raw)
     Task t;
     memset(&t, 0, sizeof(t));
 
-    while (!atomic_get(&pool->shutdown) &&
-           atomic_get(&w->state) != WSTATE_STOPPING)
+    while (!atomic_get(&pool->shutdown) && atomic_get(&w->state) != WSTATE_STOPPING)
     {
         t.fn = NULL;
         if (worker_try_any(w, &t)) {
