@@ -731,6 +731,19 @@ static void test_handoff(void)
     TpTaskArg args[T4_FAST_COUNT + T4_SLOW_COUNT];
     memset(args, 0, sizeof(args));
 
+    /* submete tasks lentas */
+    for (int i = 0; i < T4_SLOW_COUNT; i++) {
+        int idx = T4_FAST_COUNT + i;
+        args[idx].task_id = idx;
+        args[idx].sleep_ms = T4_SLOW_SLEEP_MS;
+        args[idx].done_counter = &done;
+        args[idx].submit_tsc = tsc_now();
+        if (!pool_submit(pool, task_cb_with_sleep, &args[idx]))
+            args[idx].executed = -1;
+    }
+
+    tp_sleep_ms(100);
+
     /* submete tasks rapidas */
     for (int i = 0; i < T4_FAST_COUNT; i++) {
         args[i].task_id      = i;
@@ -741,16 +754,7 @@ static void test_handoff(void)
             args[i].executed = -1;
     }
 
-    /* submete tasks lentas */
-    for (int i = 0; i < T4_SLOW_COUNT; i++) {
-        int idx = T4_FAST_COUNT + i;
-        args[idx].task_id      = idx;
-        args[idx].sleep_ms     = T4_SLOW_SLEEP_MS;
-        args[idx].done_counter = &done;
-        args[idx].submit_tsc   = tsc_now();
-        if (!pool_submit(pool, task_cb_with_sleep, &args[idx]))
-            args[idx].executed = -1;
-    }
+    
 
     /*
      * Aguarda 3x o threshold para dar ao monitor tempo de detectar as tasks

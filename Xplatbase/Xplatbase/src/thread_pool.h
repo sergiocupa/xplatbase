@@ -60,18 +60,37 @@ typedef struct {
 #define POOL_MONITOR_INTERVAL_MS      10
 #endif
 
+/* Threshold para handoff de task longa (default 20ms). */
+#ifndef POOL_DEFAULT_LONG_TASK_NS
+#define POOL_DEFAULT_LONG_TASK_NS     (20ULL * 1000000ULL)
+#endif
+
+/* Intervalo do monitor de tasks longas. */
+#ifndef POOL_LONG_TASK_MONITOR_MS
+#define POOL_LONG_TASK_MONITOR_MS     10
+#endif
+
+/* Fator de expansao da reserva quando esgotada. */
+#ifndef POOL_RESERVE_EXPAND_NUM
+#define POOL_RESERVE_EXPAND_NUM       3
+#endif
+#ifndef POOL_RESERVE_EXPAND_DEN
+#define POOL_RESERVE_EXPAND_DEN       2
+#endif
+
 /* ─────────────────────────────────────────────────────────────────────────
  * ShardedPool — configuracao
  * ───────────────────────────────────────────────────────────────────────── */
 
 typedef struct {
-    int    shard_count;          /* 0 → auto (ncores)            */
-    int    max_shards;
-    int    ring_capacity;        /* por shard, potencia de 2     */
-    int    spin_iterations;      /* fallback se spin_budget_us==0 */
-    int    spin_budget_us;       /* µs de spin antes de dormir   */
-    int    reserve_size;
-    int    monitor_interval_ms;
+    int      shard_count;            /* 0 → auto (ncores)            */
+    int      max_shards;
+    int      ring_capacity;          /* por shard, potencia de 2     */
+    int      spin_iterations;        /* fallback se spin_budget_us==0 */
+    int      spin_budget_us;         /* µs de spin antes de dormir   */
+    int      reserve_size;           /* 0 → mesma quantidade de workers */
+    int      monitor_interval_ms;
+    uint64_t long_task_threshold_ns; /* 0 → POOL_DEFAULT_LONG_TASK_NS */
 
     xtask_thresholds_t task_thresholds;
     bool               task_thresholds_set;

@@ -49,6 +49,34 @@ int atomic_cas(xatomic_int* s, int* expected, int desired)
     return 0;
 }
 
+void atomic_set64(xatomic_int64* s, int64_t val)
+{
+    InterlockedExchange64(s, (LONG64)val);
+}
+
+int64_t atomic_get64(xatomic_int64* s)
+{
+    return (int64_t)ReadAcquire64(s);
+}
+
+int atomic_cas64(xatomic_int64* s, int64_t* expected, int64_t desired)
+{
+    LONG64 old = InterlockedCompareExchange64(s, (LONG64)desired, (LONG64)*expected);
+    if (old == (LONG64)*expected)
+        return 1;
+    *expected = (int64_t)old;
+    return 0;
+}
+
+int atomic_cas_ptr(xatomic_ptr* target, void** expected, void* desired)
+{
+    PVOID old = InterlockedCompareExchangePointer((volatile PVOID*)target, desired, *expected);
+    if (old == *expected)
+        return 1;
+    *expected = old;
+    return 0;
+}
+
 
 
 #else
@@ -86,6 +114,21 @@ inline int atomic_cas(xatomic_int* s, int* expected, int desired)
     return atomic_compare_exchange_strong_explicit(s, expected, desired, memory_order_acq_rel, memory_order_relaxed);
 }
 
+inline void atomic_set64(xatomic_int64* s, int64_t val)
+{
+    atomic_store_explicit(s, val, memory_order_release);
+}
+
+inline int64_t atomic_get64(xatomic_int64* s)
+{
+    return atomic_load_explicit(s, memory_order_acquire);
+}
+
+inline int atomic_cas64(xatomic_int64* s, int64_t* expected, int64_t desired)
+{
+    return atomic_compare_exchange_strong_explicit(s, expected, desired, memory_order_acq_rel, memory_order_relaxed);
+}
+
 inline void* atomic_get_ptr(xatomic_ptr* s)
 {
     return atomic_load_explicit(s, memory_order_acquire);
@@ -94,6 +137,11 @@ inline void* atomic_get_ptr(xatomic_ptr* s)
 inline void atomic_set_ptr(xatomic_ptr* target, void* value)
 {
     atomic_store_explicit(target, value, memory_order_release);
+}
+
+inline int atomic_cas_ptr(xatomic_ptr* target, void** expected, void* desired)
+{
+    return atomic_compare_exchange_strong_explicit(target, expected, desired, memory_order_acq_rel, memory_order_relaxed);
 }
 
 
