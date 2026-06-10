@@ -78,6 +78,21 @@ typedef struct {
 #define POOL_RESERVE_EXPAND_DEN       2
 #endif
 
+/* Resgate por backlog: dispara quando ring count ultrapassa este valor. */
+#ifndef POOL_DEFAULT_RESCUE_BACKLOG
+#define POOL_DEFAULT_RESCUE_BACKLOG   1
+#endif
+
+/* Parking: tempo ocioso (ms) apos o qual o worker para de spinar e dorme. */
+#ifndef POOL_DEFAULT_PARK_IDLE_MS
+#define POOL_DEFAULT_PARK_IDLE_MS     200
+#endif
+
+/* Sono profundo (us) de um worker parqueado. */
+#ifndef POOL_PARK_SLEEP_US
+#define POOL_PARK_SLEEP_US            100000
+#endif
+
 /* ─────────────────────────────────────────────────────────────────────────
  * ShardedPool — configuracao
  * ───────────────────────────────────────────────────────────────────────── */
@@ -91,6 +106,9 @@ typedef struct {
     int      reserve_size;           /* 0 → mesma quantidade de workers */
     int      monitor_interval_ms;
     uint64_t long_task_threshold_ns; /* 0 → POOL_DEFAULT_LONG_TASK_NS */
+
+    int      rescue_backlog_threshold; /* resgate quando ring count > N (default 1) */
+    int      park_idle_threshold_ms;   /* ocioso > N ms → parquear (default 200)   */
 
     xtask_thresholds_t task_thresholds;
     bool               task_thresholds_set;
@@ -120,6 +138,7 @@ typedef struct {
     uint64_t total_submitted;
     uint64_t submit_failures;
     uint64_t total_handoffs;
+    uint64_t total_rescued;
 } PoolStats;
 
 XPLATBASE_API void pool_stats(ShardedPool* pool, PoolStats* out);

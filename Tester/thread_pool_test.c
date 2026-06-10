@@ -810,6 +810,85 @@ static void test_handoff(void)
 }
 
 /* =========================================================================
+ * TESTE 5: Resgate por backlog
+ *
+ *   1 lane (shard_count=1) força backlog: uma rajada de tasks curtas (10ms,
+ *   abaixo do threshold de task longa) empilha no ring. O owner sozinho
+ *   serializaria (~10ms * posicao). O monitor de resgate deve trazer um
+ *   ajudante da reserva para drenar em paralelo.
+ *
+ *   Verificacoes:
+ *     - todos os callbacks foram chamados
+ *     - total_rescued > 0: houve resgate por backlog
+ * ========================================================================= */
+
+#define T5_TASK_COUNT     8
+#define T5_SLEEP_MS       10
+
+static void test_rescue(void)
+{
+    printf("\n================================================================================\n");
+    printf("  TESTE 5: Resgate por backlog (1 lane, %d tasks de %dms em rajada)\n",
+           T5_TASK_COUNT, T5_SLEEP_MS);
+    printf("================================================================================\n\n");
+
+    PoolConfig cfg  = pool_default_config();
+    cfg.shard_count = 1;   /* 1 lane → forca backlog no unico ring */
+
+    ShardedPool* pool = pool_create(&cfg);
+    TP_ASSERT(pool != NULL, "pool_create 1 shard != NULL");
+    if (!pool) return;
+
+    tp_counter_t done = 0;
+    TpTaskArg args[T5_TASK_COUNT];
+    memset(args, 0, sizeof(args));
+
+    uint64_t wall_start = tp_get_ns();
+
+    /* rajada: submete tudo de uma vez, sem intervalo */
+    for (int i = 0; i < T5_TASK_COUNT; i++) {
+        args[i].task_id      = i;
+        args[i].sleep_ms     = T5_SLEEP_MS;
+        args[i].done_counter = &done;
+        args[i].submit_tsc   = tsc_now();
+        if (!pool_submit(pool, task_cb_with_sleep, &args[i]))
+            args[i].executed = -1;
+    }
+
+    int timeout_ms = T5_SLEEP_MS * T5_TASK_COUNT + 5000;
+    int completed  = tp_wait_done(&done, T5_TASK_COUNT, timeout_ms);
+    uint64_t wall_end = tp_get_ns();
+
+    PoolStats stats;
+    pool_stats(pool, &stats);
+
+    pool_shutdown(pool);
+
+    TP_ASSERT(completed, "todas as tarefas concluidas no tempo limite");
+
+    int all_ok = 1;
+    for (int i = 0; i < T5_TASK_COUNT; i++)
+        if (args[i].executed != 1) { all_ok = 0; break; }
+    TP_ASSERT(all_ok, "todos os callbacks foram chamados (executed == 1)");
+
+    TP_ASSERT(stats.total_rescued > 0,
+              "total_rescued > 0: ajudante da reserva drenou o backlog");
+
+    printf("  Tempo parede  : %.1f ms (serial seria ~%d ms)\n",
+           (double)(wall_end - wall_start) / 1e6, T5_SLEEP_MS * T5_TASK_COUNT);
+    printf("  total_rescued : %llu\n", (unsigned long long)stats.total_rescued);
+
+    TpLatency r = compute_latency(args, T5_TASK_COUNT);
+    print_latency(&r);
+
+    printf("  Latencia por task:\n");
+    for (int i = 0; i < T5_TASK_COUNT; i++)
+        printf("    task[%d]  exec=%s  latencia=%.2f us\n",
+               i, args[i].executed == 1 ? "ok" : "FALHOU",
+               args[i].latency_ns / 1000.0);
+}
+
+/* =========================================================================
  * Entrypoint
  * ========================================================================= */
 
@@ -829,10 +908,11 @@ void thread_pool_test_run(void)
     CpuMonitor cpu_mon;
     cpu_monitor_start(&cpu_mon, 10);
 
-    //test_basic();
-    //test_single_thread_perf();
-    //test_multi_thread_perf(T3_THREAD_COUNT);
+    test_basic();
+    test_single_thread_perf();
+    test_multi_thread_perf(T3_THREAD_COUNT);
     test_handoff();
+    test_rescue();
 
     cpu_monitor_stop(&cpu_mon);
 
