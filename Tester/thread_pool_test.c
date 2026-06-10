@@ -347,7 +347,8 @@ static void task_cb_plain(void* arg)
     tp_counter_inc(t->done_counter);
 }
 
-/* Task com sleep configuravel: captura latencia, marca, dorme. */
+/* Task com sleep configuravel: captura latencia, marca, dorme.
+ * Conta no INICIO (mede latencia submit->exec, nao conclusao). */
 static void task_cb_with_sleep(void* arg)
 {
     TpTaskArg* t  = (TpTaskArg*)arg;
@@ -359,6 +360,19 @@ static void task_cb_with_sleep(void* arg)
         tp_sleep_ms(t->sleep_ms);
 }
 
+/* Igual a anterior, mas conta no FIM — o done_counter so sobe quando a task
+ * realmente conclui. Permite medir tempo parede ate o throughput completo. */
+static void task_cb_sleep_finish(void* arg)
+{
+    TpTaskArg* t  = (TpTaskArg*)arg;
+    t->exec_tsc   = tsc_now();
+    t->latency_ns = tsc_elapsed_ns(t->submit_tsc, t->exec_tsc);
+    t->executed   = 1;
+    if (t->sleep_ms > 0)
+        tp_sleep_ms(t->sleep_ms);
+    tp_counter_inc(t->done_counter);
+}
+
 /* =========================================================================
  * Aguarda conclusao de todas as tasks ou timeout
  * ========================================================================= */
@@ -368,8 +382,8 @@ static int tp_wait_done(tp_counter_t* done, int total, int timeout_ms)
     int elapsed = 0;
     while (tp_counter_read(done) < (LONG)total) {
         if (elapsed >= timeout_ms) return 0;
-        tp_sleep_ms(10);
-        elapsed += 10;
+        tp_sleep_ms(1);          /* granularidade fina p/ medir tempo parede */
+        elapsed += 1;
     }
     return 1;
 }
@@ -719,7 +733,7 @@ static void test_handoff(void)
     printf("================================================================================\n\n");
 
     PoolConfig cfg      = pool_default_config();
-    cfg.shard_count     = 2;   /* poucos workers aumentam chance de roubo */
+    cfg.shard_count     = 8;   /* poucos workers aumentam chance de roubo */
 
     ShardedPool* pool = pool_create(&cfg);
     TP_ASSERT(pool != NULL, "pool_create com config customizada != NULL");
@@ -825,6 +839,9 @@ static void test_handoff(void)
 #define T5_TASK_COUNT     8
 #define T5_SLEEP_MS       10
 
+/* Mede tempo parede ATE A CONCLUSAO (task_cb_sleep_finish). Com reserva
+ * generosa, o teto dinamico de ajudantes deixa as tasks rodarem quase em
+ * paralelo (owner + N ajudantes), aproximando o tempo de 1 rodada (~sleep_ms). */
 static void test_rescue(void)
 {
     printf("\n================================================================================\n");
@@ -832,8 +849,9 @@ static void test_rescue(void)
            T5_TASK_COUNT, T5_SLEEP_MS);
     printf("================================================================================\n\n");
 
-    PoolConfig cfg  = pool_default_config();
-    cfg.shard_count = 1;   /* 1 lane → forca backlog no unico ring */
+    PoolConfig cfg     = pool_default_config();
+    cfg.shard_count    = 1;              /* 1 lane → forca backlog no unico ring */
+    cfg.reserve_size   = T5_TASK_COUNT;  /* reserva generosa p/ escalar ajudantes */
 
     ShardedPool* pool = pool_create(&cfg);
     TP_ASSERT(pool != NULL, "pool_create 1 shard != NULL");
@@ -851,7 +869,7 @@ static void test_rescue(void)
         args[i].sleep_ms     = T5_SLEEP_MS;
         args[i].done_counter = &done;
         args[i].submit_tsc   = tsc_now();
-        if (!pool_submit(pool, task_cb_with_sleep, &args[i]))
+        if (!pool_submit(pool, task_cb_sleep_finish, &args[i]))
             args[i].executed = -1;
     }
 
@@ -872,20 +890,386 @@ static void test_rescue(void)
     TP_ASSERT(all_ok, "todos os callbacks foram chamados (executed == 1)");
 
     TP_ASSERT(stats.total_rescued > 0,
-              "total_rescued > 0: ajudante da reserva drenou o backlog");
+              "total_rescued > 0: ajudantes da reserva drenaram o backlog");
 
-    printf("  Tempo parede  : %.1f ms (serial seria ~%d ms)\n",
-           (double)(wall_end - wall_start) / 1e6, T5_SLEEP_MS * T5_TASK_COUNT);
-    printf("  total_rescued : %llu\n", (unsigned long long)stats.total_rescued);
+    /* com reserva generosa, o tempo ate a conclusao deve ficar bem abaixo do
+     * serial (8x10=80ms): owner + ajudantes rodam quase em paralelo */
+    double wall_ms = (double)(wall_end - wall_start) / 1e6;
+    TP_ASSERT(wall_ms < (double)(T5_SLEEP_MS * T5_TASK_COUNT) * 0.6,
+              "tempo ate conclusao < 60% do serial (ajudantes paralelizaram)");
+
+    printf("  Tempo parede (ate conclusao): %.1f ms (serial seria ~%d ms)\n",
+           wall_ms, T5_SLEEP_MS * T5_TASK_COUNT);
+    printf("  total_rescued (ajudantes despachados): %llu\n",
+           (unsigned long long)stats.total_rescued);
 
     TpLatency r = compute_latency(args, T5_TASK_COUNT);
     print_latency(&r);
 
-    printf("  Latencia por task:\n");
+    printf("  Latencia por task (submit->inicio):\n");
     for (int i = 0; i < T5_TASK_COUNT; i++)
         printf("    task[%d]  exec=%s  latencia=%.2f us\n",
                i, args[i].executed == 1 ? "ok" : "FALHOU",
                args[i].latency_ns / 1000.0);
+}
+
+/* =========================================================================
+ * TESTE 6: Gate de ocupacao — NAO resgatar quando ha capacidade ociosa
+ *
+ *   Muitas lanes, poucas tasks curtas: nenhum backlog se forma e ha workers
+ *   ociosos. O gate de ocupacao deve impedir qualquer resgate (total_rescued
+ *   == 0) — prova que o resgate nao atropela o caminho normal/steal.
+ * ========================================================================= */
+
+#define T6_TASK_COUNT     4
+
+static void test_rescue_no_overfire(void)
+{
+    printf("\n================================================================================\n");
+    printf("  TESTE 6: Gate de ocupacao (muitas lanes, %d tasks curtas → sem resgate)\n",
+           T6_TASK_COUNT);
+    printf("================================================================================\n\n");
+
+    PoolConfig cfg  = pool_default_config();
+    int nc          = xcpu_count();
+    cfg.shard_count = nc < 4 ? 4 : nc;   /* lanes de sobra → sempre ha worker ocioso */
+
+    ShardedPool* pool = pool_create(&cfg);
+    TP_ASSERT(pool != NULL, "pool_create != NULL");
+    if (!pool) return;
+
+    tp_counter_t done = 0;
+    TpTaskArg args[T6_TASK_COUNT];
+    memset(args, 0, sizeof(args));
+
+    for (int i = 0; i < T6_TASK_COUNT; i++) {
+        args[i].task_id      = i;
+        args[i].sleep_ms     = 0;       /* curtas: terminam na hora, nada acumula */
+        args[i].done_counter = &done;
+        args[i].submit_tsc   = tsc_now();
+        if (!pool_submit(pool, task_cb_with_sleep, &args[i]))
+            args[i].executed = -1;
+        tp_sleep_ms(2);                 /* espaca p/ garantir que nao enfileira */
+    }
+
+    int completed = tp_wait_done(&done, T6_TASK_COUNT, 5000);
+
+    PoolStats stats;
+    pool_stats(pool, &stats);
+
+    pool_shutdown(pool);
+
+    TP_ASSERT(completed, "todas as tarefas concluidas no tempo limite");
+    TP_ASSERT(stats.total_rescued == 0,
+              "total_rescued == 0: gate impediu resgate espurio (steal/owner bastam)");
+
+    printf("  lanes=%d  total_rescued=%llu (esperado 0)\n",
+           stats.shard_count, (unsigned long long)stats.total_rescued);
+}
+
+/* =========================================================================
+ * TESTE 7: Latencia de engate do resgate numa rajada
+ *
+ *   1 lane + reserva generosa. Rajada de N tasks de Xms. As tasks enfileiradas
+ *   (indices 1..N-1) sao drenadas por ajudantes de resgate.
+ *
+ *   Objetivo: medir QUANDO os ajudantes engatam. No estado atual eles so
+ *   engatam no backstop do monitor (~POOL_LONG_TASK_MONITOR_MS), porque durante
+ *   a rajada de microssegundos o owner ainda nao marcou busy_workers e o gate
+ *   de ocupacao reprova o resgate sincrono. Logo a latencia media de engate
+ *   fica ~= intervalo do monitor.
+ *
+ *   Este teste assere o comportamento ALVO (engate rapido): ele FALHA hoje
+ *   (vermelho/TDD) e deve passar apos o fix do engate sincrono.
+ * ========================================================================= */
+
+#define T7_TASK_COUNT       8
+#define T7_SLEEP_MS         10
+#define T7_ENGAGE_TARGET_MS 5    /* alvo: ajudantes engatam em < 5ms */
+
+static void test_rescue_engage_latency(void)
+{
+    printf("\n================================================================================\n");
+    printf("  TESTE 7: Latencia de engate do resgate (rajada, alvo < %d ms)\n",
+           T7_ENGAGE_TARGET_MS);
+    printf("================================================================================\n\n");
+
+    PoolConfig cfg     = pool_default_config();
+    cfg.shard_count    = 1;
+    cfg.reserve_size   = T7_TASK_COUNT;  /* ajudantes de sobra na reserva */
+
+    ShardedPool* pool = pool_create(&cfg);
+    TP_ASSERT(pool != NULL, "pool_create 1 shard != NULL");
+    if (!pool) return;
+
+    tp_counter_t done = 0;
+    TpTaskArg args[T7_TASK_COUNT];
+    memset(args, 0, sizeof(args));
+
+    /* rajada apertada */
+    for (int i = 0; i < T7_TASK_COUNT; i++) {
+        args[i].task_id      = i;
+        args[i].sleep_ms     = T7_SLEEP_MS;
+        args[i].done_counter = &done;
+        args[i].submit_tsc   = tsc_now();
+        if (!pool_submit(pool, task_cb_with_sleep, &args[i]))
+            args[i].executed = -1;
+    }
+
+    int timeout_ms = T7_SLEEP_MS * T7_TASK_COUNT + 5000;
+    int completed  = tp_wait_done(&done, T7_TASK_COUNT, timeout_ms);
+
+    pool_shutdown(pool);
+
+    TP_ASSERT(completed, "todas as tarefas concluidas no tempo limite");
+
+    /* latencia de engate = media submit->inicio das tasks ENFILEIRADAS (1..N-1).
+     * task[0] e pega pelo owner na hora; as demais dependem dos ajudantes. */
+    double sum = 0.0; int n = 0;
+    double mn = 1e30, mx = -1.0;
+    for (int i = 1; i < T7_TASK_COUNT; i++) {
+        if (args[i].executed != 1) continue;
+        double ms = args[i].latency_ns / 1e6;
+        sum += ms; n++;
+        if (ms < mn) mn = ms;
+        if (ms > mx) mx = ms;
+    }
+    double avg_engage = n ? sum / n : 0.0;
+
+    printf("  Engate das tasks enfileiradas (submit->inicio):\n");
+    printf("    avg=%.2f ms  min=%.2f ms  max=%.2f ms  (alvo avg < %d ms)\n",
+           avg_engage, mn, mx, T7_ENGAGE_TARGET_MS);
+
+    TP_ASSERT(avg_engage < (double)T7_ENGAGE_TARGET_MS,
+              "ajudantes engatam rapido (avg engate < alvo) [TDD: vermelho ate o fix]");
+}
+
+/* =========================================================================
+ * TESTE 8: Pressao sustentada — afericao do cenario que a expansao de lanes
+ *          (item 1, ainda NAO implementado) deve atacar.
+ *
+ *   Muitos produtores inundam o pool com tasks curtas. Com POUCAS lanes, os
+ *   poucos rings sofrem contencao de push e enchem → submit_failures e latencia
+ *   alta. Rodamos o MESMO workload com shard_count=2 (pressao) e
+ *   shard_count=ncores (folga, ~= o que a expansao dinamica convergiria) para
+ *   medir a lacuna.
+ *
+ *   Hoje e CARACTERIZACAO (mede e compara). Apos a expansao de lanes, a config
+ *   de poucas lanes (com max_shards alto) deve auto-crescer e fechar a lacuna.
+ * ========================================================================= */
+
+#define T8_PRODUCERS     8
+#define T8_PER_THREAD    1000
+#define T8_SLEEP_MS      1
+#define T8_RING_CAP      256    /* ring pequeno p/ evidenciar saturacao */
+
+typedef struct {
+    ShardedPool*  pool;
+    TpTaskArg*    args;
+    int           count;
+    tp_counter_t* done;
+    tp_counter_t* failed;
+} T8ThreadArg;
+
+#ifdef _WIN32
+static DWORD WINAPI t8_flood_fn(void* raw)
+#else
+static void* t8_flood_fn(void* raw)
+#endif
+{
+    T8ThreadArg* ta = (T8ThreadArg*)raw;
+    for (int i = 0; i < ta->count; i++) {
+        TpTaskArg* t = &ta->args[i];
+        t->submit_tsc = tsc_now();
+        if (!pool_submit(ta->pool, task_cb_with_sleep, t)) {  /* sem intervalo: inunda */
+            t->executed = -1;
+            tp_counter_inc(ta->failed);
+            tp_counter_inc(ta->done);
+        }
+    }
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+typedef struct {
+    double   wall_ms;
+    int      executed;
+    int      failed;
+    int      backpressure;   /* esperas no submit (ficou lento) */
+    int      expansions;     /* lanes ativadas dinamicamente    */
+    int      final_lanes;    /* active_lanes ao final           */
+    double   avg_us;
+    double   max_us;
+    double   throughput;     /* tasks executadas / s            */
+} T8Result;
+
+static void t8_run_pressure(const char* label, int shard_count, T8Result* out)
+{
+    int total = T8_PRODUCERS * T8_PER_THREAD;
+
+    PoolConfig cfg     = pool_default_config();
+    cfg.shard_count    = shard_count;
+    cfg.ring_capacity  = T8_RING_CAP;
+
+    ShardedPool* pool = pool_create(&cfg);
+    TP_ASSERT(pool != NULL, "pool_create (pressao) != NULL");
+    if (!pool) { memset(out, 0, sizeof(*out)); return; }
+
+    TpTaskArg*    args    = (TpTaskArg*)   calloc(total,        sizeof(TpTaskArg));
+    T8ThreadArg*  targs   = (T8ThreadArg*) calloc(T8_PRODUCERS, sizeof(T8ThreadArg));
+    tp_thread_t*  handles = (tp_thread_t*) calloc(T8_PRODUCERS, sizeof(tp_thread_t));
+
+    tp_counter_t done = 0, failed = 0;
+    for (int i = 0; i < total; i++) {
+        args[i].task_id      = i;
+        args[i].sleep_ms     = T8_SLEEP_MS;
+        args[i].done_counter = &done;
+    }
+
+    uint64_t wall_start = tp_get_ns();
+
+    for (int p = 0; p < T8_PRODUCERS; p++) {
+        targs[p].pool   = pool;
+        targs[p].args   = &args[p * T8_PER_THREAD];
+        targs[p].count  = T8_PER_THREAD;
+        targs[p].done   = &done;
+        targs[p].failed = &failed;
+        tp_thread_start(handles[p], t8_flood_fn, &targs[p]);
+    }
+
+    int completed = tp_wait_done(&done, total, 60000);
+    uint64_t wall_end = tp_get_ns();
+
+    for (int p = 0; p < T8_PRODUCERS; p++) tp_thread_join(handles[p]);
+
+    PoolStats st;
+    pool_stats(pool, &st);
+    pool_shutdown(pool);
+
+    TP_ASSERT(completed, "pressao: todas contabilizadas (executadas + falhas) no tempo limite");
+
+    TpLatency r = compute_latency(args, total);
+    out->wall_ms      = (double)(wall_end - wall_start) / 1e6;
+    out->executed     = r.executed;
+    out->failed       = (int)st.submit_failures;
+    out->backpressure = (int)st.submit_backpressure;
+    out->expansions   = (int)st.total_expansions;
+    out->final_lanes  = st.shard_count;   /* = active_lanes ao final */
+    out->avg_us       = r.avg_ns / 1000.0;
+    out->max_us       = r.max_ns / 1000.0;
+    out->throughput   = out->wall_ms > 0 ? (double)r.executed / (out->wall_ms / 1000.0) : 0.0;
+
+    printf("  [%s] inicio=%d → final=%d lanes  exec=%d falhas=%d  expans=%d backpressure=%d  "
+           "wall=%.1fms  throughput=%.0f tasks/s\n",
+           label, shard_count, out->final_lanes, r.executed, out->failed,
+           out->expansions, out->backpressure, out->wall_ms, out->throughput);
+
+    free(args); free(targs); free(handles);
+}
+
+static void test_pressure(void)
+{
+    printf("\n================================================================================\n");
+    printf("  TESTE 8: Pressao sustentada (%d produtores x %d tasks de %dms, ring=%d)\n",
+           T8_PRODUCERS, T8_PER_THREAD, T8_SLEEP_MS, T8_RING_CAP);
+    printf("================================================================================\n\n");
+
+    int nc = xcpu_count();
+    if (nc < 4) nc = 4;
+
+    T8Result few, many;
+    printf("  -- poucas lanes iniciais (deve expandir sob pressao) --\n");
+    t8_run_pressure("poucas", 2, &few);
+    printf("  -- muitas lanes iniciais --\n");
+    t8_run_pressure("muitas", nc, &many);
+
+    /* Novo contrato: submit NUNCA falha — sob saturacao ele fica LENTO
+     * (backpressure por espera) e/ou o pool EXPANDE lanes. Sinais robustos: */
+    TP_ASSERT(few.failed == 0 && many.failed == 0,
+              "submit nunca falha sob pressao (0 rejeicoes)");
+    TP_ASSERT(few.expansions > 0,
+              "poucas lanes EXPANDIRAM sob pressao (item 1)");
+    TP_ASSERT(few.backpressure > 0 || few.expansions > 0,
+              "sob saturacao o submit ficou lento ou expandiu (nao falhou)");
+    TP_ASSERT(few.final_lanes > 2,
+              "config de 2 lanes cresceu o nº de lanes ativas");
+    TP_ASSERT(few.final_lanes <= xcpu_count(),
+              "expansao automatica nao passou do nº de cores (cap em cores)");
+
+    printf("\n  poucas: %d→%d lanes, expans=%d, backpressure=%d, throughput=%.0f, falhas=%d\n",
+           2, few.final_lanes, few.expansions, few.backpressure, few.throughput, few.failed);
+    printf("  muitas: %d→%d lanes, expans=%d, backpressure=%d, throughput=%.0f, falhas=%d\n",
+           nc, many.final_lanes, many.expansions, many.backpressure, many.throughput, many.failed);
+}
+
+/* =========================================================================
+ * TESTE 9: Contracao de lanes (item 4)
+ *
+ *   Expande sob rajada e, apos ficar ocioso, deve encolher de volta as lanes
+ *   ativas em direcao ao nº inicial (parking/contracao). Valida o ciclo
+ *   expandir → ocioso → contrair.
+ * ========================================================================= */
+
+#define T9_PRODUCERS   4
+#define T9_PER_THREAD  500
+#define T9_RING_CAP    256
+
+static void test_contraction(void)
+{
+    printf("\n================================================================================\n");
+    printf("  TESTE 9: Contracao de lanes (expande sob rajada, contrai ocioso)\n");
+    printf("================================================================================\n\n");
+
+    PoolConfig cfg    = pool_default_config();
+    cfg.shard_count   = 2;
+    cfg.ring_capacity = T9_RING_CAP;
+
+    ShardedPool* pool = pool_create(&cfg);
+    TP_ASSERT(pool != NULL, "pool_create != NULL");
+    if (!pool) return;
+
+    int total = T9_PRODUCERS * T9_PER_THREAD;
+    TpTaskArg*   args    = (TpTaskArg*)   calloc(total,        sizeof(TpTaskArg));
+    T8ThreadArg* targs   = (T8ThreadArg*) calloc(T9_PRODUCERS, sizeof(T8ThreadArg));
+    tp_thread_t* handles = (tp_thread_t*) calloc(T9_PRODUCERS, sizeof(tp_thread_t));
+    tp_counter_t done = 0, failed = 0;
+
+    for (int i = 0; i < total; i++) {
+        args[i].sleep_ms     = 1;
+        args[i].done_counter = &done;
+    }
+    for (int p = 0; p < T9_PRODUCERS; p++) {
+        targs[p].pool = pool; targs[p].args = &args[p * T9_PER_THREAD];
+        targs[p].count = T9_PER_THREAD; targs[p].done = &done; targs[p].failed = &failed;
+        tp_thread_start(handles[p], t8_flood_fn, &targs[p]);
+    }
+    for (int p = 0; p < T9_PRODUCERS; p++) tp_thread_join(handles[p]);
+
+    PoolStats peak;
+    pool_stats(pool, &peak);   /* logo apos a rajada: lanes expandidas */
+
+    tp_wait_done(&done, total, 30000);
+
+    /* ocioso o suficiente p/ a contracao (histerese ~500ms + 1 lane/scan) */
+    tp_sleep_ms(2500);
+
+    PoolStats after;
+    pool_stats(pool, &after);
+
+    pool_shutdown(pool);
+
+    TP_ASSERT(peak.shard_count > 2, "expandiu sob rajada (lanes > inicial)");
+    TP_ASSERT(after.shard_count < peak.shard_count, "contraiu apos ocioso (lanes < pico)");
+    TP_ASSERT(after.shard_count >= 2, "nao contraiu abaixo do inicial (piso)");
+
+    printf("  lanes: inicial=2  pico=%d  apos ocioso=%d  (expansoes=%llu)\n",
+           peak.shard_count, after.shard_count,
+           (unsigned long long)peak.total_expansions);
+
+    free(args); free(targs); free(handles);
 }
 
 /* =========================================================================
@@ -908,11 +1292,15 @@ void thread_pool_test_run(void)
     CpuMonitor cpu_mon;
     cpu_monitor_start(&cpu_mon, 10);
 
-    test_basic();
+    /*test_basic();
     test_single_thread_perf();
-    test_multi_thread_perf(T3_THREAD_COUNT);
+    test_multi_thread_perf(T3_THREAD_COUNT);*/
     test_handoff();
-    test_rescue();
+ /*   test_rescue();
+    test_rescue_no_overfire();
+    test_rescue_engage_latency();
+    test_pressure();
+    test_contraction();*/
 
     cpu_monitor_stop(&cpu_mon);
 

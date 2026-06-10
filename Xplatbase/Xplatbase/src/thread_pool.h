@@ -28,8 +28,9 @@ typedef struct ShardedPool ShardedPool;
 typedef void (*task_fn)(void*);
 
 typedef struct {
-    task_fn fn;
-    void*   arg;
+    task_fn  fn;
+    void*    arg;
+    uint64_t enqueue_tsc;   /* TSC do submit; usado p/ medir tempo de espera na fila */
 } Task;
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -88,6 +89,11 @@ typedef struct {
 #define POOL_DEFAULT_PARK_IDLE_MS     200
 #endif
 
+/* Teto absoluto de ajudantes de resgate por lane (0 → usa nº de cores). */
+#ifndef POOL_DEFAULT_RESCUE_MAX_HELPERS
+#define POOL_DEFAULT_RESCUE_MAX_HELPERS  0
+#endif
+
 /* Sono profundo (us) de um worker parqueado. */
 #ifndef POOL_PARK_SLEEP_US
 #define POOL_PARK_SLEEP_US            100000
@@ -107,7 +113,9 @@ typedef struct {
     int      monitor_interval_ms;
     uint64_t long_task_threshold_ns; /* 0 → POOL_DEFAULT_LONG_TASK_NS */
 
-    int      rescue_backlog_threshold; /* resgate quando ring count > N (default 1) */
+    int      rescue_backlog_threshold; /* resgate quando ring count >= N (default 1) */
+    int      rescue_max_helpers_per_lane; /* teto de ajudantes por lane (0 → nº cores) */
+    int      max_auto_expand_lanes;    /* teto da expansao automatica (0 → nº cores logicos) */
     int      park_idle_threshold_ms;   /* ocioso > N ms → parquear (default 200)   */
 
     xtask_thresholds_t task_thresholds;
@@ -139,6 +147,8 @@ typedef struct {
     uint64_t submit_failures;
     uint64_t total_handoffs;
     uint64_t total_rescued;
+    uint64_t submit_backpressure;   /* nº de esperas no submit (backpressure) */
+    uint64_t total_expansions;      /* lanes ativadas dinamicamente */
 } PoolStats;
 
 XPLATBASE_API void pool_stats(ShardedPool* pool, PoolStats* out);

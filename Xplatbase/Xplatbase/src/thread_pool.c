@@ -96,7 +96,7 @@ typedef struct WSLane {
     void*        ring_buf;
     xwait_t      wait;             /* dormir/acordar worker atribuido a essa lane */
     xatomic_ptr  worker;           /* WSWorker* owner da lane (apenas referencia) */
-    xatomic_int  rescue_active;    /* 1 = ja ha um ajudante de resgate atuando aqui */
+    xatomic_int  rescue_helpers;   /* nº de ajudantes de resgate atuando agora */
 } WSLane;
 
 struct WSWorker {
@@ -115,7 +115,11 @@ struct WSWorker {
 
 struct ShardedPool {
     WSLane*         lanes;
-    int             lane_count;
+    int             lane_capacity;     /* lanes pre-alocadas (= max_shards)           */
+    int             expand_cap;        /* teto da expansao AUTOMATICA (<= lane_capacity) */
+    int             initial_lanes;     /* nº inicial = shard_count (piso da contracao) */
+    xatomic_int     active_lanes;      /* lanes ativas p/ submit (cresce/encolhe)     */
+    xatomic_int     max_active_ever;   /* high-water: steal/monitor varrem este range  */
 
     WSWorker**      all_workers;
     xatomic_int     all_worker_count;
@@ -148,17 +152,22 @@ struct ShardedPool {
     xatomic_int     stat_stolen;
     xatomic_int     stat_handoffs;
     xatomic_int     stat_rescued;
+    xatomic_int     stat_backpressure;   /* nº de vezes que submit teve que esperar */
+    xatomic_int     stat_expansions;     /* lanes ativadas dinamicamente */
 
     uint64_t        spin_budget_cycles;
     int             spin_iterations;
     int             ring_capacity;
 
     int             rescue_backlog_threshold;
+    int             rescue_max_helpers;     /* teto absoluto de ajudantes por lane */
     uint64_t        park_threshold_tsc;     /* 0 = parking desativado */
     xatomic_int     warned_oversubscribe;   /* aviso de cores: emitido 1x */
 
     xatomic_int     busy_workers;           /* workers executando task agora (ocupacao) */
     uint64_t        rescue_wait_unit_tsc;   /* unidade p/ ranking de tempo de espera */
+
+    int             low_load_scans;         /* histerese de contracao (so o monitor toca) */
 };
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -171,6 +180,7 @@ static XPL_FN long_task_monitor_fn(void* raw);
 
 static WSWorker* worker_create(ShardedPool* pool);
 static void      worker_start (WSWorker* w);
+static bool      activate_lane(ShardedPool* pool);
 
 /* ─────────────────────────────────────────────────────────────────────────
  * Marcador de inicio/fim de task — chamado pelo worker
@@ -257,7 +267,7 @@ static bool lane_pop_task(WSLane* lane, Task* out)
 static bool worker_try_steal(WSWorker* w, WSLane* my_lane, Task* out)
 {
     ShardedPool* pool = w->pool;
-    int n = pool->lane_count;
+    int n = atomic_get(&pool->max_active_ever);  /* varre ate o high-water: pega residuais de lanes desativadas */
     if (n <= 1) return false;
 
     int start = (int)((unsigned int)w->id + 1) % n;
@@ -332,7 +342,8 @@ static void sample_neighbors_for_long_tasks(WSWorker* self)
     uint64_t now      = xpl_rdtscp();
     uint64_t thresh   = pool->long_threshold_tsc;
 
-    for (int i = 0; i < pool->lane_count; i++) {
+    int n = atomic_get(&pool->max_active_ever);
+    for (int i = 0; i < n; i++) {
         WSLane*   lane = &pool->lanes[i];
         WSWorker* w    = (WSWorker*)atomic_get_ptr(&lane->worker);
         if (!w || w == self) continue;
@@ -468,9 +479,23 @@ static XPL_FN worker_fn(void* raw)
             /* Backlog drenado — ajudante de resgate volta para a reserva. */
             WSLane* L = (WSLane*)atomic_get_ptr(&w->lane);
             atomic_set(&w->rescue_mode, 0);
-            if (L) atomic_set(&L->rescue_active, 0);
+            if (L) atomic_sub(&L->rescue_helpers, 1);
             worker_return_to_reserve(w);
             last_work = xpl_tsc();
+        }
+        else if (!got) {
+            /* Owner de lane DESATIVADA (contracao): se a lane saiu do range
+             * ativo e seu ring esvaziou, libera a lane e volta a reserva. */
+            WSLane* L = (WSLane*)atomic_get_ptr(&w->lane);
+            if (L) {
+                int index = (int)(L - pool->lanes);
+                if (index >= atomic_get(&pool->active_lanes) &&
+                    ring_queue_count(&L->ring) == 0) {
+                    atomic_set_ptr(&L->worker, NULL);  /* libera p/ futura reativacao */
+                    worker_return_to_reserve(w);
+                    last_work = xpl_tsc();
+                }
+            }
         }
     }
 
@@ -514,40 +539,65 @@ static bool perform_handoff(ShardedPool* pool, WSLane* lane, WSWorker* victim, u
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
- * Resgate por backlog — traz um ajudante da reserva para drenar a lane
- *   Diferente do handoff: nao substitui o owner; adiciona um worker extra que
- *   puxa do mesmo ring (MPMC) e, ao ociar, volta para a reserva.
- *   Guard lane->rescue_active garante no maximo 1 ajudante por lane.
+ * Resgate por backlog — traz ajudantes da reserva para drenar a lane
+ *   Diferente do handoff: nao substitui o owner; adiciona workers extras que
+ *   puxam do mesmo ring (MPMC) e, ao ociar, voltam para a reserva.
+ *
+ *   Teto dinamico de ajudantes (fusao dos antigos itens "multiplos ajudantes"
+ *   + "ranking decide quantos"): a quantidade desejada e dirigida pela
+ *   profundidade da fila (1 ajudante por task pendente, pois o owner esta
+ *   ocupado), limitada por: teto absoluto, reserva disponivel e folga de cores
+ *   (nunca oversubscrever). lane->rescue_helpers conta os ativos.
  * ───────────────────────────────────────────────────────────────────────── */
+
+static int lane_helper_cap(ShardedPool* pool, int pending)
+{
+    if (pending < 1) return 0;
+    int cap = pending;  /* owner ocupado → cada pendente justifica um ajudante */
+    if (pool->rescue_max_helpers > 0 && cap > pool->rescue_max_helpers)
+        cap = pool->rescue_max_helpers;
+    return cap;
+}
 
 static void dispatch_rescue_worker(ShardedPool* pool, WSLane* lane)
 {
-    int expected = 0;
-    if (!atomic_cas(&lane->rescue_active, &expected, 1))
-        return;  /* ja ha ajudante atuando nesta lane */
+    for (;;) {
+        int pending = ring_queue_count(&lane->ring);
+        int cap     = lane_helper_cap(pool, pending);
+        int cur     = atomic_get(&lane->rescue_helpers);
+        if (cur >= cap) break;
 
-    WSWorker* spare = reserve_pop(pool);
-    if (!spare) {
-        atomic_set(&lane->rescue_active, 0);
-        reserve_monitor_wake(pool);  /* refazer reserva; backstop tenta de novo */
-        return;
+        /* folga de cores: nunca passar do nº de cores logicos ocupados */
+        if (atomic_get(&pool->busy_workers) >= xcpu_count()) break;
+
+        int expected = cur;
+        if (!atomic_cas(&lane->rescue_helpers, &expected, cur + 1))
+            continue;  /* outro dispatcher mexeu — reavalia */
+
+        WSWorker* spare = reserve_pop(pool);
+        if (!spare) {
+            atomic_sub(&lane->rescue_helpers, 1);  /* reverte o slot reservado */
+            reserve_monitor_wake(pool);            /* refazer reserva; backstop tenta de novo */
+            break;
+        }
+
+        atomic_set(&spare->rescue_mode, 1);
+        atomic_set_ptr(&spare->lane, lane);
+        thread_wait_wake(&spare->reserve_wait);    /* tira da reserva */
+        thread_wait_wake(&lane->wait);
+        atomic_add(&pool->stat_rescued, 1);
     }
-
-    atomic_set(&spare->rescue_mode, 1);
-    atomic_set_ptr(&spare->lane, lane);
-
-    thread_wait_wake(&spare->reserve_wait);  /* tira da reserva */
-    thread_wait_wake(&lane->wait);
-
-    atomic_add(&pool->stat_rescued, 1);
     reserve_monitor_wake(pool);  /* repor reserva — salvaguarda */
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
  * Ranking de resgate — combina 3 indicadores para decidir SEM atropelar o steal
  *   1. profundidade : pending >= rescue_backlog_threshold (default 1)
- *   2. ocupacao     : GATE — se ha worker ocioso (busy < lane_count), o steal
- *                     resolve sozinho → score 0 (nao gasta reserva).
+ *   2. saturacao    : GATE — passa se TODOS ocupados (busy >= lane_count) OU se
+ *                     ha mais pendentes que lanes (pending >= lane_count). O 2º
+ *                     criterio engata de imediato numa rajada, antes de
+ *                     busy_workers atualizar; e nesse caso o steal nao consegue
+ *                     espalhar (ha mais backlog que lanes), entao nao atropela.
  *   3. tempo preso  : ha quanto tempo o owner esta na task atual (proxy do
  *                     tempo que a task enfileirada vai esperar).
  *   Retorna 0 = nao resgatar; >0 = urgencia (maior = mais prioritario).
@@ -555,20 +605,40 @@ static void dispatch_rescue_worker(ShardedPool* pool, WSLane* lane)
 
 static int lane_rescue_score(ShardedPool* pool, WSLane* lane)
 {
-    if (atomic_get(&lane->rescue_active)) return 0;  /* ja recebendo ajuda */
-
     int pending = ring_queue_count(&lane->ring);
     if (pending < pool->rescue_backlog_threshold) return 0;          /* (1) */
 
-    if (atomic_get(&pool->busy_workers) < pool->lane_count) return 0; /* (2) gate */
+    int active = atomic_get(&pool->active_lanes);
+    if (atomic_get(&pool->busy_workers) < active &&
+        pending < active) return 0;                                  /* (2) gate */
+
+    /* ja tem ajudantes suficientes para a profundidade atual? */
+    if (atomic_get(&lane->rescue_helpers) >= lane_helper_cap(pool, pending)) return 0;
 
     uint64_t wait_score = 0;                                          /* (3) */
-    WSWorker* w = (WSWorker*)atomic_get_ptr(&lane->worker);
-    if (w) {
-        uint64_t start = (uint64_t)atomic_get64(&w->task_start_tsc);
-        if (start && pool->rescue_wait_unit_tsc) {
-            uint64_t busy = xpl_rdtscp() - start;
-            wait_score = busy / pool->rescue_wait_unit_tsc;
+
+    /* Item 5: tempo de espera REAL da cabeca da fila (enqueue_tsc no Task).
+     * peek e MPMC-racy, entao defende contra leitura suja limitando a ~5s. */
+    Task head;
+    if (pool->rescue_wait_unit_tsc &&
+        xring_peek(&lane->ring, lane->ring_buf, &head) && head.enqueue_tsc) {
+        uint64_t now = xpl_rdtscp();
+        if (now > head.enqueue_tsc) {
+            uint64_t waited = now - head.enqueue_tsc;
+            if (waited < pool->rescue_wait_unit_tsc * 10000ULL)  /* sanidade */
+                wait_score = waited / pool->rescue_wait_unit_tsc;
+        }
+    }
+
+    /* Fallback: proxy pelo tempo que o owner esta preso na task atual. */
+    if (wait_score == 0) {
+        WSWorker* w = (WSWorker*)atomic_get_ptr(&lane->worker);
+        if (w) {
+            uint64_t start = (uint64_t)atomic_get64(&w->task_start_tsc);
+            if (start) {
+                uint64_t busy = xpl_rdtscp() - start;
+                wait_score = busy / pool->rescue_wait_unit_tsc;
+            }
         }
     }
 
@@ -579,9 +649,10 @@ static int lane_rescue_score(ShardedPool* pool, WSLane* lane)
  * reserva disponivel. Usado pelo monitor como backstop. */
 static void scan_lanes_for_rescue(ShardedPool* pool)
 {
-    for (int guard = 0; guard < pool->lane_count; guard++) {
+    int n = atomic_get(&pool->active_lanes);
+    for (int guard = 0; guard < n; guard++) {
         int best = -1, best_score = 0;
-        for (int i = 0; i < pool->lane_count; i++) {
+        for (int i = 0; i < n; i++) {
             int s = lane_rescue_score(pool, &pool->lanes[i]);
             if (s > best_score) { best_score = s; best = i; }
         }
@@ -602,7 +673,8 @@ static void scan_lanes_for_handoff(ShardedPool* pool)
     uint64_t now    = xpl_rdtscp();
     uint64_t thresh = pool->long_threshold_tsc;
 
-    for (int i = 0; i < pool->lane_count; i++) {
+    int n = atomic_get(&pool->max_active_ever);
+    for (int i = 0; i < n; i++) {
         WSLane*   lane = &pool->lanes[i];
         WSWorker* w    = (WSWorker*)atomic_get_ptr(&lane->worker);
         if (!w) continue;
@@ -613,6 +685,68 @@ static void scan_lanes_for_handoff(ShardedPool* pool)
 
         perform_handoff(pool, lane, w, start);
     }
+}
+
+/* Item 6: ajudantes de resgate (rescue_mode) nao estao em lane->worker, entao o
+ * scan acima nao os ve. Se um ajudante esta preso em task longa e a lane ainda
+ * tem backlog, despacha mais ajuda para a lane continuar drenando. */
+static void scan_helpers_for_long_tasks(ShardedPool* pool)
+{
+    uint64_t now    = xpl_rdtscp();
+    uint64_t thresh = pool->long_threshold_tsc;
+    int total = atomic_get(&pool->all_worker_count);
+
+    for (int i = 0; i < total; i++) {
+        WSWorker* w = pool->all_workers[i];
+        if (!w) continue;
+        if (!atomic_get(&w->rescue_mode)) continue;   /* so ajudantes */
+
+        WSLane* L = (WSLane*)atomic_get_ptr(&w->lane);
+        if (!L) continue;
+        if (worker_long_task_start(w, now, thresh) == 0) continue;
+
+        if (ring_queue_count(&L->ring) > 0)
+            dispatch_rescue_worker(pool, L);           /* lane segue drenando */
+    }
+}
+
+/* Quantos scans consecutivos de carga baixa antes de contrair 1 lane (histerese).
+ * Com intervalo de 10ms, 50 scans ≈ 500ms de ociosidade sustentada. */
+#define LANE_CONTRACT_HYSTERESIS  50
+
+/* Expansao proativa: sob carga sustentada (todos ocupados + backlog), ativa
+ * 1 lane por scan, conservador. O caminho do submit ja cobre o "ring cheio". */
+static void scan_maybe_expand(ShardedPool* pool)
+{
+    int active = atomic_get(&pool->active_lanes);
+    if (active >= pool->expand_cap) return;
+    if (atomic_get(&pool->busy_workers) < active) return;  /* ha folga → nao expande */
+
+    int pend = 0;
+    for (int i = 0; i < active; i++) pend += ring_queue_count(&pool->lanes[i].ring);
+    if (pend >= active) activate_lane(pool);               /* mais backlog que lanes */
+}
+
+/* Contracao segura: sob carga baixa sustentada, desativa a lane do topo se ela
+ * estiver vazia e acima do nº inicial. O owner volta a reserva ao ociar (ve o
+ * index >= active_lanes); residuais de corrida sao drenados via steal
+ * (que varre max_active_ever). */
+static void scan_maybe_contract(ShardedPool* pool)
+{
+    int active = atomic_get(&pool->active_lanes);
+
+    bool low = active > pool->initial_lanes &&
+               atomic_get(&pool->busy_workers) < active &&
+               ring_queue_count(&pool->lanes[active - 1].ring) == 0;
+
+    if (!low) { pool->low_load_scans = 0; return; }
+
+    /* Histerese p/ ENTRAR em contracao; depois contrai 1 lane por scan enquanto
+     * a carga seguir baixa (nao zera o contador). */
+    if (++pool->low_load_scans < LANE_CONTRACT_HYSTERESIS) return;
+
+    int exp = active;
+    atomic_cas(&pool->active_lanes, &exp, active - 1);  /* desativa a top lane */
 }
 
 static XPL_FN long_task_monitor_fn(void* raw)
@@ -626,7 +760,10 @@ static XPL_FN long_task_monitor_fn(void* raw)
                               pool->long_monitor_interval_ms * 1000);
         if (atomic_get(&pool->shutdown)) break;
         scan_lanes_for_handoff(pool);
+        scan_helpers_for_long_tasks(pool);
         scan_lanes_for_rescue(pool);
+        scan_maybe_expand(pool);
+        scan_maybe_contract(pool);
     }
 
     atomic_set(&pool->long_task_monitor_running, 0);
@@ -763,6 +900,8 @@ PoolConfig pool_default_config(void)
     c.monitor_interval_ms    = POOL_MONITOR_INTERVAL_MS;
     c.long_task_threshold_ns = POOL_DEFAULT_LONG_TASK_NS;
     c.rescue_backlog_threshold = POOL_DEFAULT_RESCUE_BACKLOG;
+    c.rescue_max_helpers_per_lane = POOL_DEFAULT_RESCUE_MAX_HELPERS;
+    c.max_auto_expand_lanes    = 0;   /* 0 → nº de cores logicos */
     c.park_idle_threshold_ms   = POOL_DEFAULT_PARK_IDLE_MS;
     c.task_thresholds.long_threshold_ns = (uint64_t)XTASK_DEFAULT_LONG_NS;
     c.task_thresholds.blocked_ratio_max = XTASK_DEFAULT_BLOCKED_RATIO;
@@ -784,15 +923,17 @@ static uint64_t ns_to_tsc(uint64_t ns)
 
 static bool pool_setup_lanes_and_workers(ShardedPool* pool, int ring_capacity)
 {
-    pool->lanes = (WSLane*)calloc(pool->lane_count, sizeof(WSLane));
+    /* Pre-aloca TODAS as lanes ate lane_capacity (= max_shards). As extras ficam
+     * prontas (ring inicializado) e sao ativadas sob demanda — sem realloc. */
+    pool->lanes = (WSLane*)calloc(pool->lane_capacity, sizeof(WSLane));
     if (!pool->lanes) return false;
 
-    for (int i = 0; i < pool->lane_count; i++) {
+    for (int i = 0; i < pool->lane_capacity; i++) {
         if (!lane_init(&pool->lanes[i], ring_capacity)) return false;
     }
 
-    /* Workers ativos (1 por lane). */
-    for (int i = 0; i < pool->lane_count; i++) {
+    /* Workers ativos: 1 por lane INICIAL (as demais lanes ganham owner ao ativar). */
+    for (int i = 0; i < pool->initial_lanes; i++) {
         WSWorker* w = worker_create(pool);
         if (!w) return false;
         atomic_set_ptr(&w->lane, &pool->lanes[i]);
@@ -849,7 +990,20 @@ ShardedPool* pool_create(const PoolConfig* cfg)
     ShardedPool* pool = (ShardedPool*)calloc(1, sizeof(ShardedPool));
     if (!pool) return NULL;
 
-    pool->lane_count               = c.shard_count;
+    int max_shards = (c.max_shards > 0) ? c.max_shards : POOL_DEFAULT_MAX_SHARDS;
+    if (max_shards < c.shard_count) max_shards = c.shard_count;
+    pool->lane_capacity            = max_shards;
+    pool->initial_lanes            = c.shard_count;
+
+    /* Teto da expansao automatica: default = nº de cores logicos. Mantem-se
+     * dentro de [initial_lanes, lane_capacity]. max_shards segue como teto duro. */
+    int auto_cap = (c.max_auto_expand_lanes > 0) ? c.max_auto_expand_lanes : xcpu_count();
+    if (auto_cap > max_shards)      auto_cap = max_shards;
+    if (auto_cap < c.shard_count)   auto_cap = c.shard_count;
+    pool->expand_cap               = auto_cap;
+    atomic_set(&pool->active_lanes,    c.shard_count);
+    atomic_set(&pool->max_active_ever, c.shard_count);
+
     pool->ring_capacity            = c.ring_capacity;
     pool->spin_iterations          = c.spin_iterations;
     pool->long_threshold_tsc       = ns_to_tsc(c.long_task_threshold_ns);
@@ -857,6 +1011,8 @@ ShardedPool* pool_create(const PoolConfig* cfg)
 
     pool->rescue_backlog_threshold = (c.rescue_backlog_threshold > 0)
                                    ? c.rescue_backlog_threshold : POOL_DEFAULT_RESCUE_BACKLOG;
+    pool->rescue_max_helpers       = (c.rescue_max_helpers_per_lane > 0)
+                                   ? c.rescue_max_helpers_per_lane : xcpu_count();
     pool->park_threshold_tsc       = (c.park_idle_threshold_ms > 0)
                                    ? ns_to_tsc((uint64_t)c.park_idle_threshold_ms * 1000000ULL) : 0;
     pool->rescue_wait_unit_tsc     = ns_to_tsc(500000ULL);  /* 0.5ms por ponto de ranking */
@@ -869,7 +1025,7 @@ ShardedPool* pool_create(const PoolConfig* cfg)
     int reserve_target = (c.reserve_size > 0) ? c.reserve_size : c.shard_count;
     atomic_set(&pool->reserve_target, reserve_target);
 
-    pool->all_worker_capacity = (c.shard_count + reserve_target) * 4;  /* folga p/ expansao */
+    pool->all_worker_capacity = (pool->lane_capacity + reserve_target) * 4;  /* folga p/ expansao */
     pool->all_workers = (WSWorker**)calloc(pool->all_worker_capacity, sizeof(WSWorker*));
     if (!pool->all_workers) { free(pool); return NULL; }
 
@@ -943,23 +1099,112 @@ static void submit_check_rescue(ShardedPool* pool, WSLane* lane)
         dispatch_rescue_worker(pool, lane);
 }
 
-bool pool_submit(ShardedPool* pool, task_fn fn, void* arg)
+/* Ativa a proxima lane pre-alocada, atribuindo um worker da reserva como owner.
+ * So ativa COM worker (evita lane orfa). Retorna false se no teto (max_shards)
+ * ou sem worker pronto (nesse caso acorda o monitor da reserva p/ criar). */
+static bool activate_lane(ShardedPool* pool)
 {
-    int     widx = (int)((unsigned int)atomic_add(&pool->submit_seq, 1) % (unsigned int)pool->lane_count);
-    WSLane* lane = &pool->lanes[widx];
+    int idx = atomic_get(&pool->active_lanes);
+    if (idx >= pool->expand_cap) return false;             /* no teto de expansao automatica */
 
-    Task t = { fn, arg };
-    if (!xring_push_mp(&lane->ring, lane->ring_buf, &t)) {
-        atomic_add(&pool->stat_failures, 1);
+    WSWorker* w = reserve_pop(pool);
+    if (!w) { reserve_monitor_wake(pool); return false; }  /* sem worker → adiado */
+
+    int exp = idx;
+    if (!atomic_cas(&pool->active_lanes, &exp, idx + 1)) {
+        reserve_push(pool, w);   /* perdeu a corrida de ativacao; devolve worker */
         return false;
     }
 
+    WSLane* lane = &pool->lanes[idx];
+
+    /* Se a lane ainda tem um owner antigo (contracao recente que ainda nao
+     * voltou a reserva), reusa-o: ele vera index < active_lanes e permanece.
+     * Devolve o spare que pegamos. */
+    if (atomic_get_ptr(&lane->worker) != NULL) {
+        reserve_push(pool, w);
+        thread_wait_wake(&lane->wait);
+    } else {
+        atomic_set(&w->rescue_mode, 0);
+        atomic_set(&w->detached, 0);
+        atomic_set_ptr(&w->lane, lane);
+        atomic_set_ptr(&lane->worker, w);
+        thread_wait_wake(&w->reserve_wait);
+    }
+
+    /* sobe o high-water p/ steal/monitor varrerem a lane nova */
+    int hw = atomic_get(&pool->max_active_ever);
+    while (hw < idx + 1) {
+        int e = hw;
+        if (atomic_cas(&pool->max_active_ever, &e, idx + 1)) break;
+        hw = atomic_get(&pool->max_active_ever);
+    }
+
+    atomic_add(&pool->stat_expansions, 1);
+    reserve_monitor_wake(pool);  /* repor reserva */
+
+    int ncores = xcpu_count();
+    if (idx + 1 > ncores) {
+        int warned = 0;
+        if (atomic_cas(&pool->warned_oversubscribe, &warned, 1))
+            fprintf(stderr, "[pool] aviso: %d lanes ativas com apenas %d nucleos "
+                            "logicos — oversubscription\n", idx + 1, ncores);
+    }
+    return true;
+}
+
+/* Backoff progressivo do submit quando tudo esta cheio: fica LENTO, nao falha. */
+static void submit_backoff(int* spins)
+{
+    int s = (*spins)++;
+    if      (s < 64)  xcpu_pause();
+    else if (s < 256) xpl_yield();
+    else              xsleep_ms(1);
+}
+
+static bool submit_push_lane(ShardedPool* pool, WSLane* lane, Task* t)
+{
+    if (!xring_push_mp(&lane->ring, lane->ring_buf, t)) return false;
     atomic_add(&pool->stat_submitted, 1);
     thread_wait_wake(&lane->wait);
-
     submit_check_handoff(pool, lane);
     submit_check_rescue(pool, lane);
     return true;
+}
+
+bool pool_submit(ShardedPool* pool, task_fn fn, void* arg)
+{
+    Task t = { fn, arg, xpl_rdtscp() };   /* enqueue_tsc p/ tempo de espera real (item 5) */
+    int  spins = 0;
+
+    for (;;) {
+        if (atomic_get(&pool->shutdown)) {
+            atomic_add(&pool->stat_failures, 1);  /* unica condicao de falha */
+            return false;
+        }
+
+        int n = atomic_get(&pool->active_lanes);
+        if (n < 1) n = 1;
+        int     widx = (int)((unsigned int)atomic_add(&pool->submit_seq, 1) % (unsigned int)n);
+        WSLane* lane = &pool->lanes[widx];
+
+        if (submit_push_lane(pool, lane, &t)) return true;
+
+        /* ring cheio → tenta expandir (nova lane) e repete o round-robin */
+        if (activate_lane(pool)) continue;
+
+        /* nao expandiu (no teto ou reserva vazia) → tenta qualquer lane com espaco */
+        int active = atomic_get(&pool->active_lanes);
+        bool placed = false;
+        for (int i = 0; i < active; i++) {
+            if (submit_push_lane(pool, &pool->lanes[i], &t)) { placed = true; break; }
+        }
+        if (placed) return true;
+
+        /* tudo cheio e no teto → backpressure: espera (lento), nunca falha */
+        atomic_add(&pool->stat_backpressure, 1);
+        submit_backoff(&spins);
+    }
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -1000,7 +1245,7 @@ static void pool_wake_all_workers(ShardedPool* pool)
         if (!w) continue;
         thread_wait_wake(&w->reserve_wait);
     }
-    for (int i = 0; i < pool->lane_count; i++) {
+    for (int i = 0; i < pool->lane_capacity; i++) {
         thread_wait_wake(&pool->lanes[i].wait);
     }
 }
@@ -1020,7 +1265,7 @@ static void pool_wait_workers_stopped(ShardedPool* pool)
             pending++;
             thread_wait_wake(&w->reserve_wait);
         }
-        for (int i = 0; i < pool->lane_count; i++) {
+        for (int i = 0; i < pool->lane_capacity; i++) {
             thread_wait_wake(&pool->lanes[i].wait);
         }
         if (pending) {
@@ -1049,7 +1294,7 @@ static void pool_join_and_free_workers(ShardedPool* pool)
 static void pool_destroy_lanes(ShardedPool* pool)
 {
     if (!pool->lanes) return;
-    for (int i = 0; i < pool->lane_count; i++) lane_destroy(&pool->lanes[i]);
+    for (int i = 0; i < pool->lane_capacity; i++) lane_destroy(&pool->lanes[i]);
     free(pool->lanes);
     pool->lanes = NULL;
 }
@@ -1089,11 +1334,13 @@ void pool_shutdown(ShardedPool* pool)
 void pool_stats(ShardedPool* pool, PoolStats* out)
 {
     memset(out, 0, sizeof(*out));
-    out->shard_count     = pool->lane_count;
+    out->shard_count     = atomic_get(&pool->active_lanes);
     out->total_submitted = (uint64_t)(unsigned int)atomic_get(&pool->stat_submitted);
     out->submit_failures = (uint64_t)(unsigned int)atomic_get(&pool->stat_failures);
     out->total_handoffs  = (uint64_t)(unsigned int)atomic_get(&pool->stat_handoffs);
     out->total_rescued   = (uint64_t)(unsigned int)atomic_get(&pool->stat_rescued);
+    out->submit_backpressure = (uint64_t)(unsigned int)atomic_get(&pool->stat_backpressure);
+    out->total_expansions    = (uint64_t)(unsigned int)atomic_get(&pool->stat_expansions);
     out->reserve_count   = atomic_get(&pool->reserve_count);
 
     int active   = 0;
@@ -1106,7 +1353,8 @@ void pool_stats(ShardedPool* pool, PoolStats* out)
         if (atomic_get(&w->state) == WSTATE_ACTIVE && atomic_get_ptr(&w->lane) != NULL) active++;
         if (atomic_get(&w->detached)) detached++;
     }
-    for (int i = 0; i < pool->lane_count; i++) {
+    int nlanes = atomic_get(&pool->max_active_ever);
+    for (int i = 0; i < nlanes; i++) {
         pending += ring_queue_count(&pool->lanes[i].ring);
     }
     out->active_worker_count = active;
