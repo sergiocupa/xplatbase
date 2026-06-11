@@ -104,7 +104,9 @@ static uint64_t tp_get_ns(void)
     LARGE_INTEGER counter;
     if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&counter);
-    return (uint64_t)(counter.QuadPart * 1000000000ULL / freq.QuadPart);
+    /* seg*1e9 + fracao: evita overflow de (counter*1e9) em uptimes longos */
+    uint64_t c = (uint64_t)counter.QuadPart, f = (uint64_t)freq.QuadPart;
+    return (c / f) * 1000000000ULL + ((c % f) * 1000000000ULL) / f;
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -733,7 +735,7 @@ static void test_handoff(void)
     printf("================================================================================\n\n");
 
     PoolConfig cfg      = pool_default_config();
-    cfg.shard_count     = 8;   /* poucos workers aumentam chance de roubo */
+    cfg.shard_count     = 2;   /* poucos workers aumentam chance de roubo */
 
     ShardedPool* pool = pool_create(&cfg);
     TP_ASSERT(pool != NULL, "pool_create com config customizada != NULL");
@@ -1273,6 +1275,495 @@ static void test_contraction(void)
 }
 
 /* =========================================================================
+ * TESTE 10: SOAK de concorrencia — cenarios aleatorios, execucao prolongada
+ *
+ *   Roda por <run_minutes> minutos (default 1; pensado p/ deixar 24h = 1440).
+ *   A cada round sorteia um cenario realista (nº de lanes inicial, max_shards,
+ *   ring, produtores, volume, mix de tasks curtas/longas, ociosidade ocasional)
+ *   para exercitar expansao/contracao/resgate/handoff sob timings variados —
+ *   o tipo de carga que revela CORRIDAS no resize dinamico de lanes.
+ *
+ *   ORACULO de invariantes (a cada round):
+ *     - execucao EXATAMENTE UMA VEZ por task (ran==1: sem perda, sem duplicacao)
+ *     - submit nunca falha (submit_failures==0)
+ *     - sem deadlock (todas concluem dentro do timeout)
+ *
+ *   Logs:
+ *     - a cada 10s: 1 linha SOBRESCRITA (\r), indicadores basicos (leve)
+ *     - ao parar (tempo, ESC ou ERRO): relatorio detalhado + seed p/ reproduzir
+ *
+ *   Para parar antes do tempo: tecla ESC.
+ * ========================================================================= */
+
+#include <time.h>
+#ifdef _WIN32
+#include <conio.h>
+static int soak_check_esc(void) { while (_kbhit()) { if (_getch() == 27) return 1; } return 0; }
+#else
+#include <unistd.h>
+#include <termios.h>
+#include <fcntl.h>
+static int soak_check_esc(void) {
+    static int inited = 0;
+    if (!inited) {
+        struct termios t; tcgetattr(STDIN_FILENO, &t);
+        t.c_lflag &= ~(ICANON | ECHO); tcsetattr(STDIN_FILENO, TCSANOW, &t);
+        int fl = fcntl(STDIN_FILENO, F_GETFL, 0); fcntl(STDIN_FILENO, F_SETFL, fl | O_NONBLOCK);
+        inited = 1;
+    }
+    char c; while (read(STDIN_FILENO, &c, 1) == 1) { if (c == 27) return 1; }
+    return 0;
+}
+#endif
+
+typedef struct {
+    tp_counter_t  ran;          /* nº de execucoes (1=ok, 0=perdida, >1=duplicada) */
+    int           sleep_ms;
+    uint64_t      submit_tsc;   /* set pelo produtor antes do submit */
+    uint64_t      exec_tsc;     /* set pela task ao iniciar          */
+    tp_counter_t* done;
+} SoakArg;
+
+static void soak_task(void* a) {
+    SoakArg* s = (SoakArg*)a;
+    s->exec_tsc = tsc_now();
+    tp_counter_inc(&s->ran);                 /* deteccao de dupla-execucao */
+    if (s->sleep_ms > 0) tp_sleep_ms(s->sleep_ms);
+    tp_counter_inc(s->done);
+}
+
+typedef struct { ShardedPool* pool; SoakArg* args; int count; } SoakProd;
+
+#ifdef _WIN32
+static DWORD WINAPI soak_prod_fn(void* raw)
+#else
+static void* soak_prod_fn(void* raw)
+#endif
+{
+    SoakProd* p = (SoakProd*)raw;
+    for (int i = 0; i < p->count; i++) {
+        p->args[i].submit_tsc = tsc_now();
+        pool_submit(p->pool, soak_task, &p->args[i]);  /* nunca falha */
+    }
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+#define SOAK_WINDOW_SEC   10        /* cada rodada de coleta de indicadores */
+#define SOAK_SLOW_MS      100       /* latencia submit->exec acima disto = "fora do esperado" */
+#define SOAK_ROUND_TO_MS  60000     /* timeout por ciclo (deteccao de deadlock) */
+#define SOAK_STRESS_CORES 2         /* prende o processo em poucos cores p/ forcar corridas */
+
+/* Acumulador de indicadores (todos crus, explicitos). Usado para a janela de
+ * 10s (zerado a cada rodada) e para o total acumulado (final). */
+typedef struct {
+    unsigned long long iters;        /* ciclos pool create/flood/drain */
+    unsigned long long submitted;    /* tasks entregues ao pool_submit  */
+    unsigned long long executed;     /* tasks que rodaram (ran>=1)      */
+    unsigned long long lost;         /* ran==0 (perda)                  */
+    unsigned long long doubled;      /* ran>1 (dupla execucao)          */
+    unsigned long long subfail;      /* submit_failures reportadas       */
+    unsigned long long timeouts;     /* ciclos que nao concluiram (deadlock) */
+    unsigned long long expansions;   /* lanes ativadas dinamicamente     */
+    unsigned long long backpressure; /* esperas no submit (fila cheia)   */
+    unsigned long long slow;         /* tasks com latencia > SOAK_SLOW_MS */
+    int                max_lat_ms;   /* maior latencia submit->exec       */
+    int                max_backlog;  /* maior acumulo de fila nos shards  */
+} SoakAcc;
+
+static void soak_acc_zero(SoakAcc* a) { memset(a, 0, sizeof(*a)); }
+static void soak_acc_add(SoakAcc* d, const SoakAcc* s) {
+    d->iters+=s->iters; d->submitted+=s->submitted; d->executed+=s->executed;
+    d->lost+=s->lost; d->doubled+=s->doubled; d->subfail+=s->subfail;
+    d->timeouts+=s->timeouts; d->expansions+=s->expansions;
+    d->backpressure+=s->backpressure; d->slow+=s->slow;
+    if (s->max_lat_ms  > d->max_lat_ms)  d->max_lat_ms  = s->max_lat_ms;
+    if (s->max_backlog > d->max_backlog) d->max_backlog = s->max_backlog;
+}
+
+/* Habilita escape ANSI (cursor) no console e detecta se a saida e um terminal. */
+static int soak_tty = 0;
+static void soak_init_term(void)
+{
+#ifdef _WIN32
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (GetConsoleMode(h, &mode)) {       /* falha se redirecionado p/ arquivo */
+        SetConsoleMode(h, mode | 0x0004); /* ENABLE_VIRTUAL_TERMINAL_PROCESSING */
+        soak_tty = 1;
+    }
+#else
+    soak_tty = isatty(STDOUT_FILENO);
+#endif
+}
+
+/* ── Limiares criticos p/ o gradiente de cor (verde→amarelo→vermelho) ── */
+#define SOAK_CRIT_LAT_MS   1000
+#define SOAK_CRIT_BACKLOG  12000
+#define SOAK_CRIT_BP       3000000.0
+#define SOAK_CRIT_SLOW     100000.0
+
+/* Cor por proximidade do critico (ratio 0..1): verde<0.5, amarelo<0.8, vermelho. */
+static const char* soak_col(double ratio) {
+    if (!soak_tty) return "";
+    if (ratio < 0.5) return "\033[32m";
+    if (ratio < 0.8) return "\033[33m";
+    return "\033[31m";
+}
+/* Binario p/ indicadores de correcao: 0=verde, >0=vermelho. */
+static const char* soak_col_bin(unsigned long long v) {
+    if (!soak_tty) return "";
+    return v ? "\033[31m" : "\033[32m";
+}
+/* Cor por severidade do evento da biblioteca. */
+static const char* soak_col_sev(int sev) {
+    if (!soak_tty) return "";
+    return sev >= POOL_LOG_CRIT ? "\033[31m" : (sev == POOL_LOG_WARN ? "\033[33m" : "\033[32m");
+}
+static const char* soak_rst(void) { return soak_tty ? "\033[0m" : ""; }
+
+/* Ultima mensagem da biblioteca: o hook (chamado por threads do pool) escreve,
+ * o render (main) le. Protegido por lock. */
+#ifdef _WIN32
+static CRITICAL_SECTION soak_log_cs;
+#define SOAK_LOG_INIT()   InitializeCriticalSection(&soak_log_cs)
+#define SOAK_LOG_LOCK()   EnterCriticalSection(&soak_log_cs)
+#define SOAK_LOG_UNLOCK() LeaveCriticalSection(&soak_log_cs)
+#else
+static pthread_mutex_t soak_log_cs = PTHREAD_MUTEX_INITIALIZER;
+#define SOAK_LOG_INIT()   ((void)0)
+#define SOAK_LOG_LOCK()   pthread_mutex_lock(&soak_log_cs)
+#define SOAK_LOG_UNLOCK() pthread_mutex_unlock(&soak_log_cs)
+#endif
+
+static char soak_last_msg[200] = "(sem eventos)";
+static int  soak_last_sev = POOL_LOG_INFO;
+
+static void soak_log_hook(int sev, const char* msg) {
+    SOAK_LOG_LOCK();
+    soak_last_sev = sev;
+    strncpy(soak_last_msg, msg, sizeof soak_last_msg - 1);
+    soak_last_msg[sizeof soak_last_msg - 1] = 0;
+    SOAK_LOG_UNLOCK();
+}
+
+/* Nº exato de linhas da tabela (deve casar com soak_render_table). */
+#define SOAK_TABLE_LINES 20
+
+/* Desenha a tabela. Em atualizacoes (first==0) sobe o cursor N linhas e
+ * reescreve no mesmo lugar — so os valores mudam na tela, sem nova linha.
+ * Cores: verde→amarelo→vermelho conforme cada valor se aproxima do critico. */
+static void soak_render_table(int first, double el, int total_sec, unsigned seed,
+                              const SoakAcc* w, const SoakAcc* t,
+                              int last_shard, int last_final)
+{
+    int hh = (int)el / 3600, mm = ((int)el % 3600) / 60, ss = (int)el % 60;
+    int th = total_sec / 3600, tm = (total_sec % 3600) / 60, ts = total_sec % 60;
+    int nc = xcpu_count(); if (nc < 1) nc = 1;
+    const char* R = soak_rst();
+    if (!first) printf("\033[%dA", SOAK_TABLE_LINES);   /* sobe ate o topo da tabela */
+
+    /* snapshot do ultimo evento sob lock */
+    char ev[200]; int evsev;
+    SOAK_LOG_LOCK(); evsev = soak_last_sev;
+    strncpy(ev, soak_last_msg, sizeof ev - 1); ev[sizeof ev - 1] = 0; SOAK_LOG_UNLOCK();
+    char evline[80]; snprintf(evline, sizeof evline, "evento: %s", ev);
+
+    printf("  +-----------------------+------------------+---------------------+\033[K\n");
+    printf("  | decorrido %02d:%02d:%02d / total %02d:%02d:%02d   seed=%-10u  lanes=%s%d->%-4d%s |\033[K\n",
+           hh, mm, ss, th, tm, ts, seed, soak_col((double)last_final / nc), last_shard, last_final, R);
+    printf("  +-----------------------+------------------+---------------------+\033[K\n");
+    printf("  | indicador             |    janela 10s    |      acumulado      |\033[K\n");
+    printf("  +-----------------------+------------------+---------------------+\033[K\n");
+    printf("  | ciclos                | %16llu | %19llu |\033[K\n", w->iters,     t->iters);
+    printf("  | submetidas            | %16llu | %19llu |\033[K\n", w->submitted, t->submitted);
+    printf("  | executadas            | %16llu | %19llu |\033[K\n", w->executed,  t->executed);
+    printf("  | perdidas (ran=0)      | %s%16llu%s | %s%19llu%s |\033[K\n", soak_col_bin(w->lost),    w->lost,    R, soak_col_bin(t->lost),    t->lost,    R);
+    printf("  | duplicadas (ran>1)    | %s%16llu%s | %s%19llu%s |\033[K\n", soak_col_bin(w->doubled), w->doubled, R, soak_col_bin(t->doubled), t->doubled, R);
+    printf("  | falhas de submit      | %s%16llu%s | %s%19llu%s |\033[K\n", soak_col_bin(w->subfail), w->subfail, R, soak_col_bin(t->subfail), t->subfail, R);
+    printf("  | deadlocks             | %s%16llu%s | %s%19llu%s |\033[K\n", soak_col_bin(w->timeouts), w->timeouts, R, soak_col_bin(t->timeouts), t->timeouts, R);
+    printf("  | expansoes de lane     | %16llu | %19llu |\033[K\n", w->expansions, t->expansions);
+    printf("  | esperas submit (bp)   | %s%16llu%s | %19llu |\033[K\n", soak_col((double)w->backpressure / SOAK_CRIT_BP), w->backpressure, R, t->backpressure);
+    printf("  | lentas (>%4dms)       | %s%16llu%s | %19llu |\033[K\n", SOAK_SLOW_MS, soak_col((double)w->slow / SOAK_CRIT_SLOW), w->slow, R, t->slow);
+    printf("  | latencia max (ms)     | %s%16d%s | %s%19d%s |\033[K\n", soak_col((double)w->max_lat_ms / SOAK_CRIT_LAT_MS), w->max_lat_ms, R, soak_col((double)t->max_lat_ms / SOAK_CRIT_LAT_MS), t->max_lat_ms, R);
+    printf("  | fila max (backlog)    | %s%16d%s | %s%19d%s |\033[K\n", soak_col((double)w->max_backlog / SOAK_CRIT_BACKLOG), w->max_backlog, R, soak_col((double)t->max_backlog / SOAK_CRIT_BACKLOG), t->max_backlog, R);
+    printf("  +-----------------------+------------------+---------------------+\033[K\n");
+    printf("  | %s%-62.62s%s |\033[K\n", soak_col_sev(evsev), evline, R);
+    printf("  +-----------------------+------------------+---------------------+\033[K\n");
+    fflush(stdout);
+}
+
+/* ── Captura de crash: grava cenario atual + stack no proprio log do soak ──
+ * Reusa print_stacktrace() da lib (event_handler.c). No Windows usa
+ * SetUnhandledExceptionFilter (robusto p/ access violation em qualquer thread);
+ * no POSIX, signal(SIGSEGV/SIGABRT). */
+extern void print_stacktrace(FILE* f);
+#ifdef _WIN32
+#pragma comment(lib, "dbghelp.lib")
+#endif
+
+static FILE* g_soak_logf = NULL;                         /* mesmo arquivo do heartbeat */
+static char  g_soak_scenario[256] = "(nenhum ciclo ainda)";
+
+static void soak_crash_dump(const char* what)
+{
+    FILE* f = g_soak_logf ? g_soak_logf : stderr;
+    fprintf(f, "\n=== CRASH DETECTADO (%s) ===\n", what);
+    fprintf(f, "cenario no momento  : %s\n", g_soak_scenario);
+    print_stacktrace(f);
+    fflush(f);
+}
+
+#ifdef _WIN32
+static LONG WINAPI soak_crash_filter(EXCEPTION_POINTERS* ep)
+{
+    char b[80];
+    snprintf(b, sizeof b, "exc=0x%08lx addr=%p",
+             (unsigned long)ep->ExceptionRecord->ExceptionCode,
+             ep->ExceptionRecord->ExceptionAddress);
+    soak_crash_dump(b);
+    return EXCEPTION_EXECUTE_HANDLER;   /* encerra o processo apos o dump */
+}
+static void soak_install_crash_handler(void) { SetUnhandledExceptionFilter(soak_crash_filter); }
+static void soak_remove_crash_handler(void)  { SetUnhandledExceptionFilter(NULL); }
+#else
+#include <signal.h>
+static void soak_crash_sig(int sig) {
+    char b[32]; snprintf(b, sizeof b, "signal %d", sig);
+    soak_crash_dump(b); _exit(1);
+}
+static void soak_install_crash_handler(void) { signal(SIGSEGV, soak_crash_sig); signal(SIGABRT, soak_crash_sig); }
+static void soak_remove_crash_handler(void)  { signal(SIGSEGV, SIG_DFL); signal(SIGABRT, SIG_DFL); }
+#endif
+
+static void test_soak_concurrency_random(int run_minutes)
+{
+    printf("\n================================================================================\n");
+    printf("  TESTE 10: SOAK de concorrencia — cenarios aleatorios (%d min). ESC para parar.\n",
+           run_minutes);
+    printf("  Rodada de coleta = %d s. Indicadores explicitos (crus), tabela in-place.\n", SOAK_WINDOW_SEC);
+    printf("================================================================================\n\n");
+
+    soak_init_term();
+    SOAK_LOG_INIT();
+    pool_set_log_hook(soak_log_hook);   /* a biblioteca passa a entregar eventos aqui */
+
+    unsigned seed = (unsigned)time(NULL);
+    srand(seed);
+
+    uint64_t start    = tp_get_ns();
+    uint64_t deadline = start + (uint64_t)run_minutes * 60ULL * 1000000000ULL;
+    uint64_t win_t0   = start;
+    int      total_sec = run_minutes * 60;
+
+    /* log de arquivo (heartbeat 10s + relatorio/erro + dump de crash, flushed).
+     * Nome com PID p/ rodar varias instancias em paralelo (#6) sem colisao. */
+    char logname[64];
+#ifdef _WIN32
+    snprintf(logname, sizeof logname, "soak_log_%lu.txt", (unsigned long)GetCurrentProcessId());
+#else
+    snprintf(logname, sizeof logname, "soak_log_%d.txt", (int)getpid());
+#endif
+    g_soak_logf = fopen(logname, "w");
+    printf("  [log] %s\n", logname);
+    if (g_soak_logf) { fprintf(g_soak_logf, "SOAK seed=%u total=%d min\n", seed, run_minutes); fflush(g_soak_logf); }
+    soak_install_crash_handler();   /* crash → grava cenario + stack neste log */
+
+    /* #1 (estresse): prende em poucos cores → preempcao agressiva, alarga as
+     * janelas de corrida do escalonador SEM tocar o thread_pool.c. */
+#ifdef _WIN32
+    {
+        int ncpu = xcpu_count();
+        int usec = (ncpu >= 2) ? SOAK_STRESS_CORES : 1;
+        if (usec > ncpu) usec = ncpu;
+        DWORD_PTR mask = ((DWORD_PTR)1 << usec) - 1;
+        SetProcessAffinityMask(GetCurrentProcess(), mask);
+        printf("  [stress] afinidade limitada a %d core(s) p/ forcar corridas\n", usec);
+        if (g_soak_logf) { fprintf(g_soak_logf, "[stress] afinidade=%d cores\n", usec); fflush(g_soak_logf); }
+    }
+#endif
+
+    SoakAcc tot;  soak_acc_zero(&tot);
+    SoakAcc win;  soak_acc_zero(&win);
+    int  errors = 0, stopped_esc = 0, table_drawn = 0;
+    int  last_shard = 0, last_final = 0;
+    char errmsg[256]; errmsg[0] = 0;
+
+    while (tp_get_ns() < deadline) {
+        if (soak_check_esc()) { stopped_esc = 1; break; }
+
+        /* --- cenario aleatorio AGRESSIVO (forca lifecycle/resize) --- */
+        int shard     = 1 + rand() % 4;
+        int maxsh     = shard + 1 + rand() % 16;
+        int ring      = 32 << (rand() % 5);     /* 32..512: ring pequeno → mais expansao/backpressure */
+        int producers = 1 + rand() % 6;
+        int per       = 10 + rand() % 300;      /* #3: ciclos curtos → MUITO churn de create/destroy */
+        int total     = producers * per;
+        int inflight  = (rand() % 5 == 0);                /* #5: ~20% destroi com tasks em voo */
+        int do_idle   = (!inflight && rand() % 4 == 0);   /* #4: idle > histerese → contracao */
+
+        snprintf(g_soak_scenario, sizeof g_soak_scenario,
+                 "ciclo=%llu shard=%d max=%d ring=%d producers=%d total=%d inflight=%d idle=%d",
+                 (unsigned long long)(tot.iters + 1), shard, maxsh, ring, producers, total, inflight, do_idle);
+
+        PoolConfig cfg = pool_default_config();
+        cfg.shard_count   = shard;
+        cfg.max_shards    = maxsh;
+        cfg.ring_capacity = ring;
+
+        ShardedPool* pool = pool_create(&cfg);
+        if (!pool) { snprintf(errmsg, sizeof errmsg, "pool_create falhou (shard=%d)", shard); errors++; break; }
+
+        SoakArg*     args  = (SoakArg*)    calloc(total,     sizeof(SoakArg));
+        SoakProd*    prods = (SoakProd*)   calloc(producers, sizeof(SoakProd));
+        tp_thread_t* hs    = (tp_thread_t*)calloc(producers, sizeof(tp_thread_t));
+        tp_counter_t done  = 0;
+
+        for (int i = 0; i < total; i++) {
+            int longish = (rand() % 50 == 0);   /* ~2% tasks longas */
+            args[i].sleep_ms = longish ? (20 + rand() % 40) : (rand() % 3);
+            args[i].done     = &done;
+        }
+        for (int p = 0; p < producers; p++) {
+            prods[p].pool = pool; prods[p].args = &args[p * per]; prods[p].count = per;
+            tp_thread_start(hs[p], soak_prod_fn, &prods[p]);
+        }
+        for (int p = 0; p < producers; p++) tp_thread_join(hs[p]);  /* todas submetidas */
+
+        int round_maxq = 0, ok = 1;
+        if (inflight) {
+            /* #5: destrói SEM drenar → workers ocupados quando o shutdown chega
+             * (estressa a corrida shutdown vs worker ativo). Nao checa perda. */
+            PoolStats s; pool_stats(pool, &s); round_maxq = s.pending_tasks;
+        } else {
+            int elapsed = 0;
+            while (tp_counter_read(&done) < total) {
+                PoolStats s; pool_stats(pool, &s);
+                if (s.pending_tasks > round_maxq) round_maxq = s.pending_tasks;
+                if (elapsed >= SOAK_ROUND_TO_MS) { ok = 0; break; }
+                tp_sleep_ms(1); elapsed += 1;
+            }
+            if (do_idle) tp_sleep_ms(550 + rand() % 500);  /* > histerese → expande→contrai */
+        }
+
+        PoolStats st; pool_stats(pool, &st);
+        last_shard = shard; last_final = st.shard_count;
+
+        pool_shutdown(pool);
+
+        /* --- indicadores do ciclo (crus) --- */
+        SoakAcc r; soak_acc_zero(&r);
+        r.iters        = 1;
+        r.submitted    = (unsigned long long)total;
+        r.subfail      = st.submit_failures;
+        r.expansions   = st.total_expansions;
+        r.backpressure = st.submit_backpressure;
+        r.max_backlog  = round_maxq;
+        if (!ok) r.timeouts = 1;
+
+        for (int i = 0; i < total; i++) {
+            int n = (int)tp_counter_read(&args[i].ran);
+            if (n >= 1) {
+                r.executed++;
+                if (n > 1) r.doubled++;                 /* dupla execucao = sempre bug */
+                if (args[i].exec_tsc && args[i].submit_tsc) {
+                    double ms = tsc_elapsed_ns(args[i].submit_tsc, args[i].exec_tsc) / 1e6;
+                    if ((int)ms > r.max_lat_ms) r.max_lat_ms = (int)ms;
+                    if (ms > SOAK_SLOW_MS) r.slow++;
+                }
+            } else if (!inflight) {
+                r.lost++;                               /* perda só conta se o ciclo drenou */
+            }
+        }
+
+        soak_acc_add(&tot, &r);
+        soak_acc_add(&win, &r);
+
+        /* --- oraculo (qualquer violacao para o soak); em inflight nao checa perda/deadlock --- */
+        if (!inflight && r.timeouts) { snprintf(errmsg, sizeof errmsg,
+            "DEADLOCK: done=%d/%d [shard=%d max=%d ring=%d prod=%d]",
+            (int)tp_counter_read(&done), total, shard, maxsh, ring, producers); errors++; }
+        else if (r.subfail) { snprintf(errmsg, sizeof errmsg,
+            "submit_failures=%llu (deveria ser 0)", r.subfail); errors++; }
+        else if (!inflight && r.lost) { snprintf(errmsg, sizeof errmsg,
+            "PERDA: %llu tasks com ran==0 [shard=%d max=%d ring=%d prod=%d]", r.lost, shard, maxsh, ring, producers); errors++; }
+        else if (r.doubled) { snprintf(errmsg, sizeof errmsg,
+            "DUPLA EXEC: %llu tasks com ran>1 [shard=%d max=%d ring=%d prod=%d]", r.doubled, shard, maxsh, ring, producers); errors++; }
+
+        free(args); free(prods); free(hs);
+
+        if (errors) break;
+
+        /* --- rodada de coleta a cada 10s: TABELA (console) + heartbeat (arquivo) --- */
+        uint64_t now = tp_get_ns();
+        if (now - win_t0 >= (uint64_t)SOAK_WINDOW_SEC * 1000000000ULL) {
+            double wel = (double)(now - start) / 1e9;
+            int eh = (int)wel / 3600, em = ((int)wel % 3600) / 60, es = (int)wel % 60;
+            int th = total_sec / 3600, tm = (total_sec % 3600) / 60, ts = total_sec % 60;
+
+            char ev[200]; SOAK_LOG_LOCK();
+            strncpy(ev, soak_last_msg, sizeof ev - 1); ev[sizeof ev - 1] = 0; SOAK_LOG_UNLOCK();
+
+            char wline[400];
+            snprintf(wline, sizeof wline,
+                "[%02d:%02d:%02d/%02d:%02d:%02d] iters=%llu sub=%llu exec=%llu lost=%llu dup=%llu "
+                "subfail=%llu deadlock=%llu exp=%llu bp=%llu slow=%llu maxlat=%dms maxfila=%d lanes=%d->%d | evento: %s",
+                eh, em, es, th, tm, ts, win.iters, win.submitted, win.executed, win.lost, win.doubled,
+                win.subfail, win.timeouts, win.expansions, win.backpressure, win.slow,
+                win.max_lat_ms, win.max_backlog, last_shard, last_final, ev);
+
+            /* arquivo: grava e da flush a cada atualizacao (sobrevive a crash) */
+            if (g_soak_logf) { fprintf(g_soak_logf, "%s\n", wline); fflush(g_soak_logf); }
+
+            /* console: tabela colorida in-place (tty) ou a mesma linha (redirecionado) */
+            if (soak_tty) {
+                soak_render_table(!table_drawn, wel, total_sec, seed, &win, &tot, last_shard, last_final);
+                table_drawn = 1;
+            } else {
+                printf("%s\n", wline); fflush(stdout);
+            }
+
+            soak_acc_zero(&win);
+            win_t0 = now;
+        }
+    }
+    if (soak_tty && table_drawn) printf("\n");  /* sai de baixo da tabela */
+    pool_set_log_hook(NULL);                    /* remove o hook ao terminar */
+
+    /* --- relatorio detalhado ao parar: para tela E arquivo (mantem log de erro) --- */
+    double el = (double)(tp_get_ns() - start) / 1e9;
+    #define REP(...) do { printf(__VA_ARGS__); if (g_soak_logf) fprintf(g_soak_logf, __VA_ARGS__); } while (0)
+    REP("\n  --- SOAK: relatorio detalhado (acumulado, indicadores crus) ---\n");
+    REP("    parada               : %s\n", stopped_esc ? "ESC (usuario)" : (errors ? "ERRO de invariante" : "tempo esgotado"));
+    REP("    seed RNG             : %u\n", seed);
+    REP("    duracao (s)          : %.1f\n", el);
+    REP("    ciclos (iters)       : %llu\n", tot.iters);
+    REP("    tasks submetidas     : %llu\n", tot.submitted);
+    REP("    tasks executadas     : %llu\n", tot.executed);
+    REP("    tasks perdidas       : %llu   (esperado 0)\n", tot.lost);
+    REP("    tasks duplicadas     : %llu   (esperado 0)\n", tot.doubled);
+    REP("    falhas de submit     : %llu   (esperado 0)\n", tot.subfail);
+    REP("    ciclos com deadlock  : %llu   (esperado 0)\n", tot.timeouts);
+    REP("    expansoes de lane    : %llu\n", tot.expansions);
+    REP("    esperas de submit(bp): %llu\n", tot.backpressure);
+    REP("    tasks lentas(>%dms)  : %llu\n", SOAK_SLOW_MS, tot.slow);
+    REP("    latencia maxima (ms) : %d\n", tot.max_lat_ms);
+    REP("    fila maxima (backlog): %d\n", tot.max_backlog);
+    if (errors) REP("    >>> FALHA: %s\n", errmsg);
+    #undef REP
+    soak_remove_crash_handler();
+    if (g_soak_logf) { fflush(g_soak_logf); fclose(g_soak_logf); g_soak_logf = NULL; }
+
+    TP_ASSERT(tot.lost == 0,     "soak: nenhuma task perdida (ran==0)");
+    TP_ASSERT(tot.doubled == 0,  "soak: nenhuma task duplicada (ran>1)");
+    TP_ASSERT(tot.subfail == 0,  "soak: nenhuma falha de submit");
+    TP_ASSERT(tot.timeouts == 0, "soak: nenhum deadlock (todos os ciclos concluiram)");
+}
+
+/* =========================================================================
  * Entrypoint
  * ========================================================================= */
 
@@ -1295,12 +1786,13 @@ void thread_pool_test_run(void)
     /*test_basic();
     test_single_thread_perf();
     test_multi_thread_perf(T3_THREAD_COUNT);*/
-    test_handoff();
+    //test_handoff();
  /*   test_rescue();
     test_rescue_no_overfire();
     test_rescue_engage_latency();
     test_pressure();
-    test_contraction();*/
+    test_contraction(); */
+    test_soak_concurrency_random(10);   /* 1 min no teste; mude para 1440 = 24h */
 
     cpu_monitor_stop(&cpu_mon);
 
@@ -1308,6 +1800,8 @@ void thread_pool_test_run(void)
     printf("  RESULTADO FINAL: %d / %d asserts passaram\n", g_tests_passed, g_tests_run);
     cpu_monitor_print(&cpu_mon);
     printf("================================================================================\n\n");
+
+    //int vc = getch();
 }
 
 

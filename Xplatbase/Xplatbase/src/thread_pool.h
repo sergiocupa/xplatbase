@@ -34,6 +34,20 @@ typedef struct {
 } Task;
 
 /* ─────────────────────────────────────────────────────────────────────────
+ * Hook de log — a biblioteca nao imprime direto; entrega o evento ao app, que
+ * decide onde/como mostrar (ex.: linha unica colorida). Sem hook → silencioso
+ * (ou stderr se compilado com -DPOOL_VERBOSE).
+ * ───────────────────────────────────────────────────────────────────────── */
+
+#define POOL_LOG_INFO  0
+#define POOL_LOG_WARN  1
+#define POOL_LOG_CRIT  2
+
+typedef void (*pool_log_fn)(int severity, const char* msg);
+
+XPLATBASE_API void pool_set_log_hook(pool_log_fn fn);
+
+/* ─────────────────────────────────────────────────────────────────────────
  * Tunables (override em tempo de compilacao)
  * ───────────────────────────────────────────────────────────────────────── */
 

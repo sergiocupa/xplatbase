@@ -20,6 +20,28 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdarg.h>
+
+/* Log da biblioteca via hook registravel (pool_set_log_hook). Sem hook fica
+ * silencioso por padrao; com -DPOOL_VERBOSE tambem ecoa no stderr. */
+static pool_log_fn g_pool_log_hook = NULL;
+
+void pool_set_log_hook(pool_log_fn fn) { g_pool_log_hook = fn; }
+
+static void pool_log(int sev, const char* fmt, ...)
+{
+    pool_log_fn hook = g_pool_log_hook;
+#ifndef POOL_VERBOSE
+    if (!hook) return;                 /* silencioso sem hook */
+#endif
+    char buf[256];
+    va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
+    if (hook) hook(sev, buf);
+#ifdef POOL_VERBOSE
+    fprintf(stderr, "%s\n", buf);
+#endif
+    (void)sev;
+}
 
 #ifdef XPLATBASE_WIN
     #include <intrin.h>
@@ -163,6 +185,7 @@ struct ShardedPool {
     int             rescue_max_helpers;     /* teto absoluto de ajudantes por lane */
     uint64_t        park_threshold_tsc;     /* 0 = parking desativado */
     xatomic_int     warned_oversubscribe;   /* aviso de cores: emitido 1x */
+    xatomic_int     warned_capacity;        /* aviso de capacidade esgotada: emitido 1x */
 
     xatomic_int     busy_workers;           /* workers executando task agora (ocupacao) */
     uint64_t        rescue_wait_unit_tsc;   /* unidade p/ ranking de tempo de espera */
@@ -778,11 +801,17 @@ static void grow_reserve_target_if_depleted(ShardedPool* pool)
 {
     if (atomic_get(&pool->reserve_count) > 0) return;
 
+    /* Teto: nunca passar de metade do orcamento de workers. Sem isto, sob
+     * depleção sustentada (rescue+expansao consumindo a reserva) o target cresce
+     * 1.5x a cada scan ate estourar o int. */
+    int cap     = pool->all_worker_capacity / 2;
     int current = atomic_get(&pool->reserve_target);
-    int grown   = (current * POOL_RESERVE_EXPAND_NUM) / POOL_RESERVE_EXPAND_DEN;
+    if (current >= cap) return;                     /* ja no teto: nao cresce */
+
+    int grown = (current * POOL_RESERVE_EXPAND_NUM) / POOL_RESERVE_EXPAND_DEN;
     if (grown <= current) grown = current + 1;
+    if (grown > cap)      grown = cap;
     atomic_set(&pool->reserve_target, grown);
-    fprintf(stderr, "[reserve_monitor] target expandido para %d\n", grown);
 }
 
 static void refill_reserve_to_target(ShardedPool* pool)
@@ -824,10 +853,13 @@ static WSWorker* worker_create(ShardedPool* pool)
 {
     int id = atomic_add(&pool->all_worker_count, 1);  /* retorna OLD */
     if (id >= pool->all_worker_capacity) {
-        /* Capacidade pre-alocada esgotada — nao expande para evitar race com leitores. */
+        /* Capacidade pre-alocada esgotada — nao expande para evitar race com leitores.
+         * Loga 1x (gate) p/ nao floodar sob carga sustentada. */
         atomic_sub(&pool->all_worker_count, 1);
-        fprintf(stderr, "[worker_create] all_worker_capacity (%d) esgotado\n",
-                pool->all_worker_capacity);
+        int warned = 0;
+        if (atomic_cas(&pool->warned_capacity, &warned, 1))
+            pool_log(POOL_LOG_CRIT, "all_worker_capacity (%d) esgotado",
+                     pool->all_worker_capacity);
         return NULL;
     }
 
@@ -836,8 +868,8 @@ static WSWorker* worker_create(ShardedPool* pool)
     if (id + 1 > ncores) {
         int warned = 0;
         if (atomic_cas(&pool->warned_oversubscribe, &warned, 1)) {
-            fprintf(stderr, "[pool] aviso: %d workers vivos com apenas %d nucleos "
-                            "logicos — oversubscription\n", id + 1, ncores);
+            pool_log(POOL_LOG_WARN, "oversubscription: %d workers / %d cores logicos",
+                     id + 1, ncores);
         }
     }
 
@@ -1025,7 +1057,9 @@ ShardedPool* pool_create(const PoolConfig* cfg)
     int reserve_target = (c.reserve_size > 0) ? c.reserve_size : c.shard_count;
     atomic_set(&pool->reserve_target, reserve_target);
 
-    pool->all_worker_capacity = (pool->lane_capacity + reserve_target) * 4;  /* folga p/ expansao */
+    /* Orcamento de workers: owners (lane_capacity) + reserva + ajudantes de
+     * resgate (~nº cores) + folga. Inclui cores p/ nao esgotar sob resgate. */
+    pool->all_worker_capacity = (pool->lane_capacity + reserve_target + xcpu_count()) * 4;
     pool->all_workers = (WSWorker**)calloc(pool->all_worker_capacity, sizeof(WSWorker*));
     if (!pool->all_workers) { free(pool); return NULL; }
 
@@ -1061,10 +1095,10 @@ void pool_init(ShardedPool* pool)
     {
         xsleep_ms(1);
         if (++waited_ms % 2000 == 0)
-            fprintf(stderr, "[pool_init] aguardando workers: %d/%d (%d ms)\n",
-                    atomic_get(&pool->workers_ready), pool->expected_ready, waited_ms);
+            pool_log(POOL_LOG_INFO, "aguardando workers: %d/%d (%d ms)",
+                     atomic_get(&pool->workers_ready), pool->expected_ready, waited_ms);
     }
-    fprintf(stderr, "[pool_init] todos os workers prontos: %d\n", pool->expected_ready);
+    pool_log(POOL_LOG_INFO, "workers prontos: %d", pool->expected_ready);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -1147,8 +1181,8 @@ static bool activate_lane(ShardedPool* pool)
     if (idx + 1 > ncores) {
         int warned = 0;
         if (atomic_cas(&pool->warned_oversubscribe, &warned, 1))
-            fprintf(stderr, "[pool] aviso: %d lanes ativas com apenas %d nucleos "
-                            "logicos — oversubscription\n", idx + 1, ncores);
+            pool_log(POOL_LOG_WARN, "oversubscription: %d lanes ativas / %d cores logicos",
+                     idx + 1, ncores);
     }
     return true;
 }
@@ -1271,8 +1305,8 @@ static void pool_wait_workers_stopped(ShardedPool* pool)
         if (pending) {
             xsleep_ms(1);
             if (++waited_ms % 2000 == 0)
-                fprintf(stderr, "[pool_shutdown] %d worker(s) ainda nao pararam (%d ms)\n",
-                        pending, waited_ms);
+                pool_log(POOL_LOG_WARN, "shutdown: %d worker(s) ainda nao pararam (%d ms)",
+                         pending, waited_ms);
         }
     } while (pending);
 }
