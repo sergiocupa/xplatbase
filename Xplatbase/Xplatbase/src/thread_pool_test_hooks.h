@@ -15,6 +15,10 @@ void pool_test_enable_lane_release_barrier(void);
 int  pool_test_wait_lane_release_barrier(int timeout_ms);
 void pool_test_release_lane_barrier(void);
 
+void pool_test_enable_orphan_window_barrier(void);
+int  pool_test_wait_orphan_window_arrived(int timeout_ms);
+void pool_test_release_orphan_window_barrier(void);
+
 int pool_test_activate_next_lane(ShardedPool* pool);
 int pool_test_orphan_lane_count(ShardedPool* pool);
 int pool_test_orphan_transition_observed(void);

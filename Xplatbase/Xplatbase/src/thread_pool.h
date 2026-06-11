@@ -4,7 +4,8 @@
  *   WSPool  - work-stealing: ring MPMC por worker.
  *             Submit: round-robin entre workers.
  *             Idle:   worker rouba dos outros; spin progressivo antes de dormir.
- *             PoolStats.total_handoffs = tasks roubadas (stolen).
+ *             PoolStats.total_stolen   = tasks roubadas (work-stealing).
+ *             PoolStats.total_handoffs = handoffs de task longa (substituicao de owner).
  */
 
 #ifndef THREAD_POOL_H
@@ -173,7 +174,8 @@ typedef struct {
     int      pending_tasks;
     uint64_t total_submitted;
     uint64_t submit_failures;
-    uint64_t total_handoffs;
+    uint64_t total_handoffs;         /* handoffs de task longa (substituicao de owner) */
+    uint64_t total_stolen;           /* tasks roubadas por work-stealing */
     uint64_t total_rescued;
     uint64_t submit_backpressure;   /* nº de esperas no submit (backpressure) */
     uint64_t total_expansions;      /* lanes ativadas dinamicamente */

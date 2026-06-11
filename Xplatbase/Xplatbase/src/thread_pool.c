@@ -121,6 +121,46 @@ static void pool_test_lane_release_barrier_wait(void)
     WaitForSingleObject(g_pool_test_lane_release_event, 5000);
 }
 
+/* Barreira da "janela orfa": diferente da lane_release (que para o owner ANTES
+ * do re-check de active_lanes), esta para o owner DEPOIS do re-check e ANTES do
+ * CAS worker->NULL — exatamente a janela TOCTOU em que uma reativacao concorrente
+ * pode deixar a lane ativa sem owner (orfa). So bloqueia quando armada. */
+static volatile LONG g_pool_test_orphan_window_enabled = 0;
+static HANDLE g_pool_test_orphan_window_arrived_event = NULL;
+static HANDLE g_pool_test_orphan_window_release_event = NULL;
+
+void pool_test_enable_orphan_window_barrier(void)
+{
+    if (!g_pool_test_orphan_window_arrived_event)
+        g_pool_test_orphan_window_arrived_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!g_pool_test_orphan_window_release_event)
+        g_pool_test_orphan_window_release_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ResetEvent(g_pool_test_orphan_window_arrived_event);
+    ResetEvent(g_pool_test_orphan_window_release_event);
+    InterlockedExchange(&g_pool_test_orphan_window_enabled, 1);
+}
+
+int pool_test_wait_orphan_window_arrived(int timeout_ms)
+{
+    if (!g_pool_test_orphan_window_arrived_event) return 0;
+    return WaitForSingleObject(g_pool_test_orphan_window_arrived_event,
+                               (DWORD)timeout_ms) == WAIT_OBJECT_0;
+}
+
+void pool_test_release_orphan_window_barrier(void)
+{
+    InterlockedExchange(&g_pool_test_orphan_window_enabled, 0);
+    if (g_pool_test_orphan_window_release_event)
+        SetEvent(g_pool_test_orphan_window_release_event);
+}
+
+static void pool_test_orphan_window_wait(void)
+{
+    if (!InterlockedCompareExchange(&g_pool_test_orphan_window_enabled, 0, 0)) return;
+    SetEvent(g_pool_test_orphan_window_arrived_event);
+    WaitForSingleObject(g_pool_test_orphan_window_release_event, 5000);
+}
+
 void pool_test_reset_spin_observation(void)
 {
     InterlockedExchange(&g_pool_test_max_spin_iterations, 0);
@@ -690,15 +730,28 @@ static XPL_FN worker_fn(void* raw)
 #endif
                     if (index < atomic_get(&pool->active_lanes))
                         continue;
-
+#ifdef POOL_TEST_HOOKS
+                    pool_test_orphan_window_wait();
+#endif
                     void* expected = w;
                     if (!atomic_cas_ptr(&L->worker, &expected, NULL))
                         continue;
-#ifdef POOL_TEST_HOOKS
+
+                    /* Fecha a janela TOCTOU: se a lane foi REATIVADA entre o
+                     * re-check acima e este CAS, a lane ficaria ativa sem owner
+                     * (orfa). Re-reivindica imediatamente; se nao conseguir, e
+                     * porque outro worker ja assumiu — em ambos os casos a lane
+                     * permanece com owner. */
                     if (index < atomic_get(&pool->active_lanes)) {
-                        InterlockedExchange(&g_pool_test_orphan_transition, 1);
-                    }
+                        void* none = NULL;
+                        if (atomic_cas_ptr(&L->worker, &none, w))
+                            continue;   /* re-assumiu a lane reativada (segue owner) */
+#ifdef POOL_TEST_HOOKS
+                        /* So sinaliza se restou orfa de verdade (nunca deveria). */
+                        if (atomic_get_ptr(&L->worker) == NULL)
+                            InterlockedExchange(&g_pool_test_orphan_transition, 1);
 #endif
+                    }
                     worker_return_to_reserve(w);
                     last_work = xpl_tsc();
                 }
@@ -1528,8 +1581,16 @@ bool pool_submit(ShardedPool* pool, task_fn fn, void* arg)
 
 static bool worker_handle_dead(WSWorker* w)
 {
+    /* Worker CRIADO mas nunca INICIADO (falha de alocacao na construcao do pool
+     * deixa WSWorker* com state=ACTIVE e handle=NULL): nao existe thread para
+     * esperar nem terminar. Trata como ja parado — evita esperar o join timeout
+     * e disparar force-kill fantasma (poison/leak) num caminho de erro limpo. */
+    if (!w->handle) {
+        atomic_set(&w->state, WSTATE_STOPPED);
+        return true;
+    }
 #ifdef XPLATBASE_WIN
-    if (w->handle && WaitForSingleObject(w->handle, 0) == WAIT_OBJECT_0) {
+    if (WaitForSingleObject(w->handle, 0) == WAIT_OBJECT_0) {
         atomic_set(&w->state, WSTATE_STOPPED);
         return true;
     }
@@ -1757,6 +1818,7 @@ void pool_stats(ShardedPool* pool, PoolStats* out)
     out->total_submitted = (uint64_t)(unsigned int)atomic_get(&pool->stat_submitted);
     out->submit_failures = (uint64_t)(unsigned int)atomic_get(&pool->stat_failures);
     out->total_handoffs  = (uint64_t)(unsigned int)atomic_get(&pool->stat_handoffs);
+    out->total_stolen    = (uint64_t)(unsigned int)atomic_get(&pool->stat_stolen);
     out->total_rescued   = (uint64_t)(unsigned int)atomic_get(&pool->stat_rescued);
     out->submit_backpressure = (uint64_t)(unsigned int)atomic_get(&pool->stat_backpressure);
     out->total_expansions    = (uint64_t)(unsigned int)atomic_get(&pool->stat_expansions);
