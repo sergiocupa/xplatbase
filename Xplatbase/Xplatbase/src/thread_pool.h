@@ -113,6 +113,16 @@ XPLATBASE_API void pool_set_log_hook(pool_log_fn fn);
 #define POOL_PARK_SLEEP_US            100000
 #endif
 
+/* Shutdown: tempo (ms) para drenar a fila graciosamente antes de forcar. */
+#ifndef POOL_DEFAULT_SHUTDOWN_DRAIN_MS
+#define POOL_DEFAULT_SHUTDOWN_DRAIN_MS  5000
+#endif
+
+/* Shutdown: tempo (ms) para os workers pararem pela flag antes de matar a thread. */
+#ifndef POOL_DEFAULT_SHUTDOWN_JOIN_MS
+#define POOL_DEFAULT_SHUTDOWN_JOIN_MS   2000
+#endif
+
 /* ─────────────────────────────────────────────────────────────────────────
  * ShardedPool — configuracao
  * ───────────────────────────────────────────────────────────────────────── */
@@ -131,6 +141,10 @@ typedef struct {
     int      rescue_max_helpers_per_lane; /* teto de ajudantes por lane (0 → nº cores) */
     int      max_auto_expand_lanes;    /* teto da expansao automatica (0 → nº cores logicos) */
     int      park_idle_threshold_ms;   /* ocioso > N ms → parquear (default 200)   */
+
+    int      shutdown_drain_timeout_ms; /* drenar a fila ate N ms (0 → default 5000)        */
+    int      shutdown_join_timeout_ms;  /* esperar workers pararem ate N ms (0 → default 2000) */
+    bool     shutdown_force_kill;       /* se nao pararem, terminar a thread a forca (default true) */
 
     xtask_thresholds_t task_thresholds;
     bool               task_thresholds_set;
@@ -166,6 +180,11 @@ typedef struct {
 } PoolStats;
 
 XPLATBASE_API void pool_stats(ShardedPool* pool, PoolStats* out);
+
+/* Total de threads terminadas A FORCA (TerminateThread) no processo. > 0 indica
+ * que algum shutdown teve task travada: pool envenenado, recursos vazados —
+ * o chamador deve PARAR DE RECICLAR pools. */
+XPLATBASE_API int pool_force_kill_count(void);
 
 #ifdef __cplusplus
 }

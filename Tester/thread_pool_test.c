@@ -1588,6 +1588,7 @@ static void test_soak_concurrency_random(int run_minutes)
 
     SoakAcc tot;  soak_acc_zero(&tot);
     SoakAcc win;  soak_acc_zero(&win);
+    int  fk_base = pool_force_kill_count();   /* baseline p/ detectar force-kill deste run */
     int  errors = 0, stopped_esc = 0, table_drawn = 0;
     int  last_shard = 0, last_final = 0;
     char errmsg[256]; errmsg[0] = 0;
@@ -1653,6 +1654,16 @@ static void test_soak_concurrency_random(int run_minutes)
         last_shard = shard; last_final = st.shard_count;
 
         pool_shutdown(pool);
+
+        /* Force-kill no shutdown → pool envenenado: PARA DE RECICLAR (decisao b).
+         * Continuar criaria pools sobre heap possivelmente corrompido. */
+        if (pool_force_kill_count() > fk_base) {
+            snprintf(errmsg, sizeof errmsg,
+                     "FORCE-KILL: %d thread(s) terminada(s) a forca — parando de reciclar [%s]",
+                     pool_force_kill_count() - fk_base, g_soak_scenario);
+            errors++;
+            break;
+        }
 
         /* --- indicadores do ciclo (crus) --- */
         SoakAcc r; soak_acc_zero(&r);
@@ -1732,6 +1743,10 @@ static void test_soak_concurrency_random(int run_minutes)
     }
     if (soak_tty && table_drawn) printf("\n");  /* sai de baixo da tabela */
     pool_set_log_hook(NULL);                    /* remove o hook ao terminar */
+#ifdef _WIN32
+    /* restaura a afinidade (nao vazar o pin de 2 cores p/ os testes seguintes) */
+    { DWORD_PTR pm, sm; if (GetProcessAffinityMask(GetCurrentProcess(), &pm, &sm)) SetProcessAffinityMask(GetCurrentProcess(), sm); }
+#endif
 
     /* --- relatorio detalhado ao parar: para tela E arquivo (mantem log de erro) --- */
     double el = (double)(tp_get_ns() - start) / 1e9;
@@ -1764,6 +1779,98 @@ static void test_soak_concurrency_random(int run_minutes)
 }
 
 /* =========================================================================
+ * TESTE 11: Shutdown com tasks TRAVADAS (escalonamento → force-kill)
+ *
+ *   Submete tasks que ficam presas num busy-loop infinito (sem malloc/lock, p/
+ *   o TerminateThread ser seguro). pool_shutdown deve: drenar (timeout) →
+ *   flag (timeout) → terminar as threads a forca, e RETORNAR em tempo limitado.
+ *
+ *   Afericao de que "realmente pararam": cada task travada incrementa um
+ *   heartbeat (prova de vida). Apos o shutdown, o heartbeat deve CONGELAR
+ *   (thread morta nao incrementa mais). Tambem confere force_kill_count.
+ * ========================================================================= */
+
+#define T11_STUCK   3
+#define T11_NORMAL  4
+
+typedef struct { volatile long heartbeat; volatile int go; } StuckArg;
+
+static void stuck_task(void* a) {
+    StuckArg* s = (StuckArg*)a;
+    while (s->go) { s->heartbeat++; }   /* preso: busy-loop, sem alocacao/lock */
+}
+
+static void test_shutdown_stuck(void)
+{
+    printf("\n================================================================================\n");
+    printf("  TESTE 11: Shutdown com %d tasks travadas (escalonamento → force-kill)\n", T11_STUCK);
+    printf("================================================================================\n\n");
+
+    /* Garante TODOS os cores (o soak pode ter limitado a afinidade antes; com
+     * busy-loops presos em poucos cores, a thread do shutdown ficaria starved). */
+#ifdef _WIN32
+    { DWORD_PTR pm, sm; if (GetProcessAffinityMask(GetCurrentProcess(), &pm, &sm)) SetProcessAffinityMask(GetCurrentProcess(), sm); }
+#endif
+
+    PoolConfig cfg = pool_default_config();
+    cfg.shard_count = 4;
+    cfg.shutdown_drain_timeout_ms = 1000;   /* encurta p/ o teste ser rapido */
+    cfg.shutdown_join_timeout_ms  = 500;
+
+    ShardedPool* pool = pool_create(&cfg);
+    TP_ASSERT(pool != NULL, "pool_create != NULL");
+    if (!pool) return;
+
+    int fk_before = pool_force_kill_count();
+
+    /* 1) tasks normais — devem rodar e concluir antes do shutdown */
+    tp_counter_t ndone = 0;
+    TpTaskArg normal[T11_NORMAL]; memset(normal, 0, sizeof normal);
+    for (int i = 0; i < T11_NORMAL; i++) {
+        normal[i].done_counter = &ndone;
+        normal[i].submit_tsc   = tsc_now();
+        pool_submit(pool, task_cb_plain, &normal[i]);
+    }
+    TP_ASSERT(tp_wait_done(&ndone, T11_NORMAL, 3000), "tasks normais executaram (pool funcional)");
+
+    /* 2) tasks travadas (busy-loop infinito) */
+    StuckArg stuck[T11_STUCK];
+    for (int i = 0; i < T11_STUCK; i++) { stuck[i].heartbeat = 0; stuck[i].go = 1; }
+    for (int i = 0; i < T11_STUCK; i++) pool_submit(pool, stuck_task, &stuck[i]);
+    tp_sleep_ms(200);   /* deixa pegarem e ficarem presas */
+
+    int alive = 0;
+    for (int i = 0; i < T11_STUCK; i++) if (stuck[i].heartbeat > 0) alive++;
+    TP_ASSERT(alive == T11_STUCK, "tasks travadas estao rodando (heartbeat > 0)");
+
+    /* 3) shutdown: deve forcar e RETORNAR em tempo limitado (nao travar) */
+    uint64_t t0 = tp_get_ns();
+    pool_shutdown(pool);
+    double sh_ms = (double)(tp_get_ns() - t0) / 1e6;
+    int killed = pool_force_kill_count() - fk_before;
+
+    /* 4) aferir que pararam: heartbeat congela apos o shutdown */
+    long hb1[T11_STUCK];
+    for (int i = 0; i < T11_STUCK; i++) hb1[i] = stuck[i].heartbeat;
+    tp_sleep_ms(300);
+    int frozen = 0;
+    for (int i = 0; i < T11_STUCK; i++) if (stuck[i].heartbeat == hb1[i]) frozen++;
+
+    double limit = (double)(cfg.shutdown_drain_timeout_ms + cfg.shutdown_join_timeout_ms + 2000);
+    TP_ASSERT(sh_ms < limit,        "pool_shutdown retornou em tempo limitado (nao travou)");
+    TP_ASSERT(killed >= T11_STUCK,  "as tasks travadas foram terminadas a forca (force-kill)");
+    TP_ASSERT(frozen == T11_STUCK,  "tasks travadas REALMENTE pararam (heartbeat congelado)");
+
+    printf("  shutdown=%.0f ms (limite %.0f)  force_killed=%d  congeladas=%d/%d\n",
+           sh_ms, limit, killed, frozen, T11_STUCK);
+    for (int i = 0; i < T11_STUCK; i++)
+        printf("    stuck[%d] heartbeat=%ld  congelou=%s\n",
+               i, stuck[i].heartbeat, (stuck[i].heartbeat == hb1[i]) ? "sim" : "NAO");
+
+    /* Pool envenenado (force-kill): NAO criar mais pools nem liberar nada apos. */
+}
+
+/* =========================================================================
  * Entrypoint
  * ========================================================================= */
 
@@ -1783,16 +1890,17 @@ void thread_pool_test_run(void)
     CpuMonitor cpu_mon;
     cpu_monitor_start(&cpu_mon, 10);
 
-    /*test_basic();
+    test_basic();
     test_single_thread_perf();
-    test_multi_thread_perf(T3_THREAD_COUNT);*/
-    //test_handoff();
- /*   test_rescue();
+    test_multi_thread_perf(T3_THREAD_COUNT);
+    test_handoff();
+    test_rescue();
     test_rescue_no_overfire();
     test_rescue_engage_latency();
     test_pressure();
-    test_contraction(); */
-    test_soak_concurrency_random(10);   /* 1 min no teste; mude para 1440 = 24h */
+    test_contraction();
+    test_soak_concurrency_random(1);
+    test_shutdown_stuck();   /* por ultimo: force-kill deixa o processo "envenenado" */
 
     cpu_monitor_stop(&cpu_mon);
 
@@ -1805,7 +1913,17 @@ void thread_pool_test_run(void)
 }
 
 
-int main(void)
+#ifdef POOL_TEST_HOOKS
+extern int thread_pool_bug_test_dispatch(int argc, char** argv);
+#endif
+
+int main(int argc, char** argv)
 {
+#ifdef POOL_TEST_HOOKS
+    if (argc > 1) return thread_pool_bug_test_dispatch(argc, argv);
+#else
+    (void)argc; (void)argv;
+#endif
     thread_pool_test_run();
+    return 0;
 }

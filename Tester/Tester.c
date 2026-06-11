@@ -263,14 +263,11 @@ static void malloc_test()
 
 
 
-extern void test_task_handler_run(void);
 extern void thread_pool_test_run(void);
 
 int _main(void)
 {
     //malloc_test();
-
-    test_task_handler_run();
 
     thread_pool_test_run();
 

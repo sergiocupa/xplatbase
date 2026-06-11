@@ -1,16 +1,59 @@
 #include "ring_queue.h"
 #include <stdlib.h>
 
+#ifdef POOL_TEST_HOOKS
+static volatile LONG g_ring_queue_test_alloc_after = -1;
+
+void ring_queue_test_fail_alloc_after(int successful_allocations)
+{
+    InterlockedExchange(&g_ring_queue_test_alloc_after, successful_allocations);
+}
+
+static int ring_queue_test_should_fail_alloc(void)
+{
+    for (;;) {
+        LONG current = InterlockedCompareExchange(&g_ring_queue_test_alloc_after, 0, 0);
+        if (current < 0) return 0;
+        if (current == 0) {
+            if (InterlockedCompareExchange(&g_ring_queue_test_alloc_after, -1, 0) == 0)
+                return 1;
+            continue;
+        }
+        if (InterlockedCompareExchange(&g_ring_queue_test_alloc_after,
+                                       current - 1, current) == current)
+            return 0;
+    }
+}
+
+static void* ring_queue_test_malloc(size_t size)
+{
+    if (ring_queue_test_should_fail_alloc()) return NULL;
+    return malloc(size);
+}
+
+#define malloc ring_queue_test_malloc
+#endif
 
 void ring_queue_init(RingQueue* r, int capacity)
 {
+    r->capacity = 0;
+    r->mask = 0;
+    r->seqno = NULL;
     atomic_set(&r->head, 0);
     atomic_set(&r->tail, 0);
+
+    if (capacity <= 0 || (capacity & (capacity - 1)) != 0)
+        return;
 
     r->capacity = capacity;
     r->mask     = capacity - 1;
 
     r->seqno = (xatomic_int*)malloc(capacity * sizeof(xatomic_int));
+    if (!r->seqno) {
+        r->capacity = 0;
+        r->mask = 0;
+        return;
+    }
     for (int i = 0; i < capacity; i++)
         atomic_set(&r->seqno[i], i);
 }
@@ -107,6 +150,8 @@ boolean ring_queue_peek_(RingQueue* r, void* buffer, void* item, int item_size)
 
 boolean ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item, int item_size)
 {
+    if (!r->seqno || !buffer) return false;
+
     int t;
     for (;;)
     {
@@ -137,6 +182,8 @@ boolean ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item, int it
 
 boolean ring_queue_pop_mc_(RingQueue* r, void* buffer, void* item, int item_size)
 {
+    if (!r->seqno || !buffer) return false;
+
     int h;
     for (;;)
     {

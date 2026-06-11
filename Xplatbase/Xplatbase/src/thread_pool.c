@@ -22,6 +22,127 @@
 #include <stdio.h>
 #include <stdarg.h>
 
+#ifdef POOL_TEST_HOOKS
+static volatile LONG g_pool_test_alloc_after = -1;
+static volatile LONG g_pool_test_thread_start_after = -1;
+static volatile LONG g_pool_test_handoff_target = 0;
+static volatile LONG g_pool_test_handoff_arrivals = 0;
+static volatile LONG g_pool_test_lane_barrier_enabled = 0;
+static volatile LONG g_pool_test_max_spin_iterations = 0;
+static volatile LONG g_pool_test_orphan_transition = 0;
+static HANDLE g_pool_test_handoff_event = NULL;
+static HANDLE g_pool_test_lane_arrived_event = NULL;
+static HANDLE g_pool_test_lane_release_event = NULL;
+
+static int pool_test_countdown_should_fail(volatile LONG* countdown)
+{
+    for (;;) {
+        LONG current = InterlockedCompareExchange(countdown, 0, 0);
+        if (current < 0) return 0;
+        if (current == 0) {
+            if (InterlockedCompareExchange(countdown, -1, 0) == 0) return 1;
+            continue;
+        }
+        if (InterlockedCompareExchange(countdown, current - 1, current) == current)
+            return 0;
+    }
+}
+
+void pool_test_fail_alloc_after(int successful_allocations)
+{
+    InterlockedExchange(&g_pool_test_alloc_after, successful_allocations);
+}
+
+void pool_test_fail_thread_start_after(int successful_starts)
+{
+    InterlockedExchange(&g_pool_test_thread_start_after, successful_starts);
+}
+
+static void* pool_test_malloc(size_t size)
+{
+    if (pool_test_countdown_should_fail(&g_pool_test_alloc_after)) return NULL;
+    return malloc(size);
+}
+
+static void* pool_test_calloc(size_t count, size_t size)
+{
+    if (pool_test_countdown_should_fail(&g_pool_test_alloc_after)) return NULL;
+    return calloc(count, size);
+}
+
+#define malloc pool_test_malloc
+#define calloc pool_test_calloc
+
+void pool_test_set_handoff_barrier(int target)
+{
+    if (!g_pool_test_handoff_event)
+        g_pool_test_handoff_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ResetEvent(g_pool_test_handoff_event);
+    InterlockedExchange(&g_pool_test_handoff_arrivals, 0);
+    InterlockedExchange(&g_pool_test_handoff_target, target);
+}
+
+static void pool_test_handoff_barrier_wait(void)
+{
+    LONG target = InterlockedCompareExchange(&g_pool_test_handoff_target, 0, 0);
+    if (target <= 0 || !g_pool_test_handoff_event) return;
+    LONG arrivals = InterlockedIncrement(&g_pool_test_handoff_arrivals);
+    if (arrivals >= target) SetEvent(g_pool_test_handoff_event);
+    WaitForSingleObject(g_pool_test_handoff_event, 2000);
+}
+
+void pool_test_enable_lane_release_barrier(void)
+{
+    if (!g_pool_test_lane_arrived_event)
+        g_pool_test_lane_arrived_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!g_pool_test_lane_release_event)
+        g_pool_test_lane_release_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ResetEvent(g_pool_test_lane_arrived_event);
+    ResetEvent(g_pool_test_lane_release_event);
+    InterlockedExchange(&g_pool_test_orphan_transition, 0);
+    InterlockedExchange(&g_pool_test_lane_barrier_enabled, 1);
+}
+
+int pool_test_wait_lane_release_barrier(int timeout_ms)
+{
+    return WaitForSingleObject(g_pool_test_lane_arrived_event, (DWORD)timeout_ms) == WAIT_OBJECT_0;
+}
+
+void pool_test_release_lane_barrier(void)
+{
+    InterlockedExchange(&g_pool_test_lane_barrier_enabled, 0);
+    SetEvent(g_pool_test_lane_release_event);
+}
+
+static void pool_test_lane_release_barrier_wait(void)
+{
+    if (!InterlockedCompareExchange(&g_pool_test_lane_barrier_enabled, 0, 0)) return;
+    SetEvent(g_pool_test_lane_arrived_event);
+    WaitForSingleObject(g_pool_test_lane_release_event, 5000);
+}
+
+void pool_test_reset_spin_observation(void)
+{
+    InterlockedExchange(&g_pool_test_max_spin_iterations, 0);
+}
+
+int pool_test_max_spin_iterations_observed(void)
+{
+    return (int)InterlockedCompareExchange(&g_pool_test_max_spin_iterations, 0, 0);
+}
+
+static void pool_test_record_spin_iterations(int iterations)
+{
+    LONG current = InterlockedCompareExchange(&g_pool_test_max_spin_iterations, 0, 0);
+    while (current < iterations) {
+        LONG previous = InterlockedCompareExchange(&g_pool_test_max_spin_iterations,
+                                                   iterations, current);
+        if (previous == current) break;
+        current = previous;
+    }
+}
+#endif
+
 /* Log da biblioteca via hook registravel (pool_set_log_hook). Sem hook fica
  * silencioso por padrao; com -DPOOL_VERBOSE tambem ecoa no stderr. */
 static pool_log_fn g_pool_log_hook = NULL;
@@ -48,6 +169,9 @@ static void pool_log(int sev, const char* fmt, ...)
     typedef HANDLE           xpl_thread_t;
     typedef DWORD WINAPI     xpl_fn_sig(void*);
     static xpl_thread_t xpl_thread_start(xpl_fn_sig* fn, void* arg) {
+#ifdef POOL_TEST_HOOKS
+        if (pool_test_countdown_should_fail(&g_pool_test_thread_start_after)) return NULL;
+#endif
         return CreateThread(NULL, 0, fn, arg, 0, NULL);
     }
     static void xpl_thread_join(xpl_thread_t h) {
@@ -131,13 +255,17 @@ struct WSWorker {
     xatomic_int     rescue_mode;       /* 1 = ajudante transitorio; volta a reserva ao ociar */
     xatomic_ptr     lane;              /* WSLane* atribuida; NULL = na reserva */
     xatomic_int64   task_start_tsc;    /* TSC quando comecou t.fn; 0 = ocioso */
+    xatomic_int64   task_start_wall_ns;
+    xatomic_int64   task_start_activity;
 
     xwait_t         reserve_wait;      /* wait quando esta na reserva */
+    int             force_killed;      /* 1 = terminado a forca no shutdown (leak controlado) */
 };
 
 struct ShardedPool {
     WSLane*         lanes;
     int             lane_capacity;     /* lanes pre-alocadas (= max_shards)           */
+    int             lanes_initialized;
     int             expand_cap;        /* teto da expansao AUTOMATICA (<= lane_capacity) */
     int             initial_lanes;     /* nº inicial = shard_count (piso da contracao) */
     xatomic_int     active_lanes;      /* lanes ativas p/ submit (cresce/encolhe)     */
@@ -163,8 +291,12 @@ struct ShardedPool {
 
     uint64_t        long_threshold_tsc;
     int             long_monitor_interval_ms;
+    xtask_thresholds_t task_thresholds;
+    int             use_task_thresholds;
 
     xatomic_int     shutdown;
+    xatomic_int     stop_workers;
+    xatomic_int     pending_tasks;
     xatomic_int     submit_seq;
     xatomic_int     workers_ready;
     int             expected_ready;
@@ -191,7 +323,15 @@ struct ShardedPool {
     uint64_t        rescue_wait_unit_tsc;   /* unidade p/ ranking de tempo de espera */
 
     int             low_load_scans;         /* histerese de contracao (so o monitor toca) */
+
+    int             shutdown_drain_timeout_ms;
+    int             shutdown_join_timeout_ms;
+    bool            shutdown_force_kill;
 };
+
+/* Total de threads terminadas a forca no processo (todos os pools). */
+static xatomic_int g_force_killed_total;
+int pool_force_kill_count(void) { return atomic_get(&g_force_killed_total); }
 
 /* ─────────────────────────────────────────────────────────────────────────
  * Forward decls
@@ -202,7 +342,7 @@ static XPL_FN reserve_monitor_fn(void* raw);
 static XPL_FN long_task_monitor_fn(void* raw);
 
 static WSWorker* worker_create(ShardedPool* pool);
-static void      worker_start (WSWorker* w);
+static bool      worker_start (WSWorker* w);
 static bool      activate_lane(ShardedPool* pool);
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -211,6 +351,12 @@ static bool      activate_lane(ShardedPool* pool);
 
 static inline void worker_mark_task_start(WSWorker* w)
 {
+    if (w->pool->use_task_thresholds) {
+        xthread_sample_t sample = xthread_sample_self();
+        atomic_set64(&w->task_start_wall_ns, (int64_t)sample.wall_ns);
+        atomic_set64(&w->task_start_activity, (int64_t)sample.activity);
+    }
+
     atomic_set64(&w->task_start_tsc, (int64_t)xpl_rdtscp());
     atomic_add(&w->pool->busy_workers, 1);
 }
@@ -218,6 +364,8 @@ static inline void worker_mark_task_start(WSWorker* w)
 static inline void worker_mark_task_end(WSWorker* w)
 {
     atomic_set64(&w->task_start_tsc, 0);
+    atomic_set64(&w->task_start_wall_ns, 0);
+    atomic_set64(&w->task_start_activity, 0);
     atomic_sub(&w->pool->busy_workers, 1);
 }
 
@@ -227,11 +375,25 @@ static inline void worker_mark_task_end(WSWorker* w)
  *   O caller usa esse TSC para CAS-confirmar o handoff (evita race com fim de task).
  * ───────────────────────────────────────────────────────────────────────── */
 
-static uint64_t worker_long_task_start(WSWorker* w, uint64_t now_tsc, uint64_t threshold_tsc)
+static uint64_t worker_long_task_start(WSWorker* w, uint64_t now_tsc)
 {
+    ShardedPool* pool = w->pool;
     uint64_t start = (uint64_t)atomic_get64(&w->task_start_tsc);
     if (start == 0) return 0;
-    if (now_tsc - start < threshold_tsc) return 0;
+    if (now_tsc - start < pool->long_threshold_tsc) return 0;
+
+    if (pool->use_task_thresholds) {
+        xthread_sample_t task_start;
+        task_start.wall_ns = (uint64_t)atomic_get64(&w->task_start_wall_ns);
+        task_start.activity = (uint64_t)atomic_get64(&w->task_start_activity);
+        if (task_start.wall_ns == 0) return 0;
+
+        xthread_sample_t now = xthread_sample_of(w->handle);
+        xtask_eval_t eval = xthread_evaluate_task(&task_start, &now,
+                                                  &pool->task_thresholds);
+        if (!xthread_should_handoff(&eval)) return 0;
+    }
+
     return start;
 }
 
@@ -318,7 +480,7 @@ static bool worker_try_any(WSWorker* w, WSLane* my_lane, Task* out)
 static bool spin_check_continue(WSWorker* w)
 {
     if (atomic_get(&w->state) != WSTATE_ACTIVE) return false;
-    if (atomic_get(&w->pool->shutdown))         return false;
+    if (atomic_get(&w->pool->stop_workers))     return false;
     if (atomic_get(&w->detached))               return false;
     return true;
 }
@@ -339,11 +501,15 @@ static bool spin_phase1(WSWorker* w, WSLane* lane, Task* out, uint64_t budget_cy
         }
     }
 
-    for (int i = 0; i < SPIN_P1_ITER; i++) {
+    int iterations = w->pool->spin_iterations;
+    for (int i = 0; i < iterations; i++) {
         if (worker_try_any(w, lane, out)) return true;
         if (!spin_check_continue(w))      return false;
         xcpu_pause();
     }
+#ifdef POOL_TEST_HOOKS
+    pool_test_record_spin_iterations(iterations);
+#endif
     return false;
 }
 
@@ -363,7 +529,6 @@ static void sample_neighbors_for_long_tasks(WSWorker* self)
 {
     ShardedPool* pool = self->pool;
     uint64_t now      = xpl_rdtscp();
-    uint64_t thresh   = pool->long_threshold_tsc;
 
     int n = atomic_get(&pool->max_active_ever);
     for (int i = 0; i < n; i++) {
@@ -372,7 +537,7 @@ static void sample_neighbors_for_long_tasks(WSWorker* self)
         if (!w || w == self) continue;
         if (atomic_get(&w->detached)) continue;
 
-        uint64_t start = worker_long_task_start(w, now, thresh);
+        uint64_t start = worker_long_task_start(w, now);
         if (start == 0) continue;
 
         /* Aciona handoff via monitor — caminho unico evita race entre detectores. */
@@ -433,7 +598,7 @@ static WSLane* worker_wait_for_assignment(WSWorker* w)
     for (;;) {
         WSLane* lane = (WSLane*)atomic_get_ptr(&w->lane);
         if (lane) return lane;
-        if (atomic_get(&w->pool->shutdown))      return NULL;
+        if (atomic_get(&w->pool->stop_workers))  return NULL;
         if (atomic_get(&w->state) == WSTATE_STOPPING) return NULL;
         thread_wait_sleep_for(&w->reserve_wait, 100000);  /* 100ms */
     }
@@ -448,6 +613,7 @@ static void worker_run_task(WSWorker* w, Task* t)
     worker_mark_task_start(w);
     t->fn(t->arg);
     worker_mark_task_end(w);
+    atomic_sub(&w->pool->pending_tasks, 1);
 }
 
 static void worker_return_to_reserve(WSWorker* w)
@@ -471,9 +637,14 @@ static XPL_FN worker_fn(void* raw)
 
     uint64_t last_work = xpl_tsc();  /* timer de ociosidade, local ao thread */
 
-    while (!atomic_get(&pool->shutdown) && atomic_get(&w->state) != WSTATE_STOPPING)
+    while (!atomic_get(&pool->stop_workers) && atomic_get(&w->state) != WSTATE_STOPPING)
     {
         WSLane* lane = (WSLane*)atomic_get_ptr(&w->lane);
+
+        if (lane && atomic_get(&w->detached)) {
+            worker_return_to_reserve(w);
+            continue;
+        }
 
         if (!lane) {
             lane = worker_wait_for_assignment(w);
@@ -514,7 +685,20 @@ static XPL_FN worker_fn(void* raw)
                 int index = (int)(L - pool->lanes);
                 if (index >= atomic_get(&pool->active_lanes) &&
                     ring_queue_count(&L->ring) == 0) {
-                    atomic_set_ptr(&L->worker, NULL);  /* libera p/ futura reativacao */
+#ifdef POOL_TEST_HOOKS
+                    pool_test_lane_release_barrier_wait();
+#endif
+                    if (index < atomic_get(&pool->active_lanes))
+                        continue;
+
+                    void* expected = w;
+                    if (!atomic_cas_ptr(&L->worker, &expected, NULL))
+                        continue;
+#ifdef POOL_TEST_HOOKS
+                    if (index < atomic_get(&pool->active_lanes)) {
+                        InterlockedExchange(&g_pool_test_orphan_transition, 1);
+                    }
+#endif
                     worker_return_to_reserve(w);
                     last_work = xpl_tsc();
                 }
@@ -540,6 +724,9 @@ static bool perform_handoff(ShardedPool* pool, WSLane* lane, WSWorker* victim, u
         return false;
     }
 
+#ifdef POOL_TEST_HOOKS
+    pool_test_handoff_barrier_wait();
+#endif
     WSWorker* spare = reserve_pop(pool);
     if (!spare) {
         /* Reserva vazia — acorda monitor pra refazer; pula handoff desta vez. */
@@ -547,9 +734,23 @@ static bool perform_handoff(ShardedPool* pool, WSLane* lane, WSWorker* victim, u
         return false;
     }
 
-    atomic_set(&victim->detached, 1);
+    int not_detached = 0;
+    if (!atomic_cas(&victim->detached, &not_detached, 1)) {
+        reserve_push(pool, spare);
+        return false;
+    }
+
+    atomic_set(&spare->rescue_mode, 0);
+    atomic_set(&spare->detached, 0);
     atomic_set_ptr(&spare->lane, lane);
-    atomic_set_ptr(&lane->worker, spare);
+
+    void* expected_owner = victim;
+    if (!atomic_cas_ptr(&lane->worker, &expected_owner, spare)) {
+        atomic_set_ptr(&spare->lane, NULL);
+        atomic_set(&victim->detached, 0);
+        reserve_push(pool, spare);
+        return false;
+    }
 
     /* Acorda o spare (estava dormindo na reserva). */
     thread_wait_wake(&spare->reserve_wait);
@@ -694,7 +895,6 @@ static void scan_lanes_for_rescue(ShardedPool* pool)
 static void scan_lanes_for_handoff(ShardedPool* pool)
 {
     uint64_t now    = xpl_rdtscp();
-    uint64_t thresh = pool->long_threshold_tsc;
 
     int n = atomic_get(&pool->max_active_ever);
     for (int i = 0; i < n; i++) {
@@ -703,7 +903,7 @@ static void scan_lanes_for_handoff(ShardedPool* pool)
         if (!w) continue;
         if (atomic_get(&w->detached)) continue;
 
-        uint64_t start = worker_long_task_start(w, now, thresh);
+        uint64_t start = worker_long_task_start(w, now);
         if (start == 0) continue;
 
         perform_handoff(pool, lane, w, start);
@@ -716,7 +916,6 @@ static void scan_lanes_for_handoff(ShardedPool* pool)
 static void scan_helpers_for_long_tasks(ShardedPool* pool)
 {
     uint64_t now    = xpl_rdtscp();
-    uint64_t thresh = pool->long_threshold_tsc;
     int total = atomic_get(&pool->all_worker_count);
 
     for (int i = 0; i < total; i++) {
@@ -726,7 +925,7 @@ static void scan_helpers_for_long_tasks(ShardedPool* pool)
 
         WSLane* L = (WSLane*)atomic_get_ptr(&w->lane);
         if (!L) continue;
-        if (worker_long_task_start(w, now, thresh) == 0) continue;
+        if (worker_long_task_start(w, now) == 0) continue;
 
         if (ring_queue_count(&L->ring) > 0)
             dispatch_rescue_worker(pool, L);           /* lane segue drenando */
@@ -822,8 +1021,12 @@ static void refill_reserve_to_target(ShardedPool* pool)
     {
         WSWorker* w = worker_create(pool);
         if (!w) break;
-        worker_start(w);
-        reserve_push(pool, w);
+        if (!worker_start(w)) break;
+        if (!reserve_push(pool, w)) {
+            atomic_set(&w->state, WSTATE_STOPPING);
+            thread_wait_wake(&w->reserve_wait);
+            break;
+        }
     }
 }
 
@@ -889,9 +1092,14 @@ static WSWorker* worker_create(ShardedPool* pool)
     return w;
 }
 
-static void worker_start(WSWorker* w)
+static bool worker_start(WSWorker* w)
 {
     w->handle = xpl_thread_start(worker_fn, w);
+    if (!w->handle) {
+        atomic_set(&w->state, WSTATE_STOPPED);
+        return false;
+    }
+    return true;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -903,6 +1111,11 @@ static bool lane_init(WSLane* lane, int ring_capacity)
     lane->ring_buf = malloc((size_t)ring_capacity * sizeof(Task));
     if (!lane->ring_buf) return false;
     ring_queue_init(&lane->ring, ring_capacity);
+    if (!lane->ring.seqno) {
+        free(lane->ring_buf);
+        lane->ring_buf = NULL;
+        return false;
+    }
     thread_wait_prepare(&lane->wait);
     atomic_set_ptr(&lane->worker, NULL);
     return true;
@@ -935,6 +1148,9 @@ PoolConfig pool_default_config(void)
     c.rescue_max_helpers_per_lane = POOL_DEFAULT_RESCUE_MAX_HELPERS;
     c.max_auto_expand_lanes    = 0;   /* 0 → nº de cores logicos */
     c.park_idle_threshold_ms   = POOL_DEFAULT_PARK_IDLE_MS;
+    c.shutdown_drain_timeout_ms = POOL_DEFAULT_SHUTDOWN_DRAIN_MS;
+    c.shutdown_join_timeout_ms  = POOL_DEFAULT_SHUTDOWN_JOIN_MS;
+    c.shutdown_force_kill       = true;
     c.task_thresholds.long_threshold_ns = (uint64_t)XTASK_DEFAULT_LONG_NS;
     c.task_thresholds.blocked_ratio_max = XTASK_DEFAULT_BLOCKED_RATIO;
     c.task_thresholds.cpu_ratio_min     = XTASK_DEFAULT_CPU_RATIO;
@@ -962,6 +1178,7 @@ static bool pool_setup_lanes_and_workers(ShardedPool* pool, int ring_capacity)
 
     for (int i = 0; i < pool->lane_capacity; i++) {
         if (!lane_init(&pool->lanes[i], ring_capacity)) return false;
+        pool->lanes_initialized++;
     }
 
     /* Workers ativos: 1 por lane INICIAL (as demais lanes ganham owner ao ativar). */
@@ -989,24 +1206,38 @@ static bool pool_setup_reserve_ring(ShardedPool* pool, int reserve_capacity)
     pool->reserve_ring_buf = malloc((size_t)reserve_capacity * sizeof(WSWorker*));
     if (!pool->reserve_ring_buf) return false;
     ring_queue_init(&pool->reserve_ring, reserve_capacity);
+    if (!pool->reserve_ring.seqno) {
+        free(pool->reserve_ring_buf);
+        pool->reserve_ring_buf = NULL;
+        return false;
+    }
     return true;
 }
 
-static void pool_start_all_workers(ShardedPool* pool)
+static bool pool_start_all_workers(ShardedPool* pool)
 {
     int total = atomic_get(&pool->all_worker_count);
-    pool->expected_ready = total;
+    pool->expected_ready = 0;
     for (int i = 0; i < total; i++) {
-        worker_start(pool->all_workers[i]);
+        if (!worker_start(pool->all_workers[i])) {
+            for (int j = i + 1; j < total; j++)
+                atomic_set(&pool->all_workers[j]->state, WSTATE_STOPPED);
+            return false;
+        }
+        pool->expected_ready++;
     }
+    return true;
 }
 
-static void pool_start_monitors(ShardedPool* pool)
+static bool pool_start_monitors(ShardedPool* pool)
 {
     thread_wait_prepare(&pool->reserve_monitor_wait);
     thread_wait_prepare(&pool->long_task_monitor_wait);
     pool->reserve_monitor   = xpl_thread_start(reserve_monitor_fn,   pool);
+    if (!pool->reserve_monitor) return false;
     pool->long_task_monitor = xpl_thread_start(long_task_monitor_fn, pool);
+    if (!pool->long_task_monitor) return false;
+    return true;
 }
 
 ShardedPool* pool_create(const PoolConfig* cfg)
@@ -1014,6 +1245,8 @@ ShardedPool* pool_create(const PoolConfig* cfg)
     PoolConfig c = cfg ? *cfg : pool_default_config();
     if (c.shard_count   <= 0) c.shard_count   = xcpu_count();
     if (c.ring_capacity <= 0) c.ring_capacity = POOL_DEFAULT_RING_CAPACITY;
+    if ((c.ring_capacity & (c.ring_capacity - 1)) != 0)
+        return NULL;
     if (c.long_task_threshold_ns == 0) c.long_task_threshold_ns = POOL_DEFAULT_LONG_TASK_NS;
 
     thread_wait_init(false);
@@ -1037,9 +1270,19 @@ ShardedPool* pool_create(const PoolConfig* cfg)
     atomic_set(&pool->max_active_ever, c.shard_count);
 
     pool->ring_capacity            = c.ring_capacity;
-    pool->spin_iterations          = c.spin_iterations;
-    pool->long_threshold_tsc       = ns_to_tsc(c.long_task_threshold_ns);
-    pool->long_monitor_interval_ms = POOL_LONG_TASK_MONITOR_MS;
+    pool->spin_iterations          = c.spin_iterations >= 0
+                                   ? c.spin_iterations : POOL_DEFAULT_SPIN_ITERATIONS;
+    pool->long_monitor_interval_ms = c.monitor_interval_ms > 0
+                                   ? c.monitor_interval_ms : POOL_MONITOR_INTERVAL_MS;
+    pool->use_task_thresholds      = c.task_thresholds_set ? 1 : 0;
+    pool->task_thresholds          = c.task_thresholds;
+    if (pool->use_task_thresholds &&
+        pool->task_thresholds.long_threshold_ns == 0)
+        pool->task_thresholds.long_threshold_ns = c.long_task_threshold_ns;
+    uint64_t effective_long_ns = pool->use_task_thresholds
+                               ? pool->task_thresholds.long_threshold_ns
+                               : c.long_task_threshold_ns;
+    pool->long_threshold_tsc       = ns_to_tsc(effective_long_ns);
 
     pool->rescue_backlog_threshold = (c.rescue_backlog_threshold > 0)
                                    ? c.rescue_backlog_threshold : POOL_DEFAULT_RESCUE_BACKLOG;
@@ -1048,6 +1291,12 @@ ShardedPool* pool_create(const PoolConfig* cfg)
     pool->park_threshold_tsc       = (c.park_idle_threshold_ms > 0)
                                    ? ns_to_tsc((uint64_t)c.park_idle_threshold_ms * 1000000ULL) : 0;
     pool->rescue_wait_unit_tsc     = ns_to_tsc(500000ULL);  /* 0.5ms por ponto de ranking */
+
+    pool->shutdown_drain_timeout_ms = (c.shutdown_drain_timeout_ms > 0)
+                                    ? c.shutdown_drain_timeout_ms : POOL_DEFAULT_SHUTDOWN_DRAIN_MS;
+    pool->shutdown_join_timeout_ms  = (c.shutdown_join_timeout_ms > 0)
+                                    ? c.shutdown_join_timeout_ms : POOL_DEFAULT_SHUTDOWN_JOIN_MS;
+    pool->shutdown_force_kill       = c.shutdown_force_kill;
 
     if (c.spin_budget_us > 0) {
         pool->spin_budget_cycles = ns_to_tsc((uint64_t)c.spin_budget_us * 1000);
@@ -1077,9 +1326,15 @@ ShardedPool* pool_create(const PoolConfig* cfg)
         return NULL;
     }
 
-    pool_start_all_workers(pool);
+    if (!pool_start_all_workers(pool)) {
+        pool_shutdown(pool);
+        return NULL;
+    }
     pool_init(pool);
-    pool_start_monitors(pool);
+    if (!pool_start_monitors(pool)) {
+        pool_shutdown(pool);
+        return NULL;
+    }
 
     return pool;
 }
@@ -1114,7 +1369,7 @@ static void submit_check_handoff(ShardedPool* pool, WSLane* lane)
     if (atomic_get(&w->detached)) return;
 
     uint64_t now   = xpl_rdtscp();
-    uint64_t start = worker_long_task_start(w, now, pool->long_threshold_tsc);
+    uint64_t start = worker_long_task_start(w, now);
     if (start == 0) return;
 
     /* Tenta handoff sincrono. Se falhar (reserva vazia), acorda monitor pra
@@ -1187,6 +1442,28 @@ static bool activate_lane(ShardedPool* pool)
     return true;
 }
 
+#ifdef POOL_TEST_HOOKS
+int pool_test_activate_next_lane(ShardedPool* pool)
+{
+    return activate_lane(pool) ? 1 : 0;
+}
+
+int pool_test_orphan_lane_count(ShardedPool* pool)
+{
+    int active = atomic_get(&pool->active_lanes);
+    int orphans = 0;
+    for (int i = 0; i < active; i++) {
+        if (atomic_get_ptr(&pool->lanes[i].worker) == NULL) orphans++;
+    }
+    return orphans;
+}
+
+int pool_test_orphan_transition_observed(void)
+{
+    return InterlockedCompareExchange(&g_pool_test_orphan_transition, 0, 0) != 0;
+}
+#endif
+
 /* Backoff progressivo do submit quando tudo esta cheio: fica LENTO, nao falha. */
 static void submit_backoff(int* spins)
 {
@@ -1198,7 +1475,11 @@ static void submit_backoff(int* spins)
 
 static bool submit_push_lane(ShardedPool* pool, WSLane* lane, Task* t)
 {
-    if (!xring_push_mp(&lane->ring, lane->ring_buf, t)) return false;
+    atomic_add(&pool->pending_tasks, 1);
+    if (!xring_push_mp(&lane->ring, lane->ring_buf, t)) {
+        atomic_sub(&pool->pending_tasks, 1);
+        return false;
+    }
     atomic_add(&pool->stat_submitted, 1);
     thread_wait_wake(&lane->wait);
     submit_check_handoff(pool, lane);
@@ -1256,18 +1537,80 @@ static bool worker_handle_dead(WSWorker* w)
     return false;
 }
 
-static void pool_signal_shutdown_all(ShardedPool* pool)
+/* Terminacao FORCADA de um worker preso dentro de t->fn (nivel mais baixo).
+ * PERIGOSO: nao roda cleanup, pode deixar lock travado / vazar / corromper heap.
+ * Por isso a struct NAO e liberada (leak controlado) e o chamador para de reciclar. */
+static void force_kill_worker(WSWorker* w)
 {
-    atomic_set(&pool->shutdown, 1);
+#ifdef XPLATBASE_WIN
+    if (w->handle) { TerminateThread(w->handle, 1); CloseHandle(w->handle); w->handle = NULL; }
+#else
+    pthread_cancel(w->handle);   /* limitado: so age em cancellation point */
+#endif
+    w->force_killed = 1;
+    atomic_set(&w->state, WSTATE_STOPPED);
+}
+
+/* Espera bounded: retorna true se todos pararam dentro de timeout_ms. */
+static bool pool_wait_workers_stopped_timeout(ShardedPool* pool, int timeout_ms)
+{
+    /* Timeout por tempo REAL (TSC) — robusto se a thread for starved por carga
+     * de CPU (contar iteracoes de sleep dava timeout incoerente sob pressao). */
+    uint64_t budget = ns_to_tsc((uint64_t)timeout_ms * 1000000ULL);
+    uint64_t t0     = xpl_tsc();
+    for (;;) {
+        int pending = 0;
+        int total = atomic_get(&pool->all_worker_count);
+        for (int i = 0; i < total; i++) {
+            WSWorker* w = pool->all_workers[i];
+            if (!w) continue;
+            if (atomic_get(&w->state) == WSTATE_STOPPED) continue;
+            if (worker_handle_dead(w)) continue;
+            pending++;
+            thread_wait_wake(&w->reserve_wait);
+        }
+        if (pool->lanes) {
+            for (int i = 0; i < pool->lanes_initialized; i++)
+                thread_wait_wake(&pool->lanes[i].wait);
+        }
+        if (!pending)                 return true;
+        if (xpl_tsc() - t0 >= budget) return false;
+        xsleep_ms(1);
+    }
+}
+
+/* Mata as threads que nao pararam pela flag. Retorna quantas. */
+static int force_kill_stragglers(ShardedPool* pool)
+{
+    int killed = 0;
     int total = atomic_get(&pool->all_worker_count);
     for (int i = 0; i < total; i++) {
         WSWorker* w = pool->all_workers[i];
         if (!w) continue;
-        atomic_set(&w->state, WSTATE_STOPPING);
+        if (atomic_get(&w->state) == WSTATE_STOPPED) continue;
+        if (worker_handle_dead(w)) continue;
+        force_kill_worker(w);
+        killed++;
     }
-    /* acorda monitores */
+    return killed;
+}
+
+static void pool_close_submissions_and_monitors(ShardedPool* pool)
+{
+    atomic_set(&pool->shutdown, 1);
     thread_wait_wake(&pool->reserve_monitor_wait);
     thread_wait_wake(&pool->long_task_monitor_wait);
+}
+
+static void pool_stop_all_workers(ShardedPool* pool)
+{
+    atomic_set(&pool->stop_workers, 1);
+    int total = atomic_get(&pool->all_worker_count);
+    for (int i = 0; i < total; i++) {
+        WSWorker* w = pool->all_workers[i];
+        if (w && atomic_get(&w->state) != WSTATE_STOPPED)
+            atomic_set(&w->state, WSTATE_STOPPING);
+    }
 }
 
 static void pool_wake_all_workers(ShardedPool* pool)
@@ -1279,7 +1622,8 @@ static void pool_wake_all_workers(ShardedPool* pool)
         if (!w) continue;
         thread_wait_wake(&w->reserve_wait);
     }
-    for (int i = 0; i < pool->lane_capacity; i++) {
+    if (!pool->lanes) return;
+    for (int i = 0; i < pool->lanes_initialized; i++) {
         thread_wait_wake(&pool->lanes[i].wait);
     }
 }
@@ -1299,8 +1643,9 @@ static void pool_wait_workers_stopped(ShardedPool* pool)
             pending++;
             thread_wait_wake(&w->reserve_wait);
         }
-        for (int i = 0; i < pool->lane_capacity; i++) {
-            thread_wait_wake(&pool->lanes[i].wait);
+        if (pool->lanes) {
+            for (int i = 0; i < pool->lanes_initialized; i++)
+                thread_wait_wake(&pool->lanes[i].wait);
         }
         if (pending) {
             xsleep_ms(1);
@@ -1317,6 +1662,7 @@ static void pool_join_and_free_workers(ShardedPool* pool)
     for (int i = 0; i < total; i++) {
         WSWorker* w = pool->all_workers[i];
         if (!w) continue;
+        if (w->force_killed) continue;   /* leak controlado: nao mexe em thread morta a forca */
         if (w->handle) xpl_thread_join(w->handle);
         thread_wait_destroy(&w->reserve_wait);
         free(w);
@@ -1328,7 +1674,7 @@ static void pool_join_and_free_workers(ShardedPool* pool)
 static void pool_destroy_lanes(ShardedPool* pool)
 {
     if (!pool->lanes) return;
-    for (int i = 0; i < pool->lane_capacity; i++) lane_destroy(&pool->lanes[i]);
+    for (int i = 0; i < pool->lanes_initialized; i++) lane_destroy(&pool->lanes[i]);
     free(pool->lanes);
     pool->lanes = NULL;
 }
@@ -1337,7 +1683,7 @@ void pool_shutdown(ShardedPool* pool)
 {
     if (!pool) return;
 
-    pool_signal_shutdown_all(pool);
+    pool_close_submissions_and_monitors(pool);
 
     /* Monitores primeiro — eles podem criar workers; precisa garantir que
      * pararam antes de iterar pool->all_workers para join. */
@@ -1345,7 +1691,46 @@ void pool_shutdown(ShardedPool* pool)
     if (pool->long_task_monitor) xpl_thread_join(pool->long_task_monitor);
 
     pool_wake_all_workers(pool);
-    pool_wait_workers_stopped(pool);
+
+    /* ── Fase A: drain gracioso com timeout WALL-CLOCK (TSC) — nunca trava nem
+     * estoura o tempo real mesmo sob starvation de CPU. ── */
+    uint64_t drain_budget = ns_to_tsc((uint64_t)pool->shutdown_drain_timeout_ms * 1000000ULL);
+    uint64_t drain_t0     = xpl_tsc();
+    while (atomic_get(&pool->pending_tasks) > 0 && (xpl_tsc() - drain_t0) < drain_budget) {
+        pool_wake_all_workers(pool);
+        xsleep_ms(1);
+    }
+    int left = atomic_get(&pool->pending_tasks);
+    if (left > 0)
+        pool_log(POOL_LOG_WARN, "shutdown: drain timeout (%d ms), %d task(s) restantes — forcando parada",
+                 pool->shutdown_drain_timeout_ms, left);
+
+    /* ── Fase B: parada cooperativa pela flag, com timeout ── */
+    pool_stop_all_workers(pool);
+    pool_wake_all_workers(pool);
+    bool all_stopped = pool_wait_workers_stopped_timeout(pool, pool->shutdown_join_timeout_ms);
+
+    /* ── Fase C: terminacao forcada dos que nao pararam (task travada) ── */
+    bool poisoned = false;
+    if (!all_stopped) {
+        if (pool->shutdown_force_kill) {
+            int killed = force_kill_stragglers(pool);
+            if (killed > 0) {
+                atomic_add(&g_force_killed_total, killed);
+                poisoned = true;
+                pool_log(POOL_LOG_CRIT,
+                    "shutdown: %d worker(s) TERMINADOS A FORCA (task travada). Pool ENVENENADO: "
+                    "recursos vazados, heap possivelmente travado — PARE DE RECICLAR pools.", killed);
+            }
+        } else {
+            /* force-kill desabilitado: ultimo recurso e esperar (pode travar). */
+            pool_wait_workers_stopped(pool);
+        }
+    }
+
+    /* Pool envenenado: qualquer free() pode deadlockar no lock de heap que a
+     * thread morta possa ter retido. Leak controlado TOTAL e retorno imediato. */
+    if (poisoned) return;
 
     thread_wait_destroy(&pool->reserve_monitor_wait);
     thread_wait_destroy(&pool->long_task_monitor_wait);

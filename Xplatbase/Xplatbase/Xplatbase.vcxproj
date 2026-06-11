@@ -25,7 +25,6 @@
     <ClInclude Include="src\memory_handler.h" />
     <ClInclude Include="src\memory_pool.h" />
     <ClInclude Include="src\ring_queue.h" />
-    <ClInclude Include="src\task_handler.h" />
     <ClInclude Include="src\thread_activity.h" />
     <ClInclude Include="src\thread_handler.h" />
     <ClInclude Include="src\thread_pool.h" />
@@ -39,7 +38,6 @@
     <ClCompile Include="src\memory_pool.c" />
     <ClCompile Include="src\ring_queue.c" />
     <ClCompile Include="src\string_handler.c" />
-    <ClCompile Include="src\task_handler.c" />
     <ClCompile Include="src\thread_activity_linux.c" />
     <ClCompile Include="src\thread_activity_win.c" />
     <ClCompile Include="src\thread_handler.c" />
@@ -161,7 +159,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>$(ThreadPoolTestDefines);NDEBUG;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
