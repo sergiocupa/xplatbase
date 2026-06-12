@@ -192,6 +192,84 @@ static void test_bug_b_orphan_lane_toctou(void)
     pool_shutdown(pool);
 }
 
+/* ───────────────────────────── BUG D ───────────────────────────── */
+/* Dono-duplo na reativacao de lane: o owner que sai re-reivindica a lane DEPOIS
+ * que activate_lane viu worker==NULL mas ANTES de instalar o novo owner. Com a
+ * escrita simples antiga, o install sobrescrevia e dois workers viravam donos da
+ * mesma lane. O fix (CAS condicional a NULL) faz o install falhar e reusar. */
+
+typedef struct { ShardedPool* pool; int result; } DboActivateArg;
+
+static DWORD WINAPI dbo_activate_thread(void* raw)
+{
+    DboActivateArg* a = (DboActivateArg*)raw;
+    a->result = pool_test_activate_next_lane(a->pool);  /* para na barreira dbo_activate */
+    return 0;
+}
+
+static void test_bug_d_double_owner(void)
+{
+    printf("\n== BUG D: dono-duplo na reativacao (CAS em activate_lane) ==\n");
+
+    PoolConfig cfg            = pool_default_config();
+    cfg.shard_count           = 1;
+    cfg.max_shards            = 2;
+    cfg.max_auto_expand_lanes = 2;
+    cfg.reserve_size          = 4;
+    cfg.ring_capacity         = 32;
+    cfg.park_idle_threshold_ms = 0;   /* sem parking: owner percebe a contracao rapido */
+
+    ShardedPool* pool = pool_create(&cfg);
+    if (!pool) { CHECK(0, "pool_create != NULL"); return; }
+
+    /* 1) expande: active 1->2, lane[1] ganha owner w_old. */
+    int expanded = pool_test_activate_next_lane(pool);
+
+    /* 2) arma as 2 barreiras; o monitor contrai 2->1 e o owner de lane[1] faz o
+     *    CAS worker->NULL e PARA (lane ja sem dono). */
+    pool_test_enable_double_owner_window();
+    int owner_paused = pool_test_wait_double_owner_owner(8000);
+
+    /* 2.5) congela o autoscale: sem isso o monitor re-contrai a lane e a contracao
+     *      "auto-cura" o dono-duplo (o fantasma volta a reserva) antes da medicao. */
+    pool_test_freeze_autoscale(1);
+
+    /* 3) reativa a lane numa thread aux; activate_lane PARA antes de instalar. */
+    DboActivateArg arg = { pool, 0 };
+    HANDLE th = NULL;
+    int activate_paused = 0;
+    if (owner_paused) {
+        th = CreateThread(NULL, 0, dbo_activate_thread, &arg, 0, NULL);
+        activate_paused = pool_test_wait_double_owner_activate(8000);
+    }
+
+    /* 4) solta o OWNER primeiro: re-reivindica a lane (CAS NULL->w_old) e segue dono. */
+    pool_test_release_double_owner_owner();
+    Sleep(50);
+
+    /* 5) solta o ACTIVATE: tenta instalar w_new. CAS falha (lane ja tem w_old) e
+     *    reusa; a escrita antiga sobrescreveria -> 2 donos. */
+    pool_test_release_double_owner_activate();
+    if (th) { WaitForSingleObject(th, 5000); CloseHandle(th); }
+    Sleep(50);
+
+    /* autoscale congelado: o estado e estavel, basta uma medicao. */
+    int max_owners = pool_test_max_owners_per_lane(pool);
+    int orphans    = pool_test_orphan_lane_count(pool);
+
+    printf("    expanded=%d owner_paused=%d activate_paused=%d reactivated=%d max_owners=%d orphans=%d\n",
+           expanded, owner_paused, activate_paused, arg.result, max_owners, orphans);
+
+    CHECK(expanded && owner_paused && activate_paused,
+          "cenario montado (expandiu, owner parou pos-null, activate parou pre-install)");
+    CHECK(max_owners <= 1,
+          "nenhuma lane com 2 donos (CAS em activate_lane fecha a janela de dono-duplo)");
+    CHECK(orphans == 0,
+          "nenhuma lane ativa sem owner");
+
+    pool_shutdown(pool);
+}
+
 int main(void)
 {
     printf("################################################################\n");
@@ -200,6 +278,7 @@ int main(void)
     printf("  ncpu=%d\n", xcpu_count());
 
     test_bug_b_orphan_lane_toctou();   /* B primeiro: A pode envenenar o processo */
+    test_bug_d_double_owner();
     test_bug_c_stolen_metric_exposed();
     test_bug_a_alloc_fail_during_worker_creation();  /* por ultimo: pode envenenar */
 

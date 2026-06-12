@@ -168,6 +168,72 @@ static void pool_test_orphan_window_wait(void)
     WaitForSingleObject(g_pool_test_orphan_window_release_event, 5000);
 }
 
+/* Barreiras da "janela de DONO-DUPLO" (BUG 01). Duas paradas coordenadas para
+ * forcar de forma deterministica o interleaving da corrida:
+ *   - dbo_owner   : para o owner que sai DEPOIS do CAS worker->NULL e ANTES do
+ *                   re-claim, com a lane ja sem dono.
+ *   - dbo_activate: para o activate_lane ANTES do install do novo owner.
+ * O teste solta dbo_owner primeiro (owner re-reivindica a lane) e so depois
+ * dbo_activate (activate tenta instalar). Com a escrita simples antiga, o
+ * install sobrescreve e cria 2 donos; com o CAS, o install falha e reusa. */
+typedef struct {
+    volatile LONG enabled;
+    HANDLE        arrived;
+    HANDLE        release;
+} pool_test_barrier_t;
+
+static pool_test_barrier_t g_dbo_owner;
+static pool_test_barrier_t g_dbo_activate;
+
+static void pool_test_barrier_enable(pool_test_barrier_t* b)
+{
+    if (!b->arrived) b->arrived = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (!b->release) b->release = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ResetEvent(b->arrived);
+    ResetEvent(b->release);
+    InterlockedExchange(&b->enabled, 1);
+}
+
+static int pool_test_barrier_wait_arrived(pool_test_barrier_t* b, int timeout_ms)
+{
+    if (!b->arrived) return 0;
+    return WaitForSingleObject(b->arrived, (DWORD)timeout_ms) == WAIT_OBJECT_0;
+}
+
+static void pool_test_barrier_release(pool_test_barrier_t* b)
+{
+    InterlockedExchange(&b->enabled, 0);
+    if (b->release) SetEvent(b->release);
+}
+
+static void pool_test_barrier_hit(pool_test_barrier_t* b)
+{
+    if (!InterlockedCompareExchange(&b->enabled, 0, 0)) return;
+    SetEvent(b->arrived);
+    WaitForSingleObject(b->release, 5000);
+}
+
+void pool_test_enable_double_owner_window(void)
+{
+    pool_test_barrier_enable(&g_dbo_owner);
+    pool_test_barrier_enable(&g_dbo_activate);
+}
+int  pool_test_wait_double_owner_owner(int timeout_ms)    { return pool_test_barrier_wait_arrived(&g_dbo_owner, timeout_ms); }
+int  pool_test_wait_double_owner_activate(int timeout_ms) { return pool_test_barrier_wait_arrived(&g_dbo_activate, timeout_ms); }
+void pool_test_release_double_owner_owner(void)           { pool_test_barrier_release(&g_dbo_owner); }
+void pool_test_release_double_owner_activate(void)        { pool_test_barrier_release(&g_dbo_activate); }
+
+static void pool_test_double_owner_owner_wait(void)    { pool_test_barrier_hit(&g_dbo_owner); }
+static void pool_test_activate_install_wait(void)      { pool_test_barrier_hit(&g_dbo_activate); }
+
+/* Congela expand/contract proativos do monitor: usado por testes para impedir
+ * que a contracao "auto-cure" um estado (ex.: dono-duplo) antes da verificacao. */
+static volatile LONG g_pool_test_freeze_autoscale = 0;
+void pool_test_freeze_autoscale(int on)
+{
+    InterlockedExchange(&g_pool_test_freeze_autoscale, on ? 1 : 0);
+}
+
 void pool_test_reset_spin_observation(void)
 {
     InterlockedExchange(&g_pool_test_max_spin_iterations, 0);
@@ -885,6 +951,10 @@ static XPL_FN worker_fn(void* raw)
                     void* expected = w;
                     if (!atomic_cas_ptr(&L->worker, &expected, NULL))
                         continue;
+#ifdef POOL_TEST_HOOKS
+                    /* Janela de dono-duplo: lane ja sem dono, antes do re-claim. */
+                    pool_test_double_owner_owner_wait();
+#endif
 
                     /* Fecha a janela TOCTOU: se a lane foi REATIVADA entre o
                      * re-check acima e este CAS, a lane ficaria ativa sem owner
@@ -1162,6 +1232,9 @@ static void scan_helpers_for_long_tasks(ShardedPool* pool)
  * cheio" de imediato (sem histerese). */
 static void scan_maybe_expand(ShardedPool* pool)
 {
+#ifdef POOL_TEST_HOOKS
+    if (InterlockedCompareExchange(&g_pool_test_freeze_autoscale, 0, 0)) return;
+#endif
     int active = atomic_get(&pool->active_lanes);
     if (active >= pool->expand_cap) { pool->high_load_scans = 0; return; }
     if (atomic_get(&pool->busy_workers) < active) { pool->high_load_scans = 0; return; }  /* folga */
@@ -1181,6 +1254,9 @@ static void scan_maybe_expand(ShardedPool* pool)
  * (que varre max_active_ever). */
 static void scan_maybe_contract(ShardedPool* pool)
 {
+#ifdef POOL_TEST_HOOKS
+    if (InterlockedCompareExchange(&g_pool_test_freeze_autoscale, 0, 0)) return;
+#endif
     int active = atomic_get(&pool->active_lanes);
     int top_count = active > 0
                   ? ring_queue_count(&pool->lanes[active - 1].ring)
@@ -1688,18 +1764,32 @@ static bool activate_lane(ShardedPool* pool)
 
     WSLane* lane = &pool->lanes[idx];
 
-    /* Se a lane ainda tem um owner antigo (contracao recente que ainda nao
-     * voltou a reserva), reusa-o: ele vera index < active_lanes e permanece.
-     * Devolve o spare que pegamos. */
-    if (atomic_get_ptr(&lane->worker) != NULL) {
+    /* Instala 'w' como owner SOMENTE se a lane estiver sem dono, via CAS atomico
+     * (BUG 01 - dono duplo). A versao antiga fazia "if (worker != NULL) reusa;
+     * else escreve worker = w": um owner antigo saindo podia re-reivindicar a lane
+     * (CAS NULL->w_old) ENTRE o check e a escrita, e a escrita simples sobrescrevia
+     * deixando w_old E w como donos. Com o CAS condicional a NULL, esse caso faz o
+     * CAS falhar; entao reusamos o owner existente e devolvemos o spare. */
+    /* Instala 'w' como owner SOMENTE se a lane estiver sem dono, via CAS atomico
+     * (BUG 01 - dono duplo). A versao antiga fazia "if (worker != NULL) reusa;
+     * else escreve worker = w": um owner antigo saindo podia re-reivindicar a lane
+     * (CAS NULL->w_old) ENTRE o check e a escrita, e a escrita simples sobrescrevia
+     * deixando w_old E w como donos. Com o CAS condicional a NULL, esse caso faz o
+     * CAS falhar; entao reusamos o owner existente e devolvemos o spare. */
+    atomic_set(&w->rescue_mode, 0);
+    atomic_set(&w->detached, 0);
+#ifdef POOL_TEST_HOOKS
+    pool_test_activate_install_wait();   /* janela de dono-duplo: antes do install */
+#endif
+    void* expected_none = NULL;
+    if (atomic_cas_ptr(&lane->worker, &expected_none, w)) {
+        atomic_set_ptr(&w->lane, lane);  /* publica o vinculo so apos virar owner */
+        thread_wait_wake(&w->reserve_wait);
+    } else {
+        /* lane ja tem owner (antigo reusado ou concorrente): devolve o spare.
+         * w->lane continua NULL (veio da reserva), entao o push e limpo. */
         reserve_push_or_stop(pool, w);
         thread_wait_wake(&lane->wait);
-    } else {
-        atomic_set(&w->rescue_mode, 0);
-        atomic_set(&w->detached, 0);
-        atomic_set_ptr(&w->lane, lane);
-        atomic_set_ptr(&lane->worker, w);
-        thread_wait_wake(&w->reserve_wait);
     }
 
     /* sobe o high-water p/ steal/monitor varrerem a lane nova */
@@ -1737,6 +1827,50 @@ int pool_test_orphan_lane_count(ShardedPool* pool)
         if (atomic_get_ptr(&pool->lanes[i].worker) == NULL) orphans++;
     }
     return orphans;
+}
+
+/* Maior nº de workers reivindicando a MESMA lane ativa. Conta apenas donos
+ * legitimos (ACTIVE, nao-rescue, nao-detached): o owner unico da lane. > 1
+ * indica dono-duplo (BUG 01). Ajudantes (rescue_mode) e em-handoff (detached)
+ * sao ignorados pois legitimamente apontam para a lane sem serem o dono. */
+int pool_test_max_owners_per_lane(ShardedPool* pool)
+{
+    int active = atomic_get(&pool->active_lanes);
+    int total  = atomic_get(&pool->all_worker_count);
+    int maxc   = 0;
+    for (int i = 0; i < active; i++) {
+        WSLane* L = &pool->lanes[i];
+        int c = 0;
+        for (int j = 0; j < total; j++) {
+            WSWorker* w = pool->all_workers[j];
+            if (!w) continue;
+            if (atomic_get(&w->state) != WSTATE_ACTIVE) continue;
+            if (atomic_get(&w->rescue_mode)) continue;
+            if (atomic_get(&w->detached)) continue;
+            if ((WSLane*)atomic_get_ptr(&w->lane) == L) c++;
+        }
+        if (c > maxc) maxc = c;
+    }
+    return maxc;
+}
+
+void pool_test_dump_workers(ShardedPool* pool)
+{
+    int total  = atomic_get(&pool->all_worker_count);
+    int active = atomic_get(&pool->active_lanes);
+    fprintf(stderr, "    [dump] active_lanes=%d total_workers=%d\n", active, total);
+    for (int i = 0; i < active; i++)
+        fprintf(stderr, "    [dump] lane[%d].worker=%p\n", i,
+                (void*)atomic_get_ptr(&pool->lanes[i].worker));
+    for (int j = 0; j < total; j++) {
+        WSWorker* w = pool->all_workers[j];
+        if (!w) continue;
+        WSLane* L = (WSLane*)atomic_get_ptr(&w->lane);
+        int idx = L ? (int)(L - pool->lanes) : -1;
+        fprintf(stderr, "    [dump] w[%d]=%p state=%d lane_idx=%d rescue=%d detached=%d\n",
+                j, (void*)w, atomic_get(&w->state), idx,
+                atomic_get(&w->rescue_mode), atomic_get(&w->detached));
+    }
 }
 
 int pool_test_orphan_transition_observed(void)
