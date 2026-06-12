@@ -1,0 +1,1130 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WSPool — thread_pool.c · arquitetura e funcionamento</title>
+<style>
+  :root{
+    --bg:#0b0d14; --bg2:#0e1018; --panel:#12141f; --panel2:#161826;
+    --line:#242838; --line2:#2a3346;
+    --txt:#d6d8e4; --mut:#9aa0b4; --dim:#6b7186;
+    --b:#4a9eff; --g:#50d890; --a:#f0a830; --r:#e8607a; --p:#b78cf0;
+    --radius:12px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--txt);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.65; font-size:15.5px;
+  }
+  code,kbd,.mono{font-family:ui-monospace,'SF Mono','JetBrains Mono',Menlo,Consolas,'Liberation Mono',monospace}
+  code{background:#161a28; color:#bcd2ff; padding:.1em .4em; border-radius:5px; font-size:.86em; border:1px solid #1d2336}
+  a{color:var(--b); text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  /* ---- layout ---- */
+  .wrap{display:grid; grid-template-columns:288px 1fr; gap:0; max-width:1320px; margin:0 auto}
+  nav{
+    position:sticky; top:0; align-self:start; height:100vh; overflow-y:auto;
+    padding:30px 22px 60px; border-right:1px solid var(--line);
+    background:linear-gradient(180deg,#0c0e16,#0b0d14);
+  }
+  nav .brand{font-weight:700; font-size:17px; letter-spacing:.2px; margin-bottom:2px}
+  nav .brand small{display:block; color:var(--dim); font-weight:400; font-size:12px; margin-top:3px}
+  nav ol{list-style:none; padding:0; margin:22px 0 0; counter-reset:s}
+  nav ol li{counter-increment:s; margin:1px 0}
+  nav ol li a{
+    display:flex; gap:9px; align-items:baseline; padding:6px 10px; border-radius:8px;
+    color:var(--mut); font-size:13.4px; border-left:2px solid transparent;
+  }
+  nav ol li a::before{content:counter(s,decimal-leading-zero); color:var(--dim); font-size:11px; font-family:ui-monospace,monospace; min-width:18px}
+  nav ol li a:hover{background:#141826; color:var(--txt); text-decoration:none}
+  nav .navhead{margin:22px 0 6px; font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--dim)}
+
+  main{padding:46px 56px 120px; min-width:0}
+  .hero h1{font-size:30px; margin:0 0 6px; letter-spacing:-.4px}
+  .hero .sub{color:var(--mut); font-size:16px; margin:0 0 4px}
+  .hero .file{font-size:13px; color:var(--dim)}
+  .hero .file code{background:#10131e}
+
+  section{margin-top:64px; scroll-margin-top:24px}
+  h2{font-size:23px; margin:0 0 4px; letter-spacing:-.3px; display:flex; align-items:center; gap:12px}
+  h2 .num{font-family:ui-monospace,monospace; font-size:14px; color:var(--dim); border:1px solid var(--line2); border-radius:7px; padding:2px 8px}
+  h3{font-size:17px; margin:30px 0 8px; color:#eef0fa}
+  p{margin:12px 0}
+  .lead{color:var(--mut); font-size:15px; margin-top:6px}
+
+  /* chips */
+  .chip{display:inline-block; font-size:11px; font-weight:600; letter-spacing:.03em; padding:2px 9px; border-radius:20px; vertical-align:middle}
+  .chip.core{background:rgba(74,158,255,.14); color:#8cc0ff; border:1px solid rgba(74,158,255,.35)}
+  .chip.resil{background:rgba(80,216,144,.13); color:#7ee6ac; border:1px solid rgba(80,216,144,.33)}
+  .chip.scale{background:rgba(240,168,48,.13); color:#f3c373; border:1px solid rgba(240,168,48,.33)}
+  .chip.safe{background:rgba(232,96,122,.13); color:#f08ca0; border:1px solid rgba(232,96,122,.33)}
+  .chip.aux{background:rgba(183,140,240,.13); color:#cbb0f5; border:1px solid rgba(183,140,240,.33)}
+
+  /* feature grid */
+  .grid{display:grid; grid-template-columns:repeat(2,1fr); gap:14px; margin-top:26px}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:16px 18px; transition:border-color .15s, transform .15s}
+  .card:hover{border-color:var(--line2); transform:translateY(-2px)}
+  .card a.t{display:flex; align-items:baseline; gap:9px; font-weight:650; color:#eef0fa; font-size:15px}
+  .card a.t:hover{text-decoration:none; color:#fff}
+  .card a.t .rank{font-family:ui-monospace,monospace; font-size:12px; color:var(--dim)}
+  .card p{margin:8px 0 0; font-size:13.6px; color:var(--mut); line-height:1.55}
+  .card .meta{margin-top:10px}
+
+  figure{margin:24px 0 8px; background:var(--bg2); border:1px solid var(--line); border-radius:var(--radius); padding:18px 18px 12px; overflow:hidden}
+  figure svg{display:block; width:100%; height:auto}
+  figcaption{color:var(--dim); font-size:12.5px; margin-top:10px; text-align:center}
+
+  ul.k{margin:14px 0; padding:0; list-style:none}
+  ul.k li{position:relative; padding:5px 0 5px 26px; color:var(--txt)}
+  ul.k li::before{content:""; position:absolute; left:6px; top:13px; width:7px; height:7px; border-radius:50%; background:var(--b)}
+  ul.k li b{color:#eef0fa}
+
+  .note{border-left:3px solid var(--b); background:#0f1626; padding:12px 16px; border-radius:0 10px 10px 0; margin:18px 0; color:var(--mut); font-size:14px}
+  .note.warn{border-color:var(--a); background:#1b1608}
+  .note.danger{border-color:var(--r); background:#1c0f13}
+  .note b{color:var(--txt)}
+
+  .ref{font-size:12.5px; color:var(--dim); font-family:ui-monospace,monospace}
+  .ref b{color:var(--mut); font-weight:500}
+
+  table.api{width:100%; border-collapse:collapse; margin:18px 0; font-size:13.6px}
+  table.api th,table.api td{text-align:left; padding:9px 12px; border-bottom:1px solid var(--line)}
+  table.api th{color:var(--dim); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.05em}
+  table.api td.mono{color:#bcd2ff}
+
+  hr.sep{border:none; border-top:1px solid var(--line); margin:54px 0}
+  footer{color:var(--dim); font-size:12.5px; margin-top:70px; border-top:1px solid var(--line); padding-top:20px}
+
+  @media(max-width:980px){
+    .wrap{grid-template-columns:1fr}
+    nav{position:static; height:auto; border-right:none; border-bottom:1px solid var(--line)}
+    main{padding:32px 22px 90px}
+    .grid{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ marcadores de seta (escopo do documento) ============ -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <marker id="aB" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 Z" fill="#4a9eff"/></marker>
+  <marker id="aG" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 Z" fill="#50d890"/></marker>
+  <marker id="aA" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 Z" fill="#f0a830"/></marker>
+  <marker id="aR" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 Z" fill="#e8607a"/></marker>
+  <marker id="aP" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 Z" fill="#b78cf0"/></marker>
+  <marker id="aM" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 Z" fill="#6b7186"/></marker>
+</defs></svg>
+
+<style>
+  /* estilos compartilhados dos diagramas */
+  svg.dgm text{font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace}
+  .s-lbl{fill:#d6d8e4;font-size:13px}
+  .s-sub{fill:#9aa0b4;font-size:11px}
+  .s-mut{fill:#6b7186;font-size:10.5px}
+  .s-b{fill:#4a9eff}.s-g{fill:#50d890}.s-a{fill:#f0a830}.s-r{fill:#e8607a}.s-p{fill:#b78cf0}
+  .s-bold{font-weight:700}
+  rect.n{fill:#141826;stroke:#2a3346;stroke-width:1.4}
+  rect.nb{fill:#0f1830;stroke:#4a9eff;stroke-width:1.5}
+  rect.ng{fill:#0d1f17;stroke:#50d890;stroke-width:1.5}
+  rect.na{fill:#211a0d;stroke:#f0a830;stroke-width:1.5}
+  rect.nr{fill:#240f14;stroke:#e8607a;stroke-width:1.5}
+  rect.np{fill:#180f24;stroke:#b78cf0;stroke-width:1.5}
+  .ln{stroke:#3a4358;stroke-width:1.4;fill:none}
+  .lnb{stroke:#4a9eff;stroke-width:1.5;fill:none}
+  .lng{stroke:#50d890;stroke-width:1.5;fill:none}
+  .lna{stroke:#f0a830;stroke-width:1.5;fill:none}
+  .lnr{stroke:#e8607a;stroke-width:1.5;fill:none}
+  .lnp{stroke:#b78cf0;stroke-width:1.5;fill:none}
+  .lnm{stroke:#6b7186;stroke-width:1.3;fill:none}
+  .dash{stroke-dasharray:4 3}
+  circle.w{fill:#0f1830;stroke:#4a9eff;stroke-width:1.6}
+  circle.wg{fill:#0d1f17;stroke:#50d890;stroke-width:1.6}
+  circle.wr{fill:#240f14;stroke:#e8607a;stroke-width:1.6}
+</style>
+
+<div class="wrap">
+
+<!-- ===================== NAV ===================== -->
+<nav>
+  <div class="brand">WSPool<small>thread_pool.c · work-stealing pool</small></div>
+  <div class="navhead">Documento</div>
+  <a href="#visao" style="color:var(--mut);font-size:13.4px;display:block;padding:5px 10px;border-radius:8px">Visão geral &amp; arquitetura</a>
+  <a href="#features" style="color:var(--mut);font-size:13.4px;display:block;padding:5px 10px;border-radius:8px">Features (por importância)</a>
+  <div class="navhead">Detalhamento</div>
+  <ol>
+    <li><a href="#f1">Lanes &amp; work-stealing</a></li>
+    <li><a href="#f2">Submit &amp; backpressure</a></li>
+    <li><a href="#f3">Reserva &amp; monitor</a></li>
+    <li><a href="#f4">Handoff de task longa</a></li>
+    <li><a href="#f5">Resgate por backlog</a></li>
+    <li><a href="#f6">Expansão de lanes</a></li>
+    <li><a href="#f7">Contração com histerese</a></li>
+    <li><a href="#f8">Spin progressivo</a></li>
+    <li><a href="#f9">Parking de ociosos</a></li>
+    <li><a href="#f10">Shutdown &amp; envenenamento</a></li>
+    <li><a href="#f11">Janela órfã (TOCTOU)</a></li>
+    <li><a href="#f12">Thresholds CPU/bloqueio</a></li>
+    <li><a href="#f13">Robustez de alloc/start</a></li>
+    <li><a href="#f14">Infra de teste &amp; log</a></li>
+  </ol>
+</nav>
+
+<!-- ===================== MAIN ===================== -->
+<main>
+
+  <div class="hero">
+    <h1>WSPool — thread pool work-stealing</h1>
+    <p class="sub">Arquitetura e funcionamento completo do módulo <span class="mono">thread_pool.c</span></p>
+    <p class="file">Pool de tarefas com <em>lanes</em>, reserva de workers, handoff de tasks longas, resgate por backlog e elasticidade dinâmica.</p>
+  </div>
+
+  <!-- ============ VISÃO GERAL ============ -->
+  <section id="visao">
+    <h2><span class="num">VISÃO</span> Arquitetura geral</h2>
+    <p class="lead">
+      Submit distribui tasks entre lanes → owners executam e roubam entre si → a reserva alimenta handoff/resgate/expansão →
+      dois monitores regulam a elasticidade. O diagrama abaixo mostra tudo junto.
+    </p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 560" role="img" aria-label="Visão geral da arquitetura do pool">
+        <!-- submit -->
+        <rect class="nb" x="24" y="36" width="150" height="40" rx="6"/>
+        <text class="s-lbl s-b" x="99" y="55" text-anchor="middle">pool_submit()</text>
+        <text class="s-mut" x="99" y="69" text-anchor="middle">threads externas</text>
+
+        <!-- round robin distributor -->
+        <rect class="n" x="210" y="32" width="120" height="48" rx="6"/>
+        <text class="s-lbl" x="270" y="52" text-anchor="middle">round-robin</text>
+        <text class="s-mut" x="270" y="67" text-anchor="middle">submit_seq % active</text>
+        <line class="lnb" x1="174" y1="56" x2="208" y2="56" marker-end="url(#aB)"/>
+
+        <!-- LANES -->
+        <text class="s-sub s-bold" x="430" y="24" text-anchor="middle">LANES (ativas)</text>
+        <!-- lane template: ring + worker -->
+        <!-- lane 0 -->
+        <g>
+          <rect class="n" x="372" y="36" width="220" height="58" rx="7"/>
+          <text class="s-mut" x="384" y="52">lane 0</text>
+          <!-- ring cells -->
+          <rect class="nb" x="384" y="58" width="20" height="22" rx="3"/><rect class="nb" x="406" y="58" width="20" height="22" rx="3"/><rect class="nb" x="428" y="58" width="20" height="22" rx="3"/><rect class="n" x="450" y="58" width="20" height="22" rx="3"/>
+          <text class="s-mut" x="427" y="73" text-anchor="middle" style="font-size:9px">ring (MPMC)</text>
+          <circle class="w" cx="556" cy="65" r="16"/><text class="s-b" x="556" y="69" text-anchor="middle" style="font-size:11px">W</text>
+          <text class="s-mut" x="556" y="90" text-anchor="middle" style="font-size:9px">owner</text>
+        </g>
+        <!-- lane 1 -->
+        <g>
+          <rect class="n" x="372" y="104" width="220" height="58" rx="7"/>
+          <text class="s-mut" x="384" y="120">lane 1</text>
+          <rect class="nb" x="384" y="126" width="20" height="22" rx="3"/><rect class="nb" x="406" y="126" width="20" height="22" rx="3"/><rect class="n" x="428" y="126" width="20" height="22" rx="3"/><rect class="n" x="450" y="126" width="20" height="22" rx="3"/>
+          <circle class="w" cx="556" cy="133" r="16"/><text class="s-b" x="556" y="137" text-anchor="middle" style="font-size:11px">W</text>
+        </g>
+        <!-- lane 2 -->
+        <g>
+          <rect class="n" x="372" y="172" width="220" height="58" rx="7"/>
+          <text class="s-mut" x="384" y="188">lane n</text>
+          <rect class="nb" x="384" y="194" width="20" height="22" rx="3"/><rect class="n" x="406" y="194" width="20" height="22" rx="3"/><rect class="n" x="428" y="194" width="20" height="22" rx="3"/><rect class="n" x="450" y="194" width="20" height="22" rx="3"/>
+          <circle class="w" cx="556" cy="201" r="16"/><text class="s-b" x="556" y="205" text-anchor="middle" style="font-size:11px">W</text>
+        </g>
+        <!-- distributor to lanes -->
+        <path class="lnb" d="M330 56 C 352 56, 352 65, 370 65" marker-end="url(#aB)"/>
+        <path class="lnb dash" d="M330 60 C 352 90, 352 133, 370 133" marker-end="url(#aB)"/>
+        <path class="lnb dash" d="M330 64 C 352 150, 352 201, 370 201" marker-end="url(#aB)"/>
+
+        <!-- steal arrows between lanes -->
+        <path class="lng dash" d="M540 88 C 500 100, 500 110, 540 120" marker-end="url(#aG)"/>
+        <path class="lng dash" d="M540 156 C 500 168, 500 178, 540 188" marker-end="url(#aG)"/>
+        <text class="s-g" x="486" y="140" text-anchor="middle" style="font-size:10px">steal</text>
+
+        <!-- RESERVE -->
+        <rect class="ng" x="372" y="300" width="220" height="64" rx="8"/>
+        <text class="s-g s-bold" x="482" y="320" text-anchor="middle">RESERVA (ring MPMC)</text>
+        <circle class="wg" cx="404" cy="344" r="12"/><circle class="wg" cx="434" cy="344" r="12"/><circle class="wg" cx="464" cy="344" r="12"/><circle class="wg" cx="494" cy="344" r="12"/>
+        <text class="s-mut" x="556" y="348" text-anchor="middle" style="font-size:10px">workers prontos</text>
+
+        <!-- reserve feeds lanes: handoff / rescue / expand -->
+        <path class="lng" d="M470 298 C 470 260, 540 250, 556 84" marker-end="url(#aG)"/>
+        <text class="s-g" x="600" y="250" style="font-size:10px">handoff · resgate · expansão</text>
+
+        <!-- MONITORS -->
+        <rect class="na" x="688" y="300" width="188" height="40" rx="6"/>
+        <text class="s-a" x="782" y="320" text-anchor="middle" style="font-size:12px">long_task_monitor</text>
+        <text class="s-mut" x="782" y="334" text-anchor="middle" style="font-size:9.5px">handoff·resgate·expand·contrai</text>
+        <rect class="np" x="688" y="348" width="188" height="40" rx="6"/>
+        <text class="s-p" x="782" y="368" text-anchor="middle" style="font-size:12px">reserve_monitor</text>
+        <text class="s-mut" x="782" y="382" text-anchor="middle" style="font-size:9.5px">repõe reserva (cresce 1.5×)</text>
+
+        <!-- monitor scans lanes -->
+        <path class="lna dash" d="M688 318 C 640 318, 620 133, 594 133" marker-end="url(#aA)"/>
+        <path class="lnp dash" d="M688 368 C 640 368, 610 344, 594 344" marker-end="url(#aP)"/>
+
+        <!-- worker lifecycle strip -->
+        <line x1="24" y1="430" x2="876" y2="430" stroke="#242838"/>
+        <text class="s-sub s-bold" x="24" y="455">CICLO DE VIDA DO WORKER</text>
+        <rect class="ng" x="24" y="470" width="120" height="34" rx="6"/><text class="s-g" x="84" y="491" text-anchor="middle" style="font-size:11px">na reserva</text>
+        <rect class="nb" x="200" y="470" width="120" height="34" rx="6"/><text class="s-b" x="260" y="491" text-anchor="middle" style="font-size:11px">owner de lane</text>
+        <rect class="n" x="376" y="470" width="130" height="34" rx="6"/><text class="s-lbl" x="441" y="491" text-anchor="middle" style="font-size:11px">spin / executa</text>
+        <rect class="nr" x="562" y="470" width="150" height="34" rx="6"/><text class="s-r" x="637" y="491" text-anchor="middle" style="font-size:11px">destacado (task longa)</text>
+        <line class="lng" x1="144" y1="487" x2="198" y2="487" marker-end="url(#aG)"/>
+        <line class="lnb" x1="320" y1="487" x2="374" y2="487" marker-end="url(#aB)"/>
+        <line class="lnr" x1="506" y1="487" x2="560" y2="487" marker-end="url(#aR)"/>
+        <path class="lng dash" d="M712 504 C 760 540, 84 540, 84 506" marker-end="url(#aG)"/>
+        <text class="s-mut" x="400" y="535" text-anchor="middle" style="font-size:10px">ao terminar a task longa, o worker destacado volta à reserva</text>
+      </svg>
+      <figcaption>Fluxo geral: submit → lanes → steal · reserva alimenta handoff/resgate/expansão · dois monitores regulam elasticidade.</figcaption>
+    </figure>
+
+    <h3>Estruturas centrais</h3>
+    <table class="api">
+      <tr><th>Estrutura</th><th>Papel</th></tr>
+      <tr><td class="mono">WSLane</td><td><code>ring</code> de tasks + <code>wait</code> (dormir/acordar) + <code>worker</code> (owner) + <code>rescue_helpers</code>.</td></tr>
+      <tr><td class="mono">WSWorker</td><td>Thread executora. Campos-chave: <code>lane</code> (NULL = na reserva), <code>detached</code>, <code>rescue_mode</code>, <code>task_start_tsc</code>.</td></tr>
+      <tr><td class="mono">ShardedPool</td><td>Vetor de lanes pré-alocadas, <code>active_lanes</code> (cresce/encolhe), <code>max_active_ever</code> (high-water do steal), reserva MPMC e os monitores.</td></tr>
+    </table>
+  </section>
+
+  <!-- ============ FEATURE GRID ============ -->
+  <section id="features">
+    <h2><span class="num">MAPA</span> Features por importância</h2>
+    <p class="lead">Do núcleo (sem o qual não há pool) às camadas de resiliência, elasticidade e segurança. Clique para detalhar.</p>
+
+    <div class="grid">
+      <div class="card">
+        <a class="t" href="#f1"><span class="rank">01</span> Lanes &amp; work-stealing</a>
+        <p>Núcleo estilo TBB: cada lane tem ring próprio; worker ocioso rouba de outras varrendo até o high-water.</p>
+        <div class="meta"><span class="chip core">núcleo</span></div>
+      </div>
+      <div class="card">
+        <a class="t" href="#f2"><span class="rank">02</span> Submit &amp; backpressure</a>
+        <p>Round-robin entre lanes. Ring cheio → expande → tenta qualquer lane → backoff lento. <b>Nunca falha</b> (exceto shutdown).</p>
+        <div class="meta"><span class="chip core">núcleo</span> <span class="chip resil">resiliência</span></div>
+      </div>
+      <div class="card">
+        <a class="t" href="#f3"><span class="rank">03</span> Reserva &amp; monitor</a>
+        <p>Ring MPMC de workers prontos. Esgotou → alvo cresce 1.5× e o monitor recria workers até repor.</p>
+        <div class="meta"><span class="chip core">núcleo</span> <span class="chip scale">elasticidade</span></div>
+      </div>
+      <div class="card">
+        <a class="t" href="#f4"><span class="rank">04</span> Handoff de task longa</a>
+        <p>Owner travado em task longa é <b>destacado</b> da lane; um worker da reserva assume na hora. A lane segue viva.</p>
+        <div class="meta"><span class="chip resil">resiliência</span></div>
+      </div>
+      <div class="card">
+        <a class="t" href="#f5"><span class="rank">05</span> Resgate por backlog</a>
+        <p>3 sinais (profundidade · saturação · tempo preso) decidem trazer <b>ajudantes</b> que drenam o mesmo ring sem atropelar o steal.</p>
+        <div class="meta"><span class="chip resil">resiliência</span></div>
+      </div>
+      <div class="card">
+        <a class="t" href="#f6"><span class="rank">06</span> Expansão de lanes</a>
+        <p>Tudo ocupado + backlog &gt; nº de lanes → ativa lane pré-alocada com worker da reserva (nunca órfã).</p>
+        <div class="meta"><span class="chip scale">elasticidade</span></div>
+      </div>
+      <div class="card">
+        <a class="t" href="#f7"><span class="rank">07</span> Contração com histerese</a>
+        <p>Carga baixa sustentada (~50 scans) → desativa a top lane vazia. Owner volta à reserva sozinho.</p>
+        <div class="meta"><span class="chip scale">elasticidade</span></div>
+      </div>
+      <div class="card">
+        <a class="t" href="#f8"><span class="rank">08</span> Spin progressivo (4 fases)</a>
+        <p>pause → yield → Sleep(0)+amostragem de vizinhos → WaitOnAddress. Baixa latência sem queimar CPU.</p>
+        <div class="meta"><span class="chip core">núcleo</span></div>
+      </div>
+      <div class="card">
+        <a class="t" href="#f9"><span class="rank">09</span> Parking de ociosos</a>
+        <p>Ocioso por muito tempo → pula o spin e vai direto ao sono profundo. Economiza CPU em vales de carga.</p>
+        <div class="meta"><span class="chip scale">elasticidade</span></div>
+      </div>
+      <div class="card">
+        <a class="t" href="#f10"><span class="rank">10</span> Shutdown &amp; envenenamento</a>
+        <p>3 fases (drain → cooperativo → force-kill). Se matou thread presa, marca pool <b>envenenado</b> e faz leak controlado.</p>
+        <div class="meta"><span class="chip safe">segurança</span></div>
+      </div>
+      <div class="card">
+        <a class="t" href="#f11"><span class="rank">11</span> Janela órfã (TOCTOU)</a>
+        <p>Contração + reativação concorrentes poderiam deixar lane ativa sem owner. Re-reivindicação via CAS fecha a janela.</p>
+        <div class="meta"><span class="chip safe">segurança</span></div>
+      </div>
+      <div class="card">
+        <a class="t" href="#f12"><span class="rank">12</span> Thresholds CPU/bloqueio</a>
+        <p>Além do tempo bruto, decide handoff por razão de CPU vs. tempo bloqueado — não destaca task que só é lenta por I/O.</p>
+        <div class="meta"><span class="chip resil">resiliência</span></div>
+      </div>
+      <div class="card">
+        <a class="t" href="#f13"><span class="rank">13</span> Robustez de alloc/start</a>
+        <p>Worker criado mas nunca iniciado (falha de alloc) é tratado como parado — evita force-kill fantasma no caminho de erro.</p>
+        <div class="meta"><span class="chip safe">segurança</span></div>
+      </div>
+      <div class="card">
+        <a class="t" href="#f14"><span class="rank">14</span> Infra de teste &amp; log</a>
+        <p>Injeção de falhas, barreiras determinísticas para reproduzir races e log via hook registrável.</p>
+        <div class="meta"><span class="chip aux">auxiliar</span></div>
+      </div>
+    </div>
+  </section>
+
+  <hr class="sep">
+
+  <!-- ===================================================== -->
+  <!-- 01 LANES & WORK-STEALING -->
+  <!-- ===================================================== -->
+  <section id="f1">
+    <h2><span class="num">01</span> Lanes &amp; work-stealing <span class="chip core">núcleo</span></h2>
+    <p class="lead">Cada lane tem sua própria fila; quando ela esvazia, o worker rouba tasks das filas de outras lanes em vez de ficar parado. É o paralelismo base do pool, no estilo TBB da Intel.</p>
+
+    <p>
+      Cada <b>lane</b> tem um ring MPMC próprio. O worker owner consome do seu ring; quando esvazia, em vez de dormir,
+      ele tenta <b>roubar</b> de outra lane. O steal varre a partir de um offset derivado do <code>id</code> do worker
+      (espalha a contenção) e percorre até <code>max_active_ever</code> — o <i>high-water mark</i> — para também recolher
+      tasks residuais de lanes que foram desativadas pela contração.
+    </p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 320" role="img" aria-label="Work-stealing entre lanes">
+        <text class="s-sub s-bold" x="20" y="26">worker_try_any() = ring próprio · senão · worker_try_steal()</text>
+
+        <!-- 4 lanes -->
+        <g>
+          <rect class="nb" x="40"  y="60" width="180" height="120" rx="9"/>
+          <text class="s-b s-bold" x="130" y="82" text-anchor="middle">lane 0</text>
+          <rect class="n" x="60" y="96" width="30" height="26" rx="4"/><rect class="n" x="95" y="96" width="30" height="26" rx="4"/>
+          <circle class="w" cx="170" cy="140" r="20"/><text class="s-b" x="170" y="145" text-anchor="middle">W0</text>
+          <text class="s-mut" x="130" y="170" text-anchor="middle" style="font-size:9.5px">ring vazio → rouba</text>
+        </g>
+        <g>
+          <rect class="n" x="250" y="60" width="180" height="120" rx="9"/>
+          <text class="s-lbl s-bold" x="340" y="82" text-anchor="middle">lane 1</text>
+          <rect class="nb" x="270" y="96" width="30" height="26" rx="4"/><rect class="nb" x="305" y="96" width="30" height="26" rx="4"/><rect class="nb" x="340" y="96" width="30" height="26" rx="4"/><rect class="nb" x="375" y="96" width="30" height="26" rx="4"/>
+          <circle class="w" cx="380" cy="150" r="20"/><text class="s-b" x="380" y="155" text-anchor="middle">W1</text>
+        </g>
+        <g>
+          <rect class="n" x="460" y="60" width="180" height="120" rx="9"/>
+          <text class="s-lbl s-bold" x="550" y="82" text-anchor="middle">lane 2</text>
+          <rect class="nb" x="480" y="96" width="30" height="26" rx="4"/><rect class="nb" x="515" y="96" width="30" height="26" rx="4"/>
+          <circle class="w" cx="590" cy="150" r="20"/><text class="s-b" x="590" y="155" text-anchor="middle">W2</text>
+        </g>
+        <g>
+          <rect class="n" x="670" y="60" width="190" height="120" rx="9" style="opacity:.55"/>
+          <text class="s-mut s-bold" x="765" y="82" text-anchor="middle">lane 3 (desativada)</text>
+          <rect class="n" x="690" y="96" width="30" height="26" rx="4"/>
+          <text class="s-mut" x="765" y="150" text-anchor="middle" style="font-size:10px">residual recolhido</text>
+          <text class="s-mut" x="765" y="166" text-anchor="middle" style="font-size:10px">via high-water</text>
+        </g>
+
+        <!-- steal arrows from W0 -->
+        <path class="lng" d="M192 132 C 230 110, 250 110, 285 108" marker-end="url(#aG)"/>
+        <path class="lng dash" d="M192 145 C 300 200, 470 200, 498 122" marker-end="url(#aG)"/>
+        <path class="lng dash" d="M192 152 C 360 250, 690 250, 705 122" marker-end="url(#aG)"/>
+        <text class="s-g" x="250" y="100" style="font-size:11px">steal</text>
+
+        <!-- high water bracket -->
+        <line class="lnm dash" x1="40" y1="220" x2="860" y2="220"/>
+        <text class="s-mut" x="40" y="240">offset = (id+1) % n  ·  varre n = max_active_ever (high-water)</text>
+        <text class="s-g" x="40" y="262" style="font-size:11px">stat_stolen++ a cada roubo bem-sucedido — exposto em pool_stats()</text>
+      </svg>
+      <figcaption>Steal: W0 com ring vazio rouba de lane 1/2 e até de lanes desativadas (residuais), seguindo o high-water.</figcaption>
+    </figure>
+
+    <ul class="k">
+      <li><b>Distribuição:</b> <code>pool_submit</code> faz round-robin via <code>submit_seq % active_lanes</code>.</li>
+      <li><b>Consumo local primeiro:</b> <code>worker_try_any</code> tenta o próprio ring antes de roubar — preserva localidade de cache.</li>
+      <li><b>Steal cobre o high-water:</b> garante drenar lanes desativadas sem deixar task órfã.</li>
+    </ul>
+    <p class="ref"><b>Código:</b> worker_try_steal · worker_try_any · lane_pop_task · stat_stolen</p>
+  </section>
+
+  <!-- ===================================================== -->
+  <!-- 02 SUBMIT & BACKPRESSURE -->
+  <!-- ===================================================== -->
+  <section id="f2">
+    <h2><span class="num">02</span> Submit &amp; backpressure <span class="chip core">núcleo</span> <span class="chip resil">resiliência</span></h2>
+    <p class="lead">Toda task que entra é colocada numa lane em rodízio (round-robin). Se todas as filas estão cheias, o submit segura a task e espera abrir vaga — fica lento sob pressão, mas nunca descarta. A única recusa possível é quando o pool já está em shutdown.</p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 340" role="img" aria-label="Fluxo de decisão do pool_submit">
+        <!-- start -->
+        <rect class="nb" x="20" y="150" width="120" height="40" rx="6"/>
+        <text class="s-b" x="80" y="170" text-anchor="middle">pool_submit</text>
+        <text class="s-mut" x="80" y="184" text-anchor="middle" style="font-size:9px">enqueue_tsc carimbado</text>
+
+        <!-- shutdown? -->
+        <path class="lnb" d="M140 170 L 178 170" marker-end="url(#aB)"/>
+        <polygon class="nr" points="240,150 290,170 240,190 190,170" style="fill:#240f14;stroke:#e8607a;stroke-width:1.5"/>
+        <text class="s-r" x="240" y="174" text-anchor="middle" style="font-size:10px">shutdown?</text>
+        <path class="lnr" d="M240 190 L 240 230" marker-end="url(#aR)"/>
+        <rect class="nr" x="190" y="232" width="100" height="34" rx="6"/>
+        <text class="s-r" x="240" y="253" text-anchor="middle" style="font-size:11px">return false</text>
+        <text class="s-mut" x="240" y="282" text-anchor="middle" style="font-size:9px">única falha possível</text>
+
+        <!-- push lane -->
+        <path class="lnb" d="M290 170 L 328 170" marker-end="url(#aB)"/><text class="s-mut" x="305" y="162" style="font-size:9px">não</text>
+        <rect class="n" x="330" y="150" width="150" height="40" rx="6"/>
+        <text class="s-lbl" x="405" y="166" text-anchor="middle" style="font-size:12px">push na lane[rr]</text>
+        <text class="s-mut" x="405" y="180" text-anchor="middle" style="font-size:9px">xring_push_mp</text>
+
+        <!-- ok -> wake + checks -->
+        <path class="lng" d="M405 150 C 405 100, 600 100, 600 92" marker-end="url(#aG)"/>
+        <rect class="ng" x="500" y="52" width="200" height="40" rx="6"/>
+        <text class="s-g" x="600" y="70" text-anchor="middle" style="font-size:11px">wake · check_handoff · check_rescue</text>
+        <text class="s-g" x="600" y="84" text-anchor="middle" style="font-size:9.5px">return true</text>
+        <text class="s-g" x="440" y="120" style="font-size:9px">ok</text>
+
+        <!-- ring full -> expand -->
+        <path class="lna" d="M405 190 L 405 222" marker-end="url(#aA)"/><text class="s-a" x="412" y="210" style="font-size:9px">ring cheio</text>
+        <polygon points="405,228 470,250 405,272 340,250" class="na" style="fill:#211a0d;stroke:#f0a830;stroke-width:1.5"/>
+        <text class="s-a" x="405" y="247" text-anchor="middle" style="font-size:10px">activate_lane?</text>
+        <text class="s-a" x="405" y="260" text-anchor="middle" style="font-size:9px">(expande)</text>
+        <path class="lna" d="M340 250 C 250 250, 250 200, 250 192" marker-end="url(#aA)"/><text class="s-a" x="240" y="225" style="font-size:9px">sim → repete</text>
+
+        <!-- no expand -> try any lane -->
+        <path class="lna" d="M470 250 L 540 250" marker-end="url(#aA)"/><text class="s-mut" x="505" y="243" style="font-size:9px">no teto</text>
+        <rect class="n" x="542" y="232" width="150" height="36" rx="6"/>
+        <text class="s-lbl" x="617" y="254" text-anchor="middle" style="font-size:11px">tenta qualquer lane</text>
+
+        <!-- all full -> backoff -->
+        <path class="lnr" d="M692 250 L 730 250" marker-end="url(#aR)"/>
+        <rect class="nr" x="732" y="226" width="150" height="48" rx="6"/>
+        <text class="s-r" x="807" y="245" text-anchor="middle" style="font-size:11px">backpressure</text>
+        <text class="s-mut" x="807" y="259" text-anchor="middle" style="font-size:9px">pause→yield→sleep(1ms)</text>
+        <path class="lnr dash" d="M807 226 C 807 120, 150 120, 90 150" marker-end="url(#aR)"/>
+        <text class="s-r" x="430" y="116" text-anchor="middle" style="font-size:9.5px">loop infinito — espera vaga, nunca descarta</text>
+      </svg>
+      <figcaption>Cascata do submit: push → (cheio) expande → tenta qualquer lane → backoff progressivo. Falha só em shutdown.</figcaption>
+    </figure>
+
+    <ul class="k">
+      <li><b>Round-robin:</b> <code>submit_seq</code> incrementado atomicamente espalha entre <code>active_lanes</code>.</li>
+      <li><b>Carimbo de tempo:</b> cada task leva <code>enqueue_tsc</code>, usado depois no ranking de resgate (tempo de espera real).</li>
+      <li><b>Disparo imediato:</b> após o push, <code>submit_check_handoff</code> e <code>submit_check_rescue</code> agem sem esperar o monitor periódico.</li>
+      <li><b>Backoff escalonado:</b> <code>pause</code> (&lt;64) → <code>yield</code> (&lt;256) → <code>sleep 1ms</code>. Conta <code>stat_backpressure</code>.</li>
+    </ul>
+    <p class="ref"><b>Código:</b> pool_submit · submit_push_lane · submit_backoff · submit_check_handoff · submit_check_rescue</p>
+  </section>
+
+  <!-- ===================================================== -->
+  <!-- 03 RESERVA & MONITOR -->
+  <!-- ===================================================== -->
+  <section id="f3">
+    <h2><span class="num">03</span> Reserva de workers &amp; monitor <span class="chip core">núcleo</span> <span class="chip scale">elasticidade</span></h2>
+    <p class="lead">Um banco global de workers já criados e dormindo, prontos para assumir uma lane na hora. É dele que saem os workers usados por handoff, resgate e expansão, e é o único ponto do pool que de fato cria thread nova: quando a reserva esvazia, um monitor recria workers para repô-la.</p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 300" role="img" aria-label="Reserva e monitor da reserva">
+        <!-- reserve ring -->
+        <rect class="ng" x="40" y="90" width="360" height="110" rx="10"/>
+        <text class="s-g s-bold" x="220" y="116" text-anchor="middle">RESERVA · reserve_ring (MPMC de WSWorker*)</text>
+        <circle class="wg" cx="90"  cy="155" r="16"/><circle class="wg" cx="135" cy="155" r="16"/><circle class="wg" cx="180" cy="155" r="16"/>
+        <text class="s-mut" x="290" y="160" text-anchor="middle" style="font-size:10px">reserve_count ≈ alvo</text>
+
+        <!-- consumers -->
+        <path class="lng" d="M400 130 L 470 130" marker-end="url(#aG)"/>
+        <rect class="nb" x="472" y="96" width="170" height="70" rx="8"/>
+        <text class="s-b" x="557" y="120" text-anchor="middle" style="font-size:11px">reserve_pop()</text>
+        <text class="s-mut" x="557" y="138" text-anchor="middle" style="font-size:9.5px">handoff · resgate</text>
+        <text class="s-mut" x="557" y="152" text-anchor="middle" style="font-size:9.5px">expansão de lane</text>
+
+        <!-- depletion detection -->
+        <path class="lnp" d="M220 200 L 220 232" marker-end="url(#aP)"/>
+        <polygon points="220,234 300,254 220,274 140,254" class="np" style="fill:#180f24;stroke:#b78cf0;stroke-width:1.5"/>
+        <text class="s-p" x="220" y="252" text-anchor="middle" style="font-size:10px">reserve_count == 0?</text>
+        <text class="s-p" x="220" y="266" text-anchor="middle" style="font-size:9px">(esgotada)</text>
+
+        <!-- monitor grows + refills -->
+        <path class="lnp" d="M300 254 L 470 254" marker-end="url(#aP)"/>
+        <rect class="np" x="472" y="220" width="380" height="68" rx="8"/>
+        <text class="s-p s-bold" x="662" y="242" text-anchor="middle">reserve_monitor (a cada 100 ms)</text>
+        <text class="s-mut" x="662" y="260" text-anchor="middle" style="font-size:10px">alvo ×1.5 (teto = capacidade/2) → cria + inicia workers</text>
+        <text class="s-mut" x="662" y="274" text-anchor="middle" style="font-size:10px">refill_reserve_to_target()</text>
+
+        <!-- refill back to reserve -->
+        <path class="lng dash" d="M560 220 C 560 70, 220 60, 220 88" marker-end="url(#aG)"/>
+        <text class="s-g" x="380" y="58" text-anchor="middle" style="font-size:10px">repõe a reserva</text>
+      </svg>
+      <figcaption>A reserva é consumida por handoff/resgate/expansão; quando zera, o monitor cresce o alvo 1.5× e recria workers.</figcaption>
+    </figure>
+
+    <ul class="k">
+      <li><b>Push/pop MPMC:</b> <code>reserve_push</code>/<code>reserve_pop</code> sobre um ring lock-free, com <code>reserve_count</code> aproximado para diagnóstico.</li>
+      <li><b>Crescimento controlado:</b> <code>grow_reserve_target_if_depleted</code> sobe o alvo por <code>×1.5</code>, com teto de metade do orçamento de workers — evita explosão sob depleção sustentada.</li>
+      <li><b>Orçamento pré-dimensionado:</b> <code>all_worker_capacity = (lanes + reserva + cores) × 4</code>, alocado de uma vez (sem realloc concorrente).</li>
+    </ul>
+    <p class="ref"><b>Código:</b> reserve_monitor_fn · grow_reserve_target_if_depleted · refill_reserve_to_target · reserve_push/pop</p>
+  </section>
+
+  <!-- ===================================================== -->
+  <!-- 04 HANDOFF -->
+  <!-- ===================================================== -->
+  <section id="f4">
+    <h2><span class="num">04</span> Handoff de task longa <span class="chip resil">resiliência</span></h2>
+    <p class="lead">Quando o worker dono de uma lane fica preso numa task que demora demais, ele é destacado e sai de circulação, e um worker da reserva assume a lane no lugar dele. Assim a fila volta a ser processada na hora, sem esperar a task longa terminar — e diferente do resgate, aqui o worker da reserva vira o novo dono (sempre um dono por lane).</p>
+
+    <p>
+      Não é a <i>task</i> que se move: é o <b>worker</b> que sai de circulação. O detector confirma via CAS que o
+      <code>task_start_tsc</code> não mudou desde a detecção (senão a task já terminou e não há nada a fazer), puxa um
+      <b>spare</b> da reserva, marca a vítima como <code>detached</code> e troca o owner da lane por CAS. A vítima segue
+      rodando a task longa "fora de pista" e, ao concluir, retorna sozinha à reserva.
+    </p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 320" role="img" aria-label="Sequência do handoff">
+        <!-- antes -->
+        <text class="s-sub s-bold" x="20" y="28">ANTES</text>
+        <rect class="n" x="20" y="44" width="240" height="120" rx="9"/>
+        <text class="s-lbl" x="140" y="66" text-anchor="middle">lane</text>
+        <rect class="nb" x="40" y="78" width="28" height="24" rx="4"/><rect class="nb" x="72" y="78" width="28" height="24" rx="4"/><rect class="nb" x="104" y="78" width="28" height="24" rx="4"/>
+        <text class="s-mut" x="86" y="120" text-anchor="middle" style="font-size:9.5px">backlog acumulando</text>
+        <circle class="wr" cx="210" cy="110" r="22"/><text class="s-r" x="210" y="115" text-anchor="middle">W</text>
+        <text class="s-r" x="210" y="146" text-anchor="middle" style="font-size:9.5px">preso há &gt; threshold</text>
+
+        <!-- arrow -->
+        <path class="lna" d="M270 104 L 330 104" marker-end="url(#aA)"/>
+        <text class="s-a" x="300" y="96" text-anchor="middle" style="font-size:10px">CAS</text>
+        <text class="s-mut" x="300" y="124" text-anchor="middle" style="font-size:8.5px">tsc confirmado</text>
+
+        <!-- depois -->
+        <text class="s-sub s-bold" x="350" y="28">DEPOIS</text>
+        <rect class="n" x="350" y="44" width="240" height="120" rx="9"/>
+        <text class="s-lbl" x="470" y="66" text-anchor="middle">lane (mesma)</text>
+        <rect class="nb" x="370" y="78" width="28" height="24" rx="4"/><rect class="nb" x="402" y="78" width="28" height="24" rx="4"/>
+        <circle class="wg" cx="540" cy="110" r="22"/><text class="s-g" x="540" y="115" text-anchor="middle">S</text>
+        <text class="s-g" x="540" y="146" text-anchor="middle" style="font-size:9.5px">spare assume (novo owner)</text>
+
+        <!-- victim leaves -->
+        <path class="lnr dash" d="M232 132 C 232 230, 430 230, 430 230" marker-end="url(#aR)"/>
+        <rect class="nr" x="280" y="212" width="300" height="40" rx="7"/>
+        <text class="s-r" x="430" y="231" text-anchor="middle" style="font-size:11px">W destacado — continua a task longa fora de pista</text>
+        <text class="s-mut" x="430" y="245" text-anchor="middle" style="font-size:9px">detached = 1</text>
+
+        <!-- spare from reserve -->
+        <rect class="ng" x="640" y="80" width="240" height="60" rx="8"/>
+        <text class="s-g" x="760" y="104" text-anchor="middle" style="font-size:11px">RESERVA</text>
+        <circle class="wg" cx="700" cy="122" r="11"/><circle class="wg" cx="730" cy="122" r="11"/>
+        <path class="lng" d="M638 110 L 566 110" marker-end="url(#aG)"/>
+        <text class="s-g" x="600" y="102" style="font-size:9px">reserve_pop</text>
+
+        <!-- victim returns to reserve -->
+        <path class="lng dash" d="M580 232 C 760 232, 760 142, 760 142" marker-end="url(#aG)"/>
+        <text class="s-mut" x="690" y="280" text-anchor="middle" style="font-size:9.5px">ao terminar, o destacado volta à reserva  ·  stat_handoffs++</text>
+      </svg>
+      <figcaption>Handoff: a vítima sai como <code>detached</code>, o spare vira owner por CAS, a lane nunca para.</figcaption>
+    </figure>
+
+    <ul class="k">
+      <li><b>Confirmação anti-corrida:</b> CAS no <code>task_start_tsc</code> garante que a task ainda é a mesma da detecção.</li>
+      <li><b>Sem spare → adiado:</b> reserva vazia acorda o <code>reserve_monitor</code> e pula o handoff desta vez.</li>
+      <li><b>Reversão segura:</b> se o CAS do owner falhar, tudo é desfeito (spare volta, <code>detached</code> limpo).</li>
+    </ul>
+    <p class="ref"><b>Código:</b> perform_handoff · worker_long_task_start · scan_lanes_for_handoff · submit_check_handoff</p>
+  </section>
+
+  <!-- ===================================================== -->
+  <!-- 05 RESGATE -->
+  <!-- ===================================================== -->
+  <section id="f5">
+    <h2><span class="num">05</span> Resgate por backlog (3 sinais) <span class="chip resil">resiliência</span></h2>
+    <p class="lead">Quando a fila de uma lane acumula tasks e o roubo entre lanes não dá conta, workers da reserva entram nessa mesma lane e processam as tasks acumuladas em paralelo — passa a haver mais de um worker no mesmo shard. Os ajudantes saem e voltam à reserva assim que a fila esvazia. A task não muda de fila nem pula a vez: o que aumenta é o número de workers tirando dela ao mesmo tempo (o ring é MPMC).</p>
+
+    <p>
+      A decisão de resgatar é tomada pelo ranking <code>lane_rescue_score</code>, que combina três indicadores para agir sem
+      atropelar o work-stealing. Só quando o steal comprovadamente não tem para onde espalhar é que os ajudantes são despachados.
+    </p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 360" role="img" aria-label="Três sinais do ranking de resgate">
+        <!-- three gates -->
+        <text class="s-sub s-bold" x="20" y="26">lane_rescue_score() — 3 indicadores em série</text>
+
+        <!-- sinal 1 -->
+        <rect class="nb" x="30" y="50" width="240" height="84" rx="9"/>
+        <text class="s-b s-bold" x="150" y="74" text-anchor="middle">1 · Profundidade</text>
+        <text class="s-mut" x="150" y="96" text-anchor="middle" style="font-size:10.5px">pending ≥ rescue_backlog_threshold</text>
+        <text class="s-mut" x="150" y="114" text-anchor="middle" style="font-size:9.5px">há fila acumulada na lane</text>
+
+        <!-- sinal 2 -->
+        <rect class="na" x="330" y="50" width="240" height="84" rx="9"/>
+        <text class="s-a s-bold" x="450" y="74" text-anchor="middle">2 · Saturação (gate)</text>
+        <text class="s-mut" x="450" y="96" text-anchor="middle" style="font-size:10.5px">busy ≥ active   OU   pending ≥ active</text>
+        <text class="s-mut" x="450" y="114" text-anchor="middle" style="font-size:9.5px">steal não tem para onde espalhar</text>
+
+        <!-- sinal 3 -->
+        <rect class="np" x="630" y="50" width="240" height="84" rx="9"/>
+        <text class="s-p s-bold" x="750" y="74" text-anchor="middle">3 · Tempo preso</text>
+        <text class="s-mut" x="750" y="96" text-anchor="middle" style="font-size:10.5px">espera real (enqueue_tsc) da cabeça</text>
+        <text class="s-mut" x="750" y="114" text-anchor="middle" style="font-size:9.5px">fallback: tempo do owner na task</text>
+
+        <path class="lnm" d="M270 92 L 328 92" marker-end="url(#aM)"/>
+        <path class="lnm" d="M570 92 L 628 92" marker-end="url(#aM)"/>
+
+        <!-- score -->
+        <path class="lnb" d="M450 134 L 450 168" marker-end="url(#aB)"/>
+        <rect class="n" x="320" y="170" width="260" height="40" rx="7"/>
+        <text class="s-lbl" x="450" y="195" text-anchor="middle" style="font-size:12px">score = pending·16 + wait_score</text>
+
+        <!-- dispatch helpers -->
+        <path class="lng" d="M450 210 L 450 244" marker-end="url(#aG)"/>
+        <rect class="ng" x="280" y="246" width="340" height="86" rx="9"/>
+        <text class="s-g s-bold" x="450" y="270" text-anchor="middle">dispatch_rescue_worker()</text>
+        <circle class="wg" cx="330" cy="300" r="14"/><circle class="wg" cx="368" cy="300" r="14"/><circle class="wg" cx="406" cy="300" r="14"/>
+        <text class="s-mut" x="540" y="296" text-anchor="middle" style="font-size:9.5px">ajudantes (rescue_mode=1)</text>
+        <text class="s-mut" x="540" y="312" text-anchor="middle" style="font-size:9.5px">puxam o mesmo ring (MPMC)</text>
+
+        <!-- caps -->
+        <rect class="nr" x="650" y="246" width="220" height="86" rx="9"/>
+        <text class="s-r s-bold" x="760" y="268" text-anchor="middle" style="font-size:11px">limites do nº de ajudantes</text>
+        <text class="s-mut" x="760" y="288" text-anchor="middle" style="font-size:9.5px">cap = pending (1 por pendente)</text>
+        <text class="s-mut" x="760" y="304" text-anchor="middle" style="font-size:9.5px">≤ rescue_max_helpers</text>
+        <text class="s-mut" x="760" y="320" text-anchor="middle" style="font-size:9.5px">e nunca busy ≥ nº de cores</text>
+        <path class="lnr dash" d="M648 289 L 622 289" marker-end="url(#aR)"/>
+      </svg>
+      <figcaption>Os 3 sinais em cascata produzem um score; se &gt; 0, ajudantes são despachados — limitados por profundidade, teto e folga de cores.</figcaption>
+    </figure>
+
+    <ul class="k">
+      <li><b>Gate de saturação:</b> o 2º critério evita roubar a vez do steal — só resgata quando todos estão ocupados ou há mais backlog que lanes.</li>
+      <li><b>Folga de cores:</b> <code>dispatch_rescue_worker</code> nunca oversubscreve: para se <code>busy_workers ≥ xcpu_count()</code>.</li>
+      <li><b>Auto-retorno:</b> ajudante que encontra o ring vazio sai do <code>rescue_mode</code>, decrementa <code>rescue_helpers</code> e volta à reserva.</li>
+      <li><b>Backstop:</b> o monitor varre todas as lanes por score (<code>scan_lanes_for_rescue</code>) caso o caminho síncrono do submit não cubra.</li>
+    </ul>
+    <p class="ref"><b>Código:</b> lane_rescue_score · dispatch_rescue_worker · lane_helper_cap · scan_lanes_for_rescue · stat_rescued</p>
+  </section>
+
+  <!-- ===================================================== -->
+  <!-- 06 EXPANSÃO -->
+  <!-- ===================================================== -->
+  <section id="f6">
+    <h2><span class="num">06</span> Expansão dinâmica de lanes <span class="chip scale">elasticidade</span></h2>
+    <p class="lead">Quando todos os workers estão ocupados e o backlog somado passa do número de lanes, o pool ativa uma lane que já estava pré-alocada, criando uma nova pista para o submit distribuir, com um worker da reserva como dono. É o complemento do resgate: enquanto o resgate reforça uma lane existente, a expansão adiciona mais uma lane ao pool — um olha a fila local, o outro a ocupação total.</p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 300" role="img" aria-label="Expansão de lanes">
+        <!-- active lanes -->
+        <rect class="nb" x="30" y="60" width="120" height="70" rx="8"/><text class="s-b" x="90" y="100" text-anchor="middle">lane 0 ✓</text>
+        <rect class="nb" x="160" y="60" width="120" height="70" rx="8"/><text class="s-b" x="220" y="100" text-anchor="middle">lane 1 ✓</text>
+        <rect class="nb" x="290" y="60" width="120" height="70" rx="8"/><text class="s-b" x="350" y="100" text-anchor="middle">lane 2 ✓</text>
+        <text class="s-mut" x="30" y="48" style="font-size:10px">active_lanes = 3</text>
+
+        <!-- preallocated inactive -->
+        <rect class="n" x="430" y="60" width="120" height="70" rx="8" style="stroke-dasharray:5 3;opacity:.7"/><text class="s-mut" x="490" y="92" text-anchor="middle" style="font-size:11px">lane 3</text><text class="s-mut" x="490" y="108" text-anchor="middle" style="font-size:9px">pré-alocada</text>
+        <rect class="n" x="560" y="60" width="120" height="70" rx="8" style="stroke-dasharray:5 3;opacity:.5"/><text class="s-mut" x="620" y="98" text-anchor="middle" style="font-size:11px">lane 4 …</text>
+        <text class="s-mut" x="430" y="48" style="font-size:10px">até expand_cap (default = nº de cores)</text>
+
+        <!-- condition -->
+        <rect class="na" x="30" y="170" width="380" height="64" rx="9"/>
+        <text class="s-a s-bold" x="220" y="194" text-anchor="middle">scan_maybe_expand()</text>
+        <text class="s-mut" x="220" y="214" text-anchor="middle" style="font-size:10px">busy ≥ active  E  Σ pending ≥ active</text>
+        <text class="s-mut" x="220" y="228" text-anchor="middle" style="font-size:9px">também acionado quando um ring enche (submit)</text>
+
+        <!-- activate -->
+        <path class="lng" d="M410 130 C 470 150, 470 150, 490 130" marker-end="url(#aG)"/>
+        <path class="lna" d="M220 168 C 360 150, 430 150, 480 132" marker-end="url(#aA)"/>
+        <rect class="ng" x="440" y="170" width="430" height="64" rx="9"/>
+        <text class="s-g s-bold" x="655" y="194" text-anchor="middle">activate_lane()</text>
+        <text class="s-mut" x="655" y="214" text-anchor="middle" style="font-size:10px">reserve_pop() → owner · CAS active_lanes++ · sobe max_active_ever</text>
+        <text class="s-mut" x="655" y="228" text-anchor="middle" style="font-size:9px">só ativa COM worker (evita lane órfã) · stat_expansions++</text>
+      </svg>
+      <figcaption>Lanes já existem pré-alocadas; expandir é só ativar a próxima atribuindo um worker da reserva como owner.</figcaption>
+    </figure>
+
+    <ul class="k">
+      <li><b>Pré-alocação total:</b> todas as lanes até <code>lane_capacity (= max_shards)</code> nascem com ring inicializado; ativar é barato e sem corrida de realloc.</li>
+      <li><b>Teto realista:</b> <code>expand_cap</code> default = nº de cores lógicos (clamp em <code>[initial_lanes, max_shards]</code>).</li>
+      <li><b>Nunca órfã:</b> a ativação falha de propósito se não houver worker pronto — e acorda o monitor para criar mais.</li>
+      <li><b>High-water:</b> sobe <code>max_active_ever</code> para que steal e monitores passem a varrer a lane nova.</li>
+    </ul>
+    <p class="ref"><b>Código:</b> activate_lane · scan_maybe_expand · expand_cap · max_active_ever · stat_expansions</p>
+  </section>
+
+  <!-- ===================================================== -->
+  <!-- 07 CONTRAÇÃO -->
+  <!-- ===================================================== -->
+  <section id="f7">
+    <h2><span class="num">07</span> Contração com histerese <span class="chip scale">elasticidade</span></h2>
+    <p class="lead">O inverso da expansão: quando a carga fica baixa por tempo suficiente, o pool desativa a última lane (se estiver vazia), e o worker dono, ao perceber que saiu do range ativo, volta sozinho para a reserva.</p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 260" role="img" aria-label="Contração com histerese">
+        <!-- hysteresis bar -->
+        <text class="s-sub s-bold" x="20" y="30">scan_maybe_contract() — exige carga baixa por ~50 scans (≈500 ms)</text>
+        <rect class="n" x="20" y="48" width="640" height="26" rx="5"/>
+        <rect class="na" x="22" y="50" width="420" height="22" rx="4"/>
+        <text class="s-mut" x="232" y="66" text-anchor="middle" style="font-size:10px">low_load_scans++ (top lane vazia · busy &lt; active · active &gt; inicial)</text>
+        <text class="s-a" x="560" y="66" text-anchor="middle" style="font-size:10px">limiar 50 →</text>
+
+        <!-- before/after -->
+        <rect class="nb" x="40" y="120" width="90" height="56" rx="7"/><text class="s-b" x="85" y="152" text-anchor="middle" style="font-size:11px">lane 0</text>
+        <rect class="nb" x="140" y="120" width="90" height="56" rx="7"/><text class="s-b" x="185" y="152" text-anchor="middle" style="font-size:11px">lane 1</text>
+        <rect class="nr" x="240" y="120" width="120" height="56" rx="7"/><text class="s-r" x="300" y="146" text-anchor="middle" style="font-size:11px">lane 2 (top)</text><text class="s-mut" x="300" y="162" text-anchor="middle" style="font-size:9px">vazia → desativa</text>
+
+        <path class="lnr" d="M360 148 L 430 148" marker-end="url(#aR)"/>
+        <text class="s-r" x="395" y="140" text-anchor="middle" style="font-size:10px">CAS active--</text>
+
+        <rect class="n" x="440" y="120" width="120" height="56" rx="7" style="stroke-dasharray:5 3;opacity:.6"/>
+        <text class="s-mut" x="500" y="146" text-anchor="middle" style="font-size:11px">lane 2 inativa</text>
+        <text class="s-mut" x="500" y="162" text-anchor="middle" style="font-size:9px">owner volta à reserva</text>
+
+        <rect class="ng" x="610" y="120" width="240" height="56" rx="8"/>
+        <text class="s-g" x="730" y="142" text-anchor="middle" style="font-size:11px">owner vê index ≥ active_lanes</text>
+        <text class="s-mut" x="730" y="160" text-anchor="middle" style="font-size:9.5px">esvazia, libera lane, retorna à reserva</text>
+        <path class="lng dash" d="M560 162 C 590 180, 600 162, 608 150" marker-end="url(#aG)"/>
+
+        <text class="s-mut" x="20" y="220" style="font-size:10px">Residuais de corrida são drenados pelo steal (que varre max_active_ever) · piso = initial_lanes (shard_count).</text>
+      </svg>
+      <figcaption>Contração: top lane vazia por carga baixa sustentada é desativada; o owner percebe e volta à reserva por conta própria.</figcaption>
+    </figure>
+
+    <ul class="k">
+      <li><b>Histerese de entrada:</b> só contrai após <code>LANE_CONTRACT_HYSTERESIS = 50</code> scans consecutivos de carga baixa.</li>
+      <li><b>Piso fixo:</b> nunca desce abaixo de <code>initial_lanes</code> (= <code>shard_count</code>).</li>
+      <li><b>Desativação cooperativa:</b> o monitor só faz o CAS de <code>active_lanes--</code>; o worker é quem deixa a lane ao ver que saiu do range ativo e o ring esvaziou.</li>
+    </ul>
+    <p class="ref"><b>Código:</b> scan_maybe_contract · LANE_CONTRACT_HYSTERESIS · low_load_scans · worker_fn (release de lane)</p>
+  </section>
+
+  <!-- ===================================================== -->
+  <!-- 08 SPIN -->
+  <!-- ===================================================== -->
+  <section id="f8">
+    <h2><span class="num">08</span> Spin progressivo (4 fases) <span class="chip core">núcleo</span></h2>
+    <p class="lead">Um worker sem trabalho não dorme de imediato: ele sobe uma escada de espera cada vez mais barata em CPU — pause, depois yield, depois Sleep(0) e por fim sono profundo — para pegar uma nova task o quanto antes sem queimar CPU à toa.</p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 300" role="img" aria-label="Quatro fases do spin">
+        <!-- timeline -->
+        <line class="lnm" x1="30" y1="210" x2="860" y2="210"/>
+        <text class="s-mut" x="30" y="232" style="font-size:10px">latência ↑     custo de CPU ↓     (cada fase checa o ring a cada iteração)</text>
+
+        <!-- P1 -->
+        <rect class="nb" x="30" y="70" width="180" height="120" rx="9"/>
+        <text class="s-b s-bold" x="120" y="94" text-anchor="middle">P1 · pause</text>
+        <text class="s-mut" x="120" y="116" text-anchor="middle" style="font-size:10px">xcpu_pause × N</text>
+        <text class="s-mut" x="120" y="134" text-anchor="middle" style="font-size:10px">orçamento em ciclos</text>
+        <text class="s-mut" x="120" y="158" text-anchor="middle" style="font-size:9px">0 syscall · 100% CPU</text>
+
+        <!-- P2 -->
+        <rect class="n" x="226" y="80" width="180" height="100" rx="9"/>
+        <text class="s-lbl s-bold" x="316" y="104" text-anchor="middle">P2 · yield</text>
+        <text class="s-mut" x="316" y="126" text-anchor="middle" style="font-size:10px">SwitchToThread × 128</text>
+        <text class="s-mut" x="316" y="146" text-anchor="middle" style="font-size:9px">cede ao escalonador</text>
+
+        <!-- P3 -->
+        <rect class="na" x="422" y="64" width="200" height="116" rx="9"/>
+        <text class="s-a s-bold" x="522" y="88" text-anchor="middle">P3 · Sleep(0) × 4</text>
+        <text class="s-mut" x="522" y="110" text-anchor="middle" style="font-size:10px">+ amostra vizinhos</text>
+        <text class="s-mut" x="522" y="128" text-anchor="middle" style="font-size:9.5px">detecta task longa alheia</text>
+        <text class="s-mut" x="522" y="148" text-anchor="middle" style="font-size:9px">(custo amortizado)</text>
+
+        <!-- P4 -->
+        <rect class="np" x="638" y="84" width="200" height="96" rx="9"/>
+        <text class="s-p s-bold" x="738" y="108" text-anchor="middle">P4 · WaitOnAddress</text>
+        <text class="s-mut" x="738" y="130" text-anchor="middle" style="font-size:10px">sono ~1 ms</text>
+        <text class="s-mut" x="738" y="148" text-anchor="middle" style="font-size:9px">acordado por push na lane</text>
+
+        <path class="lnm" d="M210 130 L 224 130" marker-end="url(#aM)"/>
+        <path class="lnm" d="M406 130 L 420 130" marker-end="url(#aM)"/>
+        <path class="lnm" d="M622 130 L 636 130" marker-end="url(#aM)"/>
+
+        <!-- found task escape -->
+        <path class="lng dash" d="M120 70 C 120 40, 760 40, 760 82" marker-end="url(#aG)"/>
+        <text class="s-g" x="440" y="34" text-anchor="middle" style="font-size:10px">achou task em qualquer fase → executa imediatamente (sai do spin)</text>
+      </svg>
+      <figcaption>Escada de espera: pause → yield → Sleep(0)+amostragem → WaitOnAddress. Em P3, o worker ocioso ainda ajuda detectando tasks longas dos vizinhos.</figcaption>
+    </figure>
+
+    <ul class="k">
+      <li><b>Orçamento por ciclos:</b> P1 pode rodar por um orçamento em ciclos de CPU (<code>spin_budget_cycles</code>) além do contador de iterações.</li>
+      <li><b>Detecção oportunista (P3):</b> <code>sample_neighbors_for_long_tasks</code> aproveita o worker ocioso para varrer owners e acordar o monitor de handoff — caminho único evita corrida entre detectores.</li>
+      <li><b>Saída a qualquer momento:</b> achar task, mudança de estado, <code>stop_workers</code> ou <code>detached</code> interrompem o spin.</li>
+    </ul>
+    <p class="ref"><b>Código:</b> worker_idle_on_lane · spin_phase1/2/3 · sample_neighbors_for_long_tasks · SPIN_P*_ITER</p>
+  </section>
+
+  <!-- ===================================================== -->
+  <!-- 09 PARKING -->
+  <!-- ===================================================== -->
+  <section id="f9">
+    <h2><span class="num">09</span> Parking de ociosos <span class="chip scale">elasticidade</span></h2>
+    <p class="lead">Se um worker fica ocioso por tempo demais, ele pula toda a escada de spin e vai direto ao sono profundo, economizando CPU nos vales de carga até que um novo push o acorde.</p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 220" role="img" aria-label="Transição para parking">
+        <rect class="nb" x="30" y="70" width="200" height="70" rx="9"/>
+        <text class="s-b s-bold" x="130" y="100" text-anchor="middle">worker ativo</text>
+        <text class="s-mut" x="130" y="120" text-anchor="middle" style="font-size:10px">spin P1→P4 normal</text>
+
+        <polygon points="320,70 420,105 320,140 220,105" class="na" style="fill:#211a0d;stroke:#f0a830;stroke-width:1.5"/>
+        <text class="s-a" x="320" y="102" text-anchor="middle" style="font-size:10px">ocioso &gt;</text>
+        <text class="s-a" x="320" y="116" text-anchor="middle" style="font-size:10px">park_threshold?</text>
+        <path class="lnb" d="M230 105 L 218 105" marker-end="url(#aB)"/>
+
+        <path class="lna" d="M420 105 L 470 105" marker-end="url(#aA)"/><text class="s-mut" x="445" y="98" style="font-size:9px">sim</text>
+        <rect class="np" x="472" y="70" width="220" height="70" rx="9"/>
+        <text class="s-p s-bold" x="582" y="98" text-anchor="middle">PARKED</text>
+        <text class="s-mut" x="582" y="118" text-anchor="middle" style="font-size:10px">sem spin · sono POOL_PARK_SLEEP_US</text>
+
+        <path class="lng" d="M692 105 L 740 105" marker-end="url(#aG)"/>
+        <rect class="ng" x="742" y="78" width="130" height="54" rx="8"/>
+        <text class="s-g" x="807" y="100" text-anchor="middle" style="font-size:11px">push na lane</text>
+        <text class="s-mut" x="807" y="118" text-anchor="middle" style="font-size:9px">acorda e volta</text>
+
+        <text class="s-mut" x="30" y="185" style="font-size:10px">park_threshold_tsc = 0 desativa o parking · medido por (now − last_work) em TSC.</text>
+      </svg>
+      <figcaption>Parking: após ociosidade prolongada, o worker economiza CPU dormindo direto; um novo push o traz de volta ao ciclo normal.</figcaption>
+    </figure>
+
+    <ul class="k">
+      <li><b>Gatilho temporal:</b> <code>(now − last_work) &gt; park_threshold_tsc</code>, com <code>last_work</code> local ao thread.</li>
+      <li><b>Configurável:</b> <code>park_idle_threshold_ms</code> na config; <code>0</code> desliga o recurso.</li>
+      <li><b>Reversível na hora:</b> ao acordar e achar task, o worker sai do parking automaticamente no próximo ciclo.</li>
+    </ul>
+    <p class="ref"><b>Código:</b> worker_idle_on_lane (ramo parked) · park_threshold_tsc · POOL_PARK_SLEEP_US</p>
+  </section>
+
+  <!-- ===================================================== -->
+  <!-- 10 SHUTDOWN -->
+  <!-- ===================================================== -->
+  <section id="f10">
+    <h2><span class="num">10</span> Shutdown em 3 fases &amp; pool envenenado <span class="chip safe">segurança</span></h2>
+    <p class="lead">O encerramento acontece em três fases — drenar as tasks pendentes, pedir parada cooperativa e, no pior caso, matar à força as threads que não pararam. Se precisou matar alguma thread presa, o pool abandona a memória de propósito para não arriscar travar na liberação do heap.</p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 300" role="img" aria-label="Fases do shutdown">
+        <!-- Fase A -->
+        <rect class="ng" x="30" y="60" width="250" height="90" rx="10"/>
+        <text class="s-g s-bold" x="155" y="84" text-anchor="middle">Fase A · Drain gracioso</text>
+        <text class="s-mut" x="155" y="106" text-anchor="middle" style="font-size:10px">espera pending_tasks → 0</text>
+        <text class="s-mut" x="155" y="122" text-anchor="middle" style="font-size:10px">timeout WALL-CLOCK (TSC)</text>
+        <text class="s-mut" x="155" y="138" text-anchor="middle" style="font-size:9px">robusto sob starvation de CPU</text>
+
+        <path class="lnm" d="M280 105 L 320 105" marker-end="url(#aM)"/>
+
+        <!-- Fase B -->
+        <rect class="na" x="322" y="60" width="250" height="90" rx="10"/>
+        <text class="s-a s-bold" x="447" y="84" text-anchor="middle">Fase B · Cooperativo</text>
+        <text class="s-mut" x="447" y="106" text-anchor="middle" style="font-size:10px">stop flag + acorda todos</text>
+        <text class="s-mut" x="447" y="122" text-anchor="middle" style="font-size:10px">espera parada com timeout</text>
+        <text class="s-mut" x="447" y="138" text-anchor="middle" style="font-size:9px">workers saem do loop</text>
+
+        <path class="lnm" d="M572 105 L 612 105" marker-end="url(#aM)"/>
+
+        <!-- Fase C -->
+        <rect class="nr" x="614" y="60" width="256" height="90" rx="10"/>
+        <text class="s-r s-bold" x="742" y="84" text-anchor="middle">Fase C · Force-kill</text>
+        <text class="s-mut" x="742" y="106" text-anchor="middle" style="font-size:10px">TerminateThread nos presos</text>
+        <text class="s-mut" x="742" y="122" text-anchor="middle" style="font-size:10px">só se ainda houver stragglers</text>
+        <text class="s-mut" x="742" y="138" text-anchor="middle" style="font-size:9px">g_force_killed_total += n</text>
+
+        <!-- poison -->
+        <path class="lnr" d="M742 150 L 742 184" marker-end="url(#aR)"/>
+        <rect class="nr" x="560" y="186" width="310" height="74" rx="10"/>
+        <text class="s-r s-bold" x="715" y="208" text-anchor="middle">POOL ENVENENADO</text>
+        <text class="s-mut" x="715" y="228" text-anchor="middle" style="font-size:10px">heap pode estar travado pela thread morta</text>
+        <text class="s-mut" x="715" y="244" text-anchor="middle" style="font-size:10px">leak controlado TOTAL · return imediato (sem free)</text>
+
+        <!-- clean exit -->
+        <path class="lng" d="M447 150 C 447 220, 300 220, 280 220" marker-end="url(#aG)"/>
+        <rect class="ng" x="30" y="186" width="250" height="74" rx="10"/>
+        <text class="s-g s-bold" x="155" y="208" text-anchor="middle">Saída limpa</text>
+        <text class="s-mut" x="155" y="228" text-anchor="middle" style="font-size:10px">join + free de workers e lanes</text>
+        <text class="s-mut" x="155" y="244" text-anchor="middle" style="font-size:9px">caso ninguém precise de force-kill</text>
+      </svg>
+      <figcaption>Drain → cooperativo → force-kill. Se threads foram mortas à força, o pool é declarado envenenado e a liberação é abortada para não deadlockar no heap.</figcaption>
+    </figure>
+
+    <div class="note danger">
+      <b>Pool envenenado:</b> uma thread morta por <code>TerminateThread</code> pode reter o lock do heap. Qualquer <code>free()</code> depois disso poderia travar — por isso o pool faz <b>leak controlado</b> e retorna imediatamente. O contador global <code>pool_force_kill_count()</code> sinaliza que pools não devem mais ser reciclados.
+    </div>
+
+    <ul class="k">
+      <li><b>Timeouts por tempo real:</b> medidos em TSC, não em iterações de sleep — corretos mesmo sob CPU saturada.</li>
+      <li><b>Monitores primeiro:</b> são parados e <i>joined</i> antes de iterar os workers (eles podem criar workers).</li>
+      <li><b>Force-kill opcional:</b> <code>shutdown_force_kill = false</code> troca o kill por espera (pode bloquear) — escolha do chamador.</li>
+    </ul>
+    <p class="ref"><b>Código:</b> pool_shutdown · pool_wait_workers_stopped_timeout · force_kill_stragglers · g_force_killed_total</p>
+  </section>
+
+  <!-- ===================================================== -->
+  <!-- 11 ORFÃ -->
+  <!-- ===================================================== -->
+  <section id="f11">
+    <h2><span class="num">11</span> Janela órfã (TOCTOU) na contração <span class="chip safe">segurança</span></h2>
+    <p class="lead">Um detalhe fino de concorrência: contrair e reativar a mesma lane ao mesmo tempo poderia deixá-la ativa sem dono. O código fecha essa janela re-reivindicando a lane por CAS, garantindo que toda lane ativa sempre tenha um owner.</p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 280" role="img" aria-label="Fechamento da janela órfã">
+        <text class="s-sub s-bold" x="20" y="26">worker_fn — owner liberando lane desativada</text>
+
+        <rect class="n" x="30" y="56" width="220" height="56" rx="8"/>
+        <text class="s-lbl" x="140" y="80" text-anchor="middle" style="font-size:12px">re-check: index ≥ active?</text>
+        <text class="s-mut" x="140" y="98" text-anchor="middle" style="font-size:9.5px">e ring vazio</text>
+
+        <path class="lna" d="M250 84 L 300 84" marker-end="url(#aA)"/>
+        <rect class="na" x="302" y="46" width="260" height="76" rx="8"/>
+        <text class="s-a s-bold" x="432" y="68" text-anchor="middle" style="font-size:12px">JANELA TOCTOU</text>
+        <text class="s-mut" x="432" y="88" text-anchor="middle" style="font-size:9.5px">entre o re-check e o CAS worker→NULL</text>
+        <text class="s-mut" x="432" y="104" text-anchor="middle" style="font-size:9.5px">outra thread pode REATIVAR a lane</text>
+
+        <path class="lnr" d="M432 122 L 432 156" marker-end="url(#aR)"/>
+        <rect class="n" x="302" y="158" width="260" height="44" rx="8"/>
+        <text class="s-lbl" x="432" y="184" text-anchor="middle" style="font-size:12px">CAS lane.worker: W → NULL</text>
+
+        <path class="lnp" d="M562 180 L 612 180" marker-end="url(#aP)"/>
+        <rect class="np" x="614" y="150" width="256" height="64" rx="9"/>
+        <text class="s-p s-bold" x="742" y="172" text-anchor="middle" style="font-size:12px">se reativada: re-reivindica</text>
+        <text class="s-mut" x="742" y="192" text-anchor="middle" style="font-size:9.5px">CAS NULL → W de volta</text>
+        <text class="s-mut" x="742" y="206" text-anchor="middle" style="font-size:9px">falhou? outro já assumiu — ok</text>
+
+        <text class="s-g" x="20" y="245" style="font-size:10.5px">Garantia: em qualquer entrelaçamento, uma lane ativa sempre termina COM owner — nunca órfã.</text>
+        <text class="s-mut" x="20" y="264" style="font-size:9.5px">Barreiras de teste dedicadas (lane_release / orphan_window) reproduzem exatamente este entrelaçamento.</text>
+      </svg>
+      <figcaption>A janela entre o re-check e o CAS é fechada re-reivindicando a lane se ela tiver sido reativada — invariante: lane ativa ⇒ tem owner.</figcaption>
+    </figure>
+
+    <ul class="k">
+      <li><b>Invariante protegida:</b> lane com <code>index &lt; active_lanes</code> sempre tem <code>worker != NULL</code>.</li>
+      <li><b>Dupla verificação:</b> re-check antes do CAS e re-reivindicação depois cobrem ambos os lados da corrida.</li>
+      <li><b>Verificável:</b> <code>pool_test_orphan_lane_count</code> e a barreira <code>orphan_window</code> existem só para provar a ausência de órfãs.</li>
+    </ul>
+    <p class="ref"><b>Código:</b> worker_fn (ramo de release) · activate_lane · pool_test_enable_orphan_window_barrier</p>
+  </section>
+
+  <!-- ===================================================== -->
+  <!-- 12 THRESHOLDS -->
+  <!-- ===================================================== -->
+  <section id="f12">
+    <h2><span class="num">12</span> Thresholds por CPU/bloqueio <span class="chip resil">resiliência</span></h2>
+    <p class="lead">Um refinamento do handoff: em vez de olhar só o tempo total, distingue uma task que está realmente consumindo CPU de uma que está apenas bloqueada esperando I/O — e só destaca o worker no primeiro caso. É opcional (opt-in).</p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 240" role="img" aria-label="Avaliação por thresholds de task">
+        <rect class="nb" x="30" y="90" width="190" height="60" rx="9"/>
+        <text class="s-b s-bold" x="125" y="116" text-anchor="middle">task &gt; long_threshold</text>
+        <text class="s-mut" x="125" y="134" text-anchor="middle" style="font-size:9.5px">tempo bruto excedido</text>
+
+        <path class="lnb" d="M220 120 L 270 120" marker-end="url(#aB)"/>
+
+        <polygon points="370,70 470,120 370,170 270,120" class="na" style="fill:#211a0d;stroke:#f0a830;stroke-width:1.5"/>
+        <text class="s-a" x="370" y="112" text-anchor="middle" style="font-size:10px">use_task_</text>
+        <text class="s-a" x="370" y="126" text-anchor="middle" style="font-size:10px">thresholds?</text>
+
+        <!-- no -> handoff -->
+        <path class="lng" d="M370 170 L 370 200" marker-end="url(#aG)"/>
+        <text class="s-mut" x="395" y="190" style="font-size:9px">não</text>
+        <rect class="ng" x="270" y="202" width="200" height="30" rx="6"/>
+        <text class="s-g" x="370" y="222" text-anchor="middle" style="font-size:11px">handoff direto</text>
+
+        <!-- yes -> evaluate -->
+        <path class="lna" d="M470 120 L 520 120" marker-end="url(#aA)"/><text class="s-mut" x="495" y="112" style="font-size:9px">sim</text>
+        <rect class="na" x="522" y="78" width="350" height="84" rx="9"/>
+        <text class="s-a s-bold" x="697" y="100" text-anchor="middle">xthread_evaluate_task()</text>
+        <text class="s-mut" x="697" y="120" text-anchor="middle" style="font-size:10px">razão CPU ≥ cpu_ratio_min  →  computando: HANDOFF</text>
+        <text class="s-mut" x="697" y="138" text-anchor="middle" style="font-size:10px">razão bloqueio alta  →  só esperando I/O: NÃO destaca</text>
+        <text class="s-mut" x="697" y="154" text-anchor="middle" style="font-size:9px">amostra wall_ns + activity no início e agora</text>
+      </svg>
+      <figcaption>Com thresholds habilitados, o handoff só ocorre se a task estiver de fato consumindo CPU — uma task bloqueada em I/O não é destacada à toa.</figcaption>
+    </figure>
+
+    <ul class="k">
+      <li><b>Amostragem dupla:</b> <code>worker_mark_task_start</code> registra <code>wall_ns</code> e <code>activity</code>; a avaliação compara com a amostra atual.</li>
+      <li><b>Opt-in:</b> só ativo se <code>task_thresholds_set</code>; caso contrário vale apenas o tempo bruto (<code>long_threshold_tsc</code>).</li>
+      <li><b>Parâmetros:</b> <code>blocked_ratio_max</code> e <code>cpu_ratio_min</code> calibram a fronteira entre "preso computando" e "preso esperando".</li>
+    </ul>
+    <p class="ref"><b>Código:</b> worker_long_task_start · xthread_evaluate_task · xthread_should_handoff · task_thresholds</p>
+  </section>
+
+  <!-- ===================================================== -->
+  <!-- 13 ROBUSTEZ -->
+  <!-- ===================================================== -->
+  <section id="f13">
+    <h2><span class="num">13</span> Robustez de alocação/start <span class="chip safe">segurança</span></h2>
+    <p class="lead">Um worker que foi criado mas nunca chegou a iniciar a thread (por falha de alocação) é reconhecido como já parado. Assim, um erro durante a construção do pool termina limpo, sem disparar force-kill desnecessário nem envenenar um pool que nem chegou a rodar.</p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 210" role="img" aria-label="Tratamento de worker sem thread">
+        <rect class="na" x="30" y="70" width="230" height="70" rx="9"/>
+        <text class="s-a s-bold" x="145" y="96" text-anchor="middle" style="font-size:12px">WSWorker criado</text>
+        <text class="s-mut" x="145" y="116" text-anchor="middle" style="font-size:10px">state=ACTIVE, handle=NULL</text>
+        <text class="s-mut" x="145" y="130" text-anchor="middle" style="font-size:9px">thread nunca iniciou (alloc/start falhou)</text>
+
+        <path class="lnb" d="M260 105 L 320 105" marker-end="url(#aB)"/>
+        <rect class="nb" x="322" y="70" width="250" height="70" rx="9"/>
+        <text class="s-b s-bold" x="447" y="96" text-anchor="middle" style="font-size:12px">worker_handle_dead()</text>
+        <text class="s-mut" x="447" y="116" text-anchor="middle" style="font-size:10px">handle == NULL → trata como STOPPED</text>
+        <text class="s-mut" x="447" y="130" text-anchor="middle" style="font-size:9px">não espera join, não força nada</text>
+
+        <path class="lng" d="M572 105 L 632 105" marker-end="url(#aG)"/>
+        <rect class="ng" x="634" y="70" width="236" height="70" rx="9"/>
+        <text class="s-g s-bold" x="752" y="100" text-anchor="middle" style="font-size:12px">shutdown limpo</text>
+        <text class="s-mut" x="752" y="120" text-anchor="middle" style="font-size:9.5px">sem poison fantasma, sem leak</text>
+
+        <text class="s-mut" x="30" y="180" style="font-size:10px">Sem isto, o caminho de erro dispararia o join-timeout e um force-kill desnecessário (envenenando um pool que nunca rodou).</text>
+      </svg>
+      <figcaption>Worker sem thread associada é reconhecido como parado — o erro de construção termina limpo, sem acionar o envenenamento.</figcaption>
+    </figure>
+
+    <ul class="k">
+      <li><b>Distinção handle NULL:</b> <code>worker_handle_dead</code> separa "thread terminou" de "thread nunca existiu".</li>
+      <li><b>Injeção de falha testável:</b> <code>pool_test_fail_alloc_after</code> / <code>pool_test_fail_thread_start_after</code> reproduzem esses caminhos.</li>
+      <li><b>Construção atômica do pool:</b> qualquer falha em <code>pool_create</code> chama <code>pool_shutdown</code> e retorna <code>NULL</code> sem vazar.</li>
+    </ul>
+    <p class="ref"><b>Código:</b> worker_handle_dead · worker_create · worker_start · pool_create (caminhos de erro)</p>
+  </section>
+
+  <!-- ===================================================== -->
+  <!-- 14 TESTE & LOG -->
+  <!-- ===================================================== -->
+  <section id="f14">
+    <h2><span class="num">14</span> Infra de teste &amp; log <span class="chip aux">auxiliar</span></h2>
+    <p class="lead">Compilado com <code>POOL_TEST_HOOKS</code>, o módulo permite injetar falhas e congelar threads em pontos exatos para reproduzir corridas de forma determinística. Em produção, <code>pool_stats</code> expõe os contadores de operação e o log é entregue por um hook registrável.</p>
+
+    <figure>
+      <svg class="dgm" viewBox="0 0 900 220" role="img" aria-label="Ferramentas de teste e log">
+        <rect class="nb" x="30" y="40" width="250" height="70" rx="9"/>
+        <text class="s-b s-bold" x="155" y="64" text-anchor="middle">Injeção de falha</text>
+        <text class="s-mut" x="155" y="84" text-anchor="middle" style="font-size:10px">fail_alloc_after</text>
+        <text class="s-mut" x="155" y="98" text-anchor="middle" style="font-size:10px">fail_thread_start_after</text>
+
+        <rect class="na" x="30" y="124" width="250" height="74" rx="9"/>
+        <text class="s-a s-bold" x="155" y="148" text-anchor="middle">Barreiras determinísticas</text>
+        <text class="s-mut" x="155" y="168" text-anchor="middle" style="font-size:9.5px">handoff · lane_release</text>
+        <text class="s-mut" x="155" y="182" text-anchor="middle" style="font-size:9.5px">orphan_window</text>
+
+        <rect class="np" x="320" y="40" width="250" height="70" rx="9"/>
+        <text class="s-p s-bold" x="445" y="64" text-anchor="middle">Observabilidade de teste</text>
+        <text class="s-mut" x="445" y="84" text-anchor="middle" style="font-size:9.5px">max_spin_iterations</text>
+        <text class="s-mut" x="445" y="98" text-anchor="middle" style="font-size:9.5px">orphan_transition_observed</text>
+
+        <rect class="ng" x="320" y="124" width="250" height="74" rx="9"/>
+        <text class="s-g s-bold" x="445" y="148" text-anchor="middle">Log via hook</text>
+        <text class="s-mut" x="445" y="168" text-anchor="middle" style="font-size:9.5px">pool_set_log_hook(fn)</text>
+        <text class="s-mut" x="445" y="182" text-anchor="middle" style="font-size:9px">silencioso sem hook · -DPOOL_VERBOSE ecoa</text>
+
+        <rect class="n" x="610" y="64" width="260" height="110" rx="9"/>
+        <text class="s-lbl s-bold" x="740" y="92" text-anchor="middle">pool_stats()</text>
+        <text class="s-mut" x="740" y="114" text-anchor="middle" style="font-size:9.5px">submitted · stolen · handoffs</text>
+        <text class="s-mut" x="740" y="130" text-anchor="middle" style="font-size:9.5px">rescued · expansions</text>
+        <text class="s-mut" x="740" y="146" text-anchor="middle" style="font-size:9.5px">backpressure · reserve · pending</text>
+        <text class="s-mut" x="740" y="162" text-anchor="middle" style="font-size:9px">visibilidade em produção</text>
+      </svg>
+      <figcaption>Ferramentas só de teste (hooks/barreiras) ao lado da telemetria de produção (<code>pool_stats</code>) e do log registrável.</figcaption>
+    </figure>
+
+    <ul class="k">
+      <li><b>Determinismo de corrida:</b> barreiras param threads em pontos exatos (ex.: a janela TOCTOU) para testes reprodutíveis.</li>
+      <li><b>Telemetria viva:</b> <code>pool_stats</code> expõe contadores de submit, steal, handoff, resgate, expansão e backpressure.</li>
+      <li><b>Log desacoplado:</b> sem hook, a biblioteca é silenciosa; severidades vão para um <code>pool_log_fn</code> registrável.</li>
+    </ul>
+    <p class="ref"><b>Código:</b> POOL_TEST_HOOKS · pool_test_* · pool_set_log_hook · pool_log · pool_stats</p>
+  </section>
+
+  <footer>
+    Documentação gerada a partir da arquitetura de <span class="mono">Xplatbase/Xplatbase/src/thread_pool.c</span>.
+    Diagramas SVG inline · tema escuro. Referências de código apontam para funções e símbolos reais do módulo.
+  </footer>
+
+</main>
+</div>
+</body>
+</html>
