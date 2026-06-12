@@ -1,10 +1,8 @@
+#define _GNU_SOURCE
 #include "thread_activity.h"
 
 #ifndef XPLATBASE_WIN
 
-
-#define _GNU_SOURCE
-#include "xthread_activity.h"
 #include <time.h>
 #include <pthread.h>
 

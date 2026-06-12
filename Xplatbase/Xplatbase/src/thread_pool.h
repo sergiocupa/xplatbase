@@ -36,8 +36,8 @@ typedef struct {
 
 /* ─────────────────────────────────────────────────────────────────────────
  * Hook de log — a biblioteca nao imprime direto; entrega o evento ao app, que
- * decide onde/como mostrar (ex.: linha unica colorida). Sem hook → silencioso
- * (ou stderr se compilado com -DPOOL_VERBOSE).
+ * decide onde/como mostrar (ex.: linha unica colorida). Cada pool captura o
+ * hook vigente em pool_create; trocar o hook afeta apenas pools futuros.
  * ───────────────────────────────────────────────────────────────────────── */
 
 #define POOL_LOG_INFO  0
@@ -145,7 +145,7 @@ typedef struct {
 
     int      shutdown_drain_timeout_ms; /* drenar a fila ate N ms (0 → default 5000)        */
     int      shutdown_join_timeout_ms;  /* esperar workers pararem ate N ms (0 → default 2000) */
-    bool     shutdown_force_kill;       /* se nao pararem, terminar a thread a forca (default true) */
+    bool     shutdown_force_kill;       /* opt-in perigoso; default false */
 
     xtask_thresholds_t task_thresholds;
     bool               task_thresholds_set;
@@ -159,7 +159,8 @@ XPLATBASE_API PoolConfig pool_default_config(void);
 
 XPLATBASE_API ShardedPool* pool_create  (const PoolConfig* cfg);  /* NULL → defaults */
 XPLATBASE_API void         pool_init    (ShardedPool* pool);       /* aguarda workers prontos */
-XPLATBASE_API void         pool_shutdown(ShardedPool* pool);
+XPLATBASE_API void         pool_shutdown(ShardedPool* pool);       /* fecha e para; preserva o handle */
+XPLATBASE_API void         pool_destroy (ShardedPool* pool);       /* chamar sem usuarios concorrentes */
 XPLATBASE_API bool         pool_submit  (ShardedPool* pool, task_fn fn, void* arg);
 
 /* ─────────────────────────────────────────────────────────────────────────

@@ -24,8 +24,12 @@
 
 #ifdef _WIN32
 
+#include <mmsystem.h>
 #pragma comment(lib, "Synchronization.lib")
 #pragma comment(lib, "Winmm.lib")
+
+static SRWLOCK g_timer_lock = SRWLOCK_INIT;
+static unsigned int g_timer_users = 0;
 
 /* Init - eleva resolucao do timer do Windows para 1ms (afeta Sleep/Wait*).
  * Por padrao e ~15.6ms — sem isso, Sleep(1) dorme ate 15ms e
@@ -33,12 +37,23 @@
 boolean thread_wait_init(boolean fast_mode)
 {
     (void)fast_mode;
-    static int initialized = 0;
-    if (!initialized) {
-        timeBeginPeriod(1);
-        initialized = 1;
+    boolean ok = true;
+    AcquireSRWLockExclusive(&g_timer_lock);
+    if (g_timer_users == 0 && timeBeginPeriod(1) != TIMERR_NOERROR) {
+        ok = false;
+    } else {
+        g_timer_users++;
     }
-    return true;
+    ReleaseSRWLockExclusive(&g_timer_lock);
+    return ok;
+}
+
+void thread_wait_shutdown(void)
+{
+    AcquireSRWLockExclusive(&g_timer_lock);
+    if (g_timer_users > 0 && --g_timer_users == 0)
+        timeEndPeriod(1);
+    ReleaseSRWLockExclusive(&g_timer_lock);
 }
 
 /* Reseta o sinal para 0 antes de entrar na fase de espera. */
@@ -96,26 +111,30 @@ void thread_wait_destroy(xwait_t* w)
 #include <errno.h>
 
 /* Init - futex nao precisa */
-inline boolean thread_wait_init(boolean fast_mode)
+boolean thread_wait_init(boolean fast_mode)
 {
     (void)fast_mode;
     return true;
 }
 
+void thread_wait_shutdown(void)
+{
+}
+
 /* Libera recursos da instancia (no-op no Linux) */
-inline void thread_wait_destroy(xwait_t* w)
+void thread_wait_destroy(xwait_t* w)
 {
     (void)w;
 }
 
 /* Registrar thread antes de usar */
-inline void thread_wait_prepare(xwait_t* w)
+void thread_wait_prepare(xwait_t* w)
 {
     atomic_store_explicit(&w->futex_val, 0, memory_order_relaxed);
 }
 
 /* Dorme ate ser acordada - loop por causa de spurious wakeup (EINTR, etc) */
-inline void thread_wait_sleep(xwait_t* w)
+void thread_wait_sleep(xwait_t* w)
 {
     while (atomic_load_explicit(&w->futex_val, memory_order_acquire) == 0)
         syscall(SYS_futex, &w->futex_val, FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
@@ -125,7 +144,7 @@ inline void thread_wait_sleep(xwait_t* w)
 }
 
 /* Dorme com timeout (microsegundos). true = acordou por wake, false = timeout */
-inline boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
+boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
 {
     struct timespec ts;
     ts.tv_sec = timeout_us / 1000000LL;
@@ -144,7 +163,7 @@ inline boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
 }
 
 /* Acorda a thread */
-inline void thread_wait_wake(xwait_t* w)
+void thread_wait_wake(xwait_t* w)
 {
     atomic_store_explicit(&w->futex_val, 1, memory_order_release);
     syscall(SYS_futex, &w->futex_val, FUTEX_WAKE | FUTEX_PRIVATE_FLAG,

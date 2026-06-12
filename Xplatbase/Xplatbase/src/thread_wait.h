@@ -41,6 +41,7 @@ extern "C" {
 
 
     XPLATBASE_API boolean thread_wait_init(boolean fast_mode);
+    XPLATBASE_API void    thread_wait_shutdown(void);
     XPLATBASE_API void    thread_wait_destroy(xwait_t* w);
     XPLATBASE_API void    thread_wait_prepare(xwait_t* w);
     XPLATBASE_API void    thread_wait_sleep(xwait_t* w);

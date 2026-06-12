@@ -887,7 +887,7 @@
   <!-- ===================================================== -->
   <section id="f10">
     <h2><span class="num">10</span> Shutdown em 3 fases &amp; pool envenenado <span class="chip safe">segurança</span></h2>
-    <p class="lead">O encerramento acontece em três fases — drenar as tasks pendentes, pedir parada cooperativa e, no pior caso, matar à força as threads que não pararam. Se precisou matar alguma thread presa, o pool abandona a memória de propósito para não arriscar travar na liberação do heap.</p>
+    <p class="lead">O encerramento drena as tasks pendentes e pede parada cooperativa. Force-kill é opt-in e permanece um último recurso perigoso. <code>pool_shutdown()</code> preserva o handle público fechado; <code>pool_destroy()</code> faz a liberação final quando não há chamadores concorrentes.</p>
 
     <figure>
       <svg class="dgm" viewBox="0 0 900 300" role="img" aria-label="Fases do shutdown">
@@ -940,9 +940,10 @@
     <ul class="k">
       <li><b>Timeouts por tempo real:</b> medidos em TSC, não em iterações de sleep — corretos mesmo sob CPU saturada.</li>
       <li><b>Monitores primeiro:</b> são parados e <i>joined</i> antes de iterar os workers (eles podem criar workers).</li>
-      <li><b>Force-kill opcional:</b> <code>shutdown_force_kill = false</code> troca o kill por espera (pode bloquear) — escolha do chamador.</li>
+      <li><b>Force-kill opt-in:</b> o default é <code>shutdown_force_kill = false</code>; após o timeout, o pool é preservado em vez de bloquear indefinidamente ou terminar uma thread de forma insegura.</li>
+      <li><b>Vida útil explícita:</b> depois de <code>pool_shutdown()</code>, submits falham e stats retornam vazias; chame <code>pool_destroy()</code> somente sem usuários concorrentes.</li>
     </ul>
-    <p class="ref"><b>Código:</b> pool_shutdown · pool_wait_workers_stopped_timeout · force_kill_stragglers · g_force_killed_total</p>
+    <p class="ref"><b>Código:</b> pool_shutdown · pool_destroy · pool_wait_workers_stopped_timeout · force_kill_stragglers · g_force_killed_total</p>
   </section>
 
   <!-- ===================================================== -->
@@ -995,7 +996,7 @@
   <!-- ===================================================== -->
   <section id="f12">
     <h2><span class="num">12</span> Thresholds por CPU/bloqueio <span class="chip resil">resiliência</span></h2>
-    <p class="lead">Um refinamento do handoff: em vez de olhar só o tempo total, distingue uma task que está realmente consumindo CPU de uma que está apenas bloqueada esperando I/O — e só destaca o worker no primeiro caso. É opcional (opt-in).</p>
+    <p class="lead">Um refinamento do handoff: em vez de olhar só o tempo total, distingue uma task computando de uma task bloqueada. O handoff ocorre para a task longa bloqueada, liberando a lane para outro worker. É opcional (opt-in).</p>
 
     <figure>
       <svg class="dgm" viewBox="0 0 900 240" role="img" aria-label="Avaliação por thresholds de task">
@@ -1019,11 +1020,11 @@
         <path class="lna" d="M470 120 L 520 120" marker-end="url(#aA)"/><text class="s-mut" x="495" y="112" style="font-size:9px">sim</text>
         <rect class="na" x="522" y="78" width="350" height="84" rx="9"/>
         <text class="s-a s-bold" x="697" y="100" text-anchor="middle">xthread_evaluate_task()</text>
-        <text class="s-mut" x="697" y="120" text-anchor="middle" style="font-size:10px">razão CPU ≥ cpu_ratio_min  →  computando: HANDOFF</text>
-        <text class="s-mut" x="697" y="138" text-anchor="middle" style="font-size:10px">razão bloqueio alta  →  só esperando I/O: NÃO destaca</text>
+        <text class="s-mut" x="697" y="120" text-anchor="middle" style="font-size:10px">razão CPU ≥ cpu_ratio_min  →  computando: mantém owner</text>
+        <text class="s-mut" x="697" y="138" text-anchor="middle" style="font-size:10px">estado bloqueado  →  HANDOFF</text>
         <text class="s-mut" x="697" y="154" text-anchor="middle" style="font-size:9px">amostra wall_ns + activity no início e agora</text>
       </svg>
-      <figcaption>Com thresholds habilitados, o handoff só ocorre se a task estiver de fato consumindo CPU — uma task bloqueada em I/O não é destacada à toa.</figcaption>
+      <figcaption>Com thresholds habilitados, o handoff ocorre para tasks longas bloqueadas; tasks longas que continuam computando permanecem no worker atual.</figcaption>
     </figure>
 
     <ul class="k">
@@ -1067,7 +1068,7 @@
     <ul class="k">
       <li><b>Distinção handle NULL:</b> <code>worker_handle_dead</code> separa "thread terminou" de "thread nunca existiu".</li>
       <li><b>Injeção de falha testável:</b> <code>pool_test_fail_alloc_after</code> / <code>pool_test_fail_thread_start_after</code> reproduzem esses caminhos.</li>
-      <li><b>Construção atômica do pool:</b> qualquer falha em <code>pool_create</code> chama <code>pool_shutdown</code> e retorna <code>NULL</code> sem vazar.</li>
+      <li><b>Construção atômica do pool:</b> qualquer falha em <code>pool_create</code> chama <code>pool_destroy</code> e retorna <code>NULL</code> sem vazar.</li>
     </ul>
     <p class="ref"><b>Código:</b> worker_handle_dead · worker_create · worker_start · pool_create (caminhos de erro)</p>
   </section>

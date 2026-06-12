@@ -7,6 +7,7 @@
 
 void pool_test_fail_alloc_after(int successful_allocations);
 void pool_test_fail_thread_start_after(int successful_starts);
+void pool_test_fail_reserve_return_after(int successful_returns);
 void ring_queue_test_fail_alloc_after(int successful_allocations);
 
 void pool_test_set_handoff_barrier(int target);

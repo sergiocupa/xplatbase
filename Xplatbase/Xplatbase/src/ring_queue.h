@@ -24,11 +24,12 @@ extern "C" {
 
     typedef struct _RingQueue
     {
-        xatomic_int  head;
-        xatomic_int  tail;
+        xatomic_uint32 head;
+        xatomic_uint32 tail;
         int          capacity;
         int          mask;
-        xatomic_int* seqno;   /* sequence number por slot (algoritmo Vyukov MPMC) */
+        xatomic_uint32* seqno;       /* sequence number por slot (Vyukov MPMC) */
+        xatomic_int*    peek_guard;  /* -1 writer; >= 0 leitores de peek */
     }
     RingQueue;
 

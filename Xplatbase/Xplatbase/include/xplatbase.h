@@ -54,7 +54,7 @@ extern "C" {
 	typedef uint64_t     uint64;
 
 
-	XPLATBASE_WIN void platform_init();
+	XPLATBASE_API void platform_init(void);
 
 
 	#ifdef XPLATBASE_WIN
@@ -78,7 +78,7 @@ extern "C" {
 
 	   #include <stdio.h>
 
-		__attribute__((constructor)) void my_init()
+		static void __attribute__((constructor)) xplatbase_auto_init(void)
 		{
 			platform_init();
 		}
