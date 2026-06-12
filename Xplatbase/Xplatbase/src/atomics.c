@@ -32,7 +32,10 @@ void atomic_set_ptr(xatomic_ptr* target, void* value)
 
 int atomic_add(xatomic_int* s, int val)
 {
-    return (int)InterlockedExchangeAddNoFence(s, (LONG)val);
+    /* Com fence: em x86/x64 gera o mesmo 'lock xadd' do NoFence (custo zero),
+     * mas garante a ordenacao em ARM, onde o NoFence permitiria reordenacao
+     * (ex.: pool_api_enter incrementa api_users e logo le shutdown). */
+    return (int)InterlockedExchangeAdd(s, (LONG)val);
 }
 
 int atomic_sub(xatomic_int* s, int val)
@@ -61,7 +64,8 @@ uint32_t atomic_u32_get(xatomic_uint32* s)
 
 uint32_t atomic_u32_add(xatomic_uint32* s, uint32_t val)
 {
-    return (uint32_t)InterlockedExchangeAddNoFence(s, (LONG)val);
+    /* idem atomic_add: fence sem custo em x86/x64, correto em ARM. */
+    return (uint32_t)InterlockedExchangeAdd(s, (LONG)val);
 }
 
 int atomic_u32_cas(xatomic_uint32* s, uint32_t* expected, uint32_t desired)

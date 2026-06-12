@@ -161,6 +161,11 @@ XPLATBASE_API ShardedPool* pool_create  (const PoolConfig* cfg);  /* NULL → de
 XPLATBASE_API void         pool_init    (ShardedPool* pool);       /* aguarda workers prontos */
 XPLATBASE_API void         pool_shutdown(ShardedPool* pool);       /* fecha e para; preserva o handle */
 XPLATBASE_API void         pool_destroy (ShardedPool* pool);       /* chamar sem usuarios concorrentes */
+/* pool_submit: para chamadores EXTERNOS aplica backpressure (espera, nunca falha)
+ * exceto se o pool estiver em shutdown. ATENCAO: quando chamado de DENTRO de uma
+ * task (submit reentrante, do proprio worker) e todas as lanes estao cheias e no
+ * teto de expansao, retorna FALSE imediatamente (em vez de bloquear) para evitar
+ * self-deadlock. Logo, tasks que submetem tasks DEVEM checar o retorno. */
 XPLATBASE_API bool         pool_submit  (ShardedPool* pool, task_fn fn, void* arg);
 
 /* ─────────────────────────────────────────────────────────────────────────

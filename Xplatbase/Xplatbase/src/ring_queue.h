@@ -22,11 +22,28 @@ extern "C" {
 
     #include "atomics.h"
 
-    typedef struct _RingQueue
+    /* Tamanho de linha de cache (x86/x64 e ARM comuns = 64 bytes). */
+    #ifndef XPL_CACHELINE
+    #define XPL_CACHELINE 64
+    #endif
+    #if defined(_MSC_VER)
+    #define XPL_ALIGN(n) __declspec(align(n))
+    #else
+    #define XPL_ALIGN(n) __attribute__((aligned(n)))
+    #endif
+
+    /* head e tail ficam em linhas de cache SEPARADAS: o produtor escreve tail e o
+     * consumidor/ladrao escreve head; sem o padding, ambos compartilham a mesma
+     * linha e geram ping-pong de coerencia (false sharing) sob work-stealing.
+     * O gap de XPL_CACHELINE bytes garante linhas distintas para qualquer base de
+     * alocacao (X e X+64 sempre caem em linhas de 64B diferentes). */
+    typedef struct XPL_ALIGN(XPL_CACHELINE) _RingQueue
     {
-        xatomic_uint32 head;
-        xatomic_uint32 tail;
-        int          capacity;
+        xatomic_uint32 tail;                                   /* hot: produtor   */
+        char           _pad_tail[XPL_CACHELINE - sizeof(xatomic_uint32)];
+        xatomic_uint32 head;                                   /* hot: consumidor */
+        char           _pad_head[XPL_CACHELINE - sizeof(xatomic_uint32)];
+        int          capacity;       /* read-mostly: setados no init             */
         int          mask;
         xatomic_uint32* seqno;       /* sequence number por slot (Vyukov MPMC) */
         xatomic_int*    peek_guard;  /* -1 writer; >= 0 leitores de peek */

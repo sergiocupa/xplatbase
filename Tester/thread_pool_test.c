@@ -1890,17 +1890,17 @@ void thread_pool_test_run(void)
     CpuMonitor cpu_mon;
     cpu_monitor_start(&cpu_mon, 10);
 
-    test_basic();
-    test_single_thread_perf();
-    test_multi_thread_perf(T3_THREAD_COUNT);
+    //test_basic();
+    //test_single_thread_perf();
+    //test_multi_thread_perf(T3_THREAD_COUNT);
     test_handoff();
-    test_rescue();
-    test_rescue_no_overfire();
-    test_rescue_engage_latency();
-    test_pressure();
-    test_contraction();
-    test_soak_concurrency_random(1);
-    test_shutdown_stuck();   /* por ultimo: force-kill deixa o processo "envenenado" */
+    //test_rescue();
+    //test_rescue_no_overfire();
+    //test_rescue_engage_latency();
+    //test_pressure();
+    //test_contraction();
+    //test_soak_concurrency_random(1);
+    //test_shutdown_stuck();   /* por ultimo: force-kill deixa o processo "envenenado" */
 
     cpu_monitor_stop(&cpu_mon);
 

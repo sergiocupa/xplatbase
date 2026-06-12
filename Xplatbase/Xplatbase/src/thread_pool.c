@@ -309,7 +309,10 @@ static __thread ShardedPool* g_current_worker_pool;
 
 typedef struct WSWorker WSWorker;
 
-typedef struct WSLane {
+/* WSLane alinhada/padded a cache-line: como sizeof(WSLane) vira multiplo de
+ * XPL_CACHELINE, lanes adjacentes no array ficam a >= 1 linha de distancia e
+ * nao sofrem false sharing nos campos quentes (worker/oldest) nem no ring. */
+typedef struct XPL_ALIGN(XPL_CACHELINE) WSLane {
     RingQueue    ring;
     void*        ring_buf;
     xwait_t      wait;             /* dormir/acordar worker atribuido a essa lane */
@@ -335,6 +338,7 @@ struct WSWorker {
 
     xwait_t         reserve_wait;      /* wait quando esta na reserva */
     int             force_killed;      /* 1 = terminado a forca no shutdown (leak controlado) */
+    unsigned        sample_tick;       /* throttle de sample_neighbors (local ao thread) */
 };
 
 struct ShardedPool {
@@ -406,6 +410,7 @@ struct ShardedPool {
     uint64_t        rescue_wait_unit_tsc;   /* unidade p/ ranking de tempo de espera */
 
     int             low_load_scans;         /* histerese de contracao (so o monitor toca) */
+    int             high_load_scans;        /* histerese de expansao proativa (so o monitor toca) */
 
     int             shutdown_drain_timeout_ms;
     int             shutdown_join_timeout_ms;
@@ -562,11 +567,21 @@ static void worker_leave_lane(WSWorker* w)
 
 static void worker_release_detached_count(WSWorker* w)
 {
+    int spins = 0;
     for (;;) {
         int counted = atomic_get(&w->detached_counted);
         if (counted == 0) return;
         if (counted == 1) {
-            xcpu_pause();
+            /* Estado transitorio do perform_handoff (entre =1 e =2). Pausa curta,
+             * mas apos um teto cede a CPU: sob oversubscription o thread que faz o
+             * handoff precisa rodar para sair do estado 1 — busy-spin puro poderia
+             * livelock. xpl_yield garante progresso. */
+            if (++spins < 64) {
+                xcpu_pause();
+            } else {
+                xpl_yield();
+                spins = 0;
+            }
             continue;
         }
         int expected = 2;
@@ -690,9 +705,15 @@ static void sample_neighbors_for_long_tasks(WSWorker* self)
     }
 }
 
+/* A cada quantas entradas em P3 amostramos vizinhos. A deteccao de task longa
+ * tem o monitor periodico como backstop, entao amostrar 1 em N reduz o custo
+ * (rdtscp + varredura de lanes) sem perder cobertura relevante. */
+#define SPIN_NEIGHBOR_SAMPLE_MASK  7u
+
 static bool spin_phase3(WSWorker* w, WSLane* lane, Task* out)
 {
-    sample_neighbors_for_long_tasks(w);
+    if ((w->sample_tick++ & SPIN_NEIGHBOR_SAMPLE_MASK) == 0)
+        sample_neighbors_for_long_tasks(w);
 
     for (int i = 0; i < SPIN_P3_ITER; i++) {
         if (worker_try_any(w, lane, out)) return true;
@@ -1131,17 +1152,27 @@ static void scan_helpers_for_long_tasks(ShardedPool* pool)
  * Com intervalo de 10ms, 50 scans ≈ 500ms de ociosidade sustentada. */
 #define LANE_CONTRACT_HYSTERESIS  50
 
+/* Quantos scans consecutivos de carga alta antes de expandir proativamente.
+ * Pequeno (≈30ms a 10ms/scan) — so amortece micro-oscilacao; rajadas reais
+ * sao cobertas imediatamente pelo caminho do submit (ring cheio → activate). */
+#define LANE_EXPAND_HYSTERESIS  3
+
 /* Expansao proativa: sob carga sustentada (todos ocupados + backlog), ativa
- * 1 lane por scan, conservador. O caminho do submit ja cobre o "ring cheio". */
+ * 1 lane apos a histerese, conservador. O caminho do submit ja cobre o "ring
+ * cheio" de imediato (sem histerese). */
 static void scan_maybe_expand(ShardedPool* pool)
 {
     int active = atomic_get(&pool->active_lanes);
-    if (active >= pool->expand_cap) return;
-    if (atomic_get(&pool->busy_workers) < active) return;  /* ha folga → nao expande */
+    if (active >= pool->expand_cap) { pool->high_load_scans = 0; return; }
+    if (atomic_get(&pool->busy_workers) < active) { pool->high_load_scans = 0; return; }  /* folga */
 
     int pend = 0;
     for (int i = 0; i < active; i++) pend += ring_queue_count(&pool->lanes[i].ring);
-    if (pend >= active) activate_lane(pool);               /* mais backlog que lanes */
+    if (pend < active) { pool->high_load_scans = 0; return; }  /* backlog insuficiente */
+
+    if (++pool->high_load_scans < LANE_EXPAND_HYSTERESIS) return;
+    pool->high_load_scans = 0;
+    activate_lane(pool);                                   /* mais backlog que lanes, sustentado */
 }
 
 /* Contracao segura: sob carga baixa sustentada, desativa a lane do topo se ela
