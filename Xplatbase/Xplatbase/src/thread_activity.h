@@ -13,6 +13,10 @@ typedef HANDLE xthread_handle_t;
 typedef pthread_t xthread_handle_t;
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 typedef struct 
 {

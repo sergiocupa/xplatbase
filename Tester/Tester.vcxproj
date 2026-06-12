@@ -157,6 +157,9 @@
     <ClCompile Include="tbb_wrapper.cpp">
       <CompileAs>CompileAsCpp</CompileAs>
     </ClCompile>
+    <ClCompile Include="pool_compare_bench.cpp">
+      <CompileAs>CompileAsCpp</CompileAs>
+    </ClCompile>
     <ClCompile Include="thread_pool_test.c" />
   </ItemGroup>
   <ItemGroup>

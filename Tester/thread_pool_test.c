@@ -1917,6 +1917,11 @@ void thread_pool_test_run(void)
 extern int thread_pool_bug_test_dispatch(int argc, char** argv);
 #endif
 
+/* main DESABILITADO: o entrypoint ativo do projeto agora e o de
+ * pool_compare_bench.cpp (benchmark comparativo). Para voltar a rodar a suite de
+ * testes, troque este #if 0 por #if 1 e comente/remova o main de
+ * pool_compare_bench.cpp (ou tire o arquivo do projeto). */
+#if 0
 int main(int argc, char** argv)
 {
 #ifdef POOL_TEST_HOOKS
@@ -1927,3 +1932,4 @@ int main(int argc, char** argv)
     thread_pool_test_run();
     return 0;
 }
+#endif

@@ -1,0 +1,24 @@
+SOAK seed=1781273340 total=1 min
+[stress] afinidade=2 cores
+[00:00:10/00:01:00] iters=51 sub=25655 exec=25655 lost=0 dup=0 subfail=0 deadlock=0 exp=222 bp=220572 slow=2377 maxlat=227ms maxfila=1606 lanes=2->11 | evento: oversubscription: 17 workers / 16 cores logicos
+[00:00:20/00:01:00] iters=33 sub=19713 exec=19713 lost=0 dup=0 subfail=0 deadlock=0 exp=175 bp=184546 slow=1069 maxlat=170ms maxfila=1173 lanes=1->3 | evento: oversubscription: 17 workers / 16 cores logicos
+[00:00:30/00:01:00] iters=36 sub=19571 exec=19571 lost=0 dup=0 subfail=0 deadlock=0 exp=167 bp=210213 slow=697 maxlat=179ms maxfila=1379 lanes=3->3 | evento: oversubscription: 17 workers / 16 cores logicos
+[00:00:40/00:01:00] iters=32 sub=19018 exec=19018 lost=0 dup=0 subfail=0 deadlock=0 exp=171 bp=177993 slow=2670 maxlat=278ms maxfila=1494 lanes=2->2 | evento: oversubscription: 17 workers / 16 cores logicos
+[00:00:50/00:01:00] iters=43 sub=22496 exec=22496 lost=0 dup=0 subfail=0 deadlock=0 exp=234 bp=75527 slow=1921 maxlat=284ms maxfila=1531 lanes=4->16 | evento: oversubscription: 17 workers / 16 cores logicos
+
+  --- SOAK: relatorio detalhado (acumulado, indicadores crus) ---
+    parada               : tempo esgotado
+    seed RNG             : 1781273340
+    duracao (s)          : 60.2
+    ciclos (iters)       : 225
+    tasks submetidas     : 121647
+    tasks executadas     : 121647
+    tasks perdidas       : 0   (esperado 0)
+    tasks duplicadas     : 0   (esperado 0)
+    falhas de submit     : 0   (esperado 0)
+    ciclos com deadlock  : 0   (esperado 0)
+    expansoes de lane    : 1118
+    esperas de submit(bp): 945721
+    tasks lentas(>100ms)  : 9883
+    latencia maxima (ms) : 284
+    fila maxima (backlog): 1606
