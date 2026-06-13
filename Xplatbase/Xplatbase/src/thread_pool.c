@@ -475,6 +475,9 @@ struct ShardedPool {
     xatomic_int     rescue_slots_reserved;
     uint64_t        rescue_wait_unit_tsc;   /* unidade p/ ranking de tempo de espera */
 
+    xatomic_int     spinning_workers;       /* workers ociosos spinando agora (cap estilo Go) */
+    int             spinner_cap;            /* teto de spinners simultaneos (folga de cores) */
+
     int             low_load_scans;         /* histerese de contracao (so o monitor toca) */
     int             high_load_scans;        /* histerese de expansao proativa (so o monitor toca) */
 
@@ -793,8 +796,31 @@ static bool spin_phase3(WSWorker* w, WSLane* lane, Task* out)
  * Worker idle (na lane) — spin progressivo + sleep na lane.wait
  * ───────────────────────────────────────────────────────────────────────── */
 
+/* Cap de spinners (inspirado no scheduler do Go: contador global de threads
+ * spinando). Limita quantos workers OCIOSOS fazem spin progressivo ao mesmo
+ * tempo, deixando cores livres para quem tem trabalho / para os produtores —
+ * o que reduz a oversubscription que gera a cauda de latencia (quantum do SO).
+ * Decisao discreta (spina ou nao) e GLOBAL ao pool. Workers que nao pegam vaga
+ * dormem curto (cedem o core); a task ainda chega via wake direto da lane. */
+static bool spinner_try_enter(ShardedPool* pool)
+{
+    for (;;) {
+        int cur = atomic_get(&pool->spinning_workers);
+        if (cur >= pool->spinner_cap) return false;
+        int expected = cur;
+        if (atomic_cas(&pool->spinning_workers, &expected, cur + 1)) return true;
+        /* CAS perdeu a corrida → re-tenta com o valor atual */
+    }
+}
+
+static void spinner_leave(ShardedPool* pool)
+{
+    atomic_sub(&pool->spinning_workers, 1);
+}
+
 static bool worker_idle_on_lane(WSWorker* w, WSLane* lane, Task* out, bool parked)
 {
+    ShardedPool* pool = w->pool;
     thread_wait_prepare(&lane->wait);
 
     if (worker_try_any(w, lane, out)) return true;
@@ -806,13 +832,22 @@ static bool worker_idle_on_lane(WSWorker* w, WSLane* lane, Task* out, bool parke
         return worker_try_any(w, lane, out);
     }
 
-    if (spin_phase1(w, lane, out, w->pool->spin_budget_cycles)) return true;
-    if (!spin_check_continue(w)) return false;
+    /* Sem vaga de spinner: nao satura o core — dorme curto e re-checa.
+     * (A task que cair nesta lane acorda este worker via wake direto do submit.) */
+    if (!spinner_try_enter(pool)) {
+        if (!spin_check_continue(w)) return false;
+        thread_wait_sleep_for(&lane->wait, 1000);
+        return worker_try_any(w, lane, out);
+    }
 
-    if (spin_phase2(w, lane, out)) return true;
-    if (!spin_check_continue(w)) return false;
+    /* Com vaga: spin progressivo (libera a vaga ao sair, achando task ou nao). */
+    bool got = false;
+    if      (spin_phase1(w, lane, out, pool->spin_budget_cycles))       got = true;
+    else if (spin_check_continue(w) && spin_phase2(w, lane, out))       got = true;
+    else if (spin_check_continue(w) && spin_phase3(w, lane, out))       got = true;
+    spinner_leave(pool);
 
-    if (spin_phase3(w, lane, out)) return true;
+    if (got) return true;
     if (!spin_check_continue(w)) return false;
 
     thread_wait_sleep_for(&lane->wait, 1000);
@@ -1462,6 +1497,7 @@ PoolConfig pool_default_config(void)
     c.rescue_max_helpers_per_lane = POOL_DEFAULT_RESCUE_MAX_HELPERS;
     c.max_auto_expand_lanes    = 0;   /* 0 → nº de cores logicos */
     c.park_idle_threshold_ms   = POOL_DEFAULT_PARK_IDLE_MS;
+    c.max_spinners             = 0;   /* 0 → nº de cores / 2 */
     c.shutdown_drain_timeout_ms = POOL_DEFAULT_SHUTDOWN_DRAIN_MS;
     c.shutdown_join_timeout_ms  = POOL_DEFAULT_SHUTDOWN_JOIN_MS;
     c.shutdown_force_kill       = false;
@@ -1631,6 +1667,12 @@ ShardedPool* pool_create(const PoolConfig* cfg)
     pool->park_threshold_tsc       = (c.park_idle_threshold_ms > 0)
                                    ? ns_to_tsc((uint64_t)c.park_idle_threshold_ms * 1000000ULL) : 0;
     pool->rescue_wait_unit_tsc     = ns_to_tsc(500000ULL);  /* 0.5ms por ponto de ranking */
+
+    /* Cap de spinners (Go-style): default = metade dos cores, deixando folga p/
+     * produtores/trabalho real e cortando a cauda por oversubscription do spin. */
+    pool->spinner_cap              = (c.max_spinners > 0) ? c.max_spinners
+                                   : (cores / 2 < 1 ? 1 : cores / 2);
+    atomic_set(&pool->spinning_workers, 0);
 
     pool->shutdown_drain_timeout_ms = (c.shutdown_drain_timeout_ms > 0)
                                     ? c.shutdown_drain_timeout_ms : POOL_DEFAULT_SHUTDOWN_DRAIN_MS;

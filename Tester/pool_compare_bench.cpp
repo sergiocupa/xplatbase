@@ -145,6 +145,23 @@ static void ws_submit(void* ctx, BTask* t) {
 }
 static void ws_destroy(void* ctx) { pool_shutdown((ShardedPool*)ctx); pool_destroy((ShardedPool*)ctx); }
 
+/* ---- WSPool BALANCEADO: tenta cortar o MAX sem perder o p50 ----
+ * Combina os dois levers:
+ *   - folga de cores: shard_count = cores-4 → produtores/monitores rodam sem
+ *     preemptar workers spinando (ataca a causa do MAX em baixa pressao);
+ *   - menos spin / park cedo: libera core quando ocioso de verdade;
+ *   - park_deep_sleep capado: teto do pior-caso de despertar. */
+static void* ws_bal_create(int) {
+    PoolConfig cfg = pool_default_config();
+    int nc = xcpu_count();
+    cfg.shard_count            = (nc > 5) ? nc - 4 : 1;
+    cfg.max_auto_expand_lanes  = cfg.shard_count;   /* nao re-satura expandindo */
+    cfg.spin_budget_us         = 250;               /* spin curto: menos saturacao */
+    cfg.park_idle_threshold_ms = 20;                /* parquear cedo libera cores */
+    //cfg.park_deep_sleep_us     = 5000;              /* teto do wake = 5ms */
+    return pool_create(&cfg);
+}
+
 /* ---- Windows Thread Pool (PTP) ---- */
 struct PtpCtx { PTP_POOL pool; TP_CALLBACK_ENVIRON env; };
 static void CALLBACK ptp_cb(PTP_CALLBACK_INSTANCE, PVOID ctx) { run_task((BTask*)ctx); }
@@ -193,7 +210,7 @@ struct Scenario {
     int         gap_ms;        /* pausa ociosa entre rajadas */
 };
 
-#define N_REPS 2
+#define N_REPS 5
 #define LONG_BUCKET_US 1000   /* >= isso -> bucket "longa" no agregado */
 
 static double pct(std::vector<double>& v, double p)
@@ -237,6 +254,30 @@ static void run_scenario(Adapter* ad, const Scenario& s,
     std::vector<double> thr_samples;
     int ncores = (int)std::thread::hardware_concurrency();
 
+    /* Pool criado UMA vez e reusado entre reps — reflete o uso real (pool de vida
+     * longa). Antes o create/destroy por rep media cold-start (criacao de ~30
+     * threads), nao o regime estavel. */
+    void* ctx = ad->create(ncores);
+    if (!ctx) { printf("    %s: create FALHOU\n", ad->name); return; }
+
+    /* Warmup descartado: agenda todos os workers e aquece caches antes de medir. */
+    {
+        int wn = s.total < 4000 ? s.total : 4000;
+        for (int i = 0; i < wn; i++) { tasks[i].submit_tsc = 0; tasks[i].exec_tsc = 0; tasks[i].work_us = 0; }
+        g_done.store(0, std::memory_order_relaxed);
+        std::atomic<int> gate{0};
+        std::vector<std::thread> wp;
+        int per = wn / s.producers; if (per < 1) per = 1;
+        for (int p = 0; p < s.producers; p++) {
+            int from = p * per; if (from >= wn) break;
+            int to = (p == s.producers - 1) ? wn : from + per;
+            wp.emplace_back(producer_run, ProducerArg{ ad, ctx, tasks.data(), from, to, &gate });
+        }
+        gate.store(1, std::memory_order_release);
+        while (g_done.load(std::memory_order_relaxed) < wn) _mm_pause();
+        for (auto& th : wp) th.join();
+    }
+
     for (int rep = 0; rep < N_REPS; rep++) {
         for (int i = 0; i < s.total; i++) {
             tasks[i].submit_tsc = 0;
@@ -245,9 +286,6 @@ static void run_scenario(Adapter* ad, const Scenario& s,
                                 ? s.long_work_us : s.work_us;
         }
         g_done.store(0, std::memory_order_relaxed);
-
-        void* ctx = ad->create(ncores);
-        if (!ctx) { printf("    %s: create FALHOU\n", ad->name); return; }
 
         int waves    = (s.bursts > 1) ? s.bursts : 1;
         int per_wave = s.total / waves;
@@ -289,9 +327,9 @@ static void run_scenario(Adapter* ad, const Scenario& s,
             if (tasks[i].work_us >= LONG_BUCKET_US) long_lat.push_back(lat);
             else                                     fast_lat.push_back(lat);
         }
-
-        ad->destroy(ctx);
     }
+
+    ad->destroy(ctx);
     thr_mtps_median = median(thr_samples);
 }
 
@@ -322,9 +360,10 @@ int main(void)
     printf("  metrica: tempo do submit ate o 1o instante dentro do callback (tabela em ms)\n");
     printf("################################################################\n");
 
-    static Adapter ws  = { "WSPool", ws_create,  ws_submit,  ws_destroy,  "shard=ncores + reserva + handoff/expand" };
-    static Adapter ptp = { "WinTP",  ptp_create, ptp_submit, ptp_destroy, "min=ncores, max=2*ncores (cresce)" };
-    std::vector<Adapter*> ads = { &ws, &ptp };
+    static Adapter ws    = { "WSPool", ws_create,     ws_submit, ws_destroy, "shard=ncores + reserva + handoff/expand" };
+    static Adapter wsbal = { "WSbal",  ws_bal_create, ws_submit, ws_destroy, "shard=cores-4, spin=250us, park=20ms" };
+    static Adapter ptp   = { "WinTP",  ptp_create,    ptp_submit, ptp_destroy, "min=ncores, max=2*ncores (cresce)" };
+    std::vector<Adapter*> ads = { &ws, &wsbal, &ptp };
 #ifdef BENCH_TBB
     static Adapter tbb = { "TBB", tbb_create, tbb_submit, tbb_destroy, "arena=ncores (sem crescimento)" };
     ads.push_back(&tbb);
@@ -371,12 +410,12 @@ int main(void)
 
     /* Roda cada cenario UMA vez por lib e guarda p50/p99/max (ms). Depois imprime
      * 3 tabelas no mesmo formato (libs em colunas + R1/R2 por metrica). */
-    struct LibMetrics { double p50, p99, mx; };
-    struct ScenResult { LibMetrics ws, ptp, tbb; };
+    struct LibMetrics { double p50, p99, p999, mx; };
+    struct ScenResult { LibMetrics ws, wsbal, ptp, tbb; };
     std::vector<ScenResult> results(scns.size());
     for (auto& r : results) {
-        LibMetrics none = { -1.0, -1.0, -1.0 };
-        r.ws = r.ptp = r.tbb = none;
+        LibMetrics none = { -1.0, -1.0, -1.0, -1.0 };
+        r.ws = r.wsbal = r.ptp = r.tbb = none;
     }
 
     for (size_t si = 0; si < scns.size(); si++) {
@@ -386,46 +425,55 @@ int main(void)
             run_scenario(ad, scns[si], fast, lng, thr);
             std::sort(fast.begin(), fast.end());
             LibMetrics m;
-            m.p50 = pct(fast, 0.50) / 1e6;             /* ns -> ms */
-            m.p99 = pct(fast, 0.99) / 1e6;
-            m.mx  = (fast.empty() ? 0.0 : fast.back()) / 1e6;
-            if      (std::strcmp(ad->name, "WSPool") == 0) results[si].ws  = m;
-            else if (std::strcmp(ad->name, "WinTP")  == 0) results[si].ptp = m;
-            else if (std::strcmp(ad->name, "TBB")    == 0) results[si].tbb = m;
+            m.p50  = pct(fast, 0.50)  / 1e6;            /* ns -> ms */
+            m.p99  = pct(fast, 0.99)  / 1e6;
+            m.p999 = pct(fast, 0.999) / 1e6;
+            m.mx   = (fast.empty() ? 0.0 : fast.back()) / 1e6;
+            if      (std::strcmp(ad->name, "WSPool") == 0) results[si].ws    = m;
+            else if (std::strcmp(ad->name, "WSbal")  == 0) results[si].wsbal = m;
+            else if (std::strcmp(ad->name, "WinTP")  == 0) results[si].ptp   = m;
+            else if (std::strcmp(ad->name, "TBB")    == 0) results[si].tbb   = m;
         }
     }
 
-    /* Imprime uma tabela para a metrica escolhida (ponteiro-para-membro). */
+    /* Imprime uma tabela para a metrica escolhida (ponteiro-para-membro).
+     * Colunas: WSPool (default) | WSbal (tunado) | WinTP | TBB.
+     * Ratios relativos ao WSPool default:
+     *   Rbal = WSbal/WSPool  (<1 = balanceado melhorou),  Rwin = WinTP/WSPool,
+     *   Rtbb = TBB/WSPool. */
     auto print_table = [&](const char* title, double LibMetrics::* field) {
         printf("\n=== %s (latencia submit->exec das tasks rapidas, ms) ===\n", title);
-        printf("  R1 = TBB / WSPool      R2 = WinTP / WSPool      (>1 = mais lento que o WSPool)\n\n");
-        printf("%-22s %15s %15s %15s %13s %13s\n",
-               "TESTE", "WSPool", "WinTP", "TBB", "R1=TBB/WS", "R2=WinTP/WS");
+        printf("  Rbal = WSbal/WSPool (<1 = melhor)   Rwin = WinTP/WSPool   Rtbb = TBB/WSPool\n\n");
+        printf("%-22s %15s %15s %15s %15s %11s %11s %11s\n",
+               "TESTE", "WSPool", "WSbal", "WinTP", "TBB", "Rbal", "Rwin", "Rtbb");
         const char* prev = nullptr;
         for (size_t si = 0; si < scns.size(); si++) {
             if (prev && std::strcmp(prev, scns[si].complexity) != 0) printf("\n");
             prev = scns[si].complexity;
 
-            double ws  = results[si].ws.*field;
-            double ptp = results[si].ptp.*field;
-            double tbb = results[si].tbb.*field;
+            double ws    = results[si].ws.*field;
+            double wsbal = results[si].wsbal.*field;
+            double ptp   = results[si].ptp.*field;
+            double tbb   = results[si].tbb.*field;
 
             char label[40];
             snprintf(label, sizeof(label), "%s/%s", scns[si].complexity, scns[si].pressure);
 
-            printf("%-22s %15.6f %15.6f", label, ws, ptp);
+            printf("%-22s %15.6f %15.6f %15.6f", label, ws, wsbal, ptp);
             if (has_tbb) printf(" %15.6f", tbb); else printf(" %15s", "-");
 
-            double r2 = (ws > 0) ? ptp / ws : 0.0;
-            if (has_tbb) { double r1 = (ws > 0) ? tbb / ws : 0.0; printf(" %13.3f", r1); }
-            else         { printf(" %13s", "-"); }
-            printf(" %13.3f\n", r2);
+            double rbal = (ws > 0) ? wsbal / ws : 0.0;
+            double rwin = (ws > 0) ? ptp   / ws : 0.0;
+            printf(" %11.3f %11.3f", rbal, rwin);
+            if (has_tbb) { double rtbb = (ws > 0) ? tbb / ws : 0.0; printf(" %11.3f\n", rtbb); }
+            else         { printf(" %11s\n", "-"); }
         }
         fflush(stdout);
     };
 
-    print_table("p50 (mediana)", &LibMetrics::p50);
-    print_table("p99",          &LibMetrics::p99);
+    print_table("p50 (mediana)",  &LibMetrics::p50);
+    print_table("p99",            &LibMetrics::p99);
+    print_table("p999",           &LibMetrics::p999);
     print_table("MAX (pior caso)", &LibMetrics::mx);
 
     printf("\nFim.\n");

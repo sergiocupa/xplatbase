@@ -142,6 +142,7 @@ typedef struct {
     int      rescue_max_helpers_per_lane; /* teto de ajudantes por lane (0 → nº cores) */
     int      max_auto_expand_lanes;    /* teto da expansao automatica (0 → nº cores logicos) */
     int      park_idle_threshold_ms;   /* ocioso > N ms → parquear (default 200)   */
+    int      max_spinners;             /* teto de workers ociosos spinando ao mesmo tempo (0 → nº cores / 2) */
 
     int      shutdown_drain_timeout_ms; /* drenar a fila ate N ms (0 → default 5000)        */
     int      shutdown_join_timeout_ms;  /* esperar workers pararem ate N ms (0 → default 2000) */
