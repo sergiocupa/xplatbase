@@ -124,6 +124,19 @@ XPLATBASE_API void pool_set_log_hook(pool_log_fn fn);
 #define POOL_DEFAULT_SHUTDOWN_JOIN_MS   2000
 #endif
 
+/* Optional decorative PoolStats counters.
+ * Default off in production/benchmarks: avoids global atomic increments in the
+ * hot path. POOL_TEST_HOOKS keeps them on so the regression suites that assert
+ * total_* counters continue to validate those paths. Functional counters such
+ * as pending_tasks and busy_workers remain active either way. */
+#ifndef POOL_ENABLE_STATS
+#ifdef POOL_TEST_HOOKS
+#define POOL_ENABLE_STATS 1
+#else
+#define POOL_ENABLE_STATS 0
+#endif
+#endif
+
 /* ─────────────────────────────────────────────────────────────────────────
  * ShardedPool — configuracao
  * ───────────────────────────────────────────────────────────────────────── */

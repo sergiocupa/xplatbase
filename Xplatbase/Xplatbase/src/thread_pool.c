@@ -23,6 +23,14 @@
 #include <stdarg.h>
 #include <limits.h>
 
+#if POOL_ENABLE_STATS
+#define POOL_STAT_ADD(pool_, field_, value_) atomic_u64_add(&(pool_)->field_, (value_))
+#define POOL_STAT_GET(pool_, field_)         atomic_u64_get(&(pool_)->field_)
+#else
+#define POOL_STAT_ADD(pool_, field_, value_) ((void)0)
+#define POOL_STAT_GET(pool_, field_)         0ULL
+#endif
+
 #ifdef POOL_TEST_HOOKS
 static volatile LONG g_pool_test_alloc_after = -1;
 static volatile LONG g_pool_test_thread_start_after = -1;
@@ -452,6 +460,7 @@ struct ShardedPool {
     xatomic_int     workers_ready;
     int             expected_ready;
 
+#if POOL_ENABLE_STATS
     xatomic_uint64  stat_submitted;
     xatomic_uint64  stat_failures;
     xatomic_uint64  stat_stolen;
@@ -459,6 +468,7 @@ struct ShardedPool {
     xatomic_uint64  stat_rescued;
     xatomic_uint64  stat_backpressure;   /* nº de vezes que submit teve que esperar */
     xatomic_uint64  stat_expansions;     /* lanes ativadas dinamicamente */
+#endif
 
     uint64_t        spin_budget_cycles;
     int             spin_iterations;
@@ -688,7 +698,7 @@ static bool worker_try_steal(WSWorker* w, WSLane* my_lane, Task* out)
         WSLane* victim = &pool->lanes[(start + i) % n];
         if (victim == my_lane) continue;
         if (lane_pop_task(victim, out)) {
-            atomic_u64_add(&pool->stat_stolen, 1);
+            POOL_STAT_ADD(pool, stat_stolen, 1);
             return true;
         }
     }
@@ -1081,7 +1091,7 @@ static bool perform_handoff(ShardedPool* pool, WSLane* lane, WSWorker* victim, u
     /* Acorda alguem na lane.wait pra que o novo worker comece imediato. */
     thread_wait_wake(&lane->wait);
 
-    atomic_u64_add(&pool->stat_handoffs, 1);
+    POOL_STAT_ADD(pool, stat_handoffs, 1);
     reserve_monitor_wake(pool);  /* refazer a reserva */
     return true;
 }
@@ -1147,7 +1157,7 @@ static void dispatch_rescue_worker(ShardedPool* pool, WSLane* lane)
         atomic_set_ptr(&spare->lane, lane);
         thread_wait_wake(&spare->reserve_wait);    /* tira da reserva */
         thread_wait_wake(&lane->wait);
-        atomic_u64_add(&pool->stat_rescued, 1);
+        POOL_STAT_ADD(pool, stat_rescued, 1);
     }
     reserve_monitor_wake(pool);  /* repor reserva — salvaguarda */
 }
@@ -1853,7 +1863,7 @@ static bool activate_lane(ShardedPool* pool)
         hw = atomic_get(&pool->max_active_ever);
     }
 
-    atomic_u64_add(&pool->stat_expansions, 1);
+    POOL_STAT_ADD(pool, stat_expansions, 1);
     reserve_monitor_wake(pool);  /* repor reserva */
 
     int ncores = xcpu_count();
@@ -1950,7 +1960,7 @@ static bool submit_push_lane(ShardedPool* pool, WSLane* lane, Task* t)
     }
     uint64_t no_oldest = 0;
     atomic_u64_cas(&lane->oldest_enqueue_tsc, &no_oldest, t->enqueue_tsc);
-    atomic_u64_add(&pool->stat_submitted, 1);
+    POOL_STAT_ADD(pool, stat_submitted, 1);
     thread_wait_wake(&lane->wait);
     submit_check_handoff(pool, lane);
     submit_check_rescue(pool, lane);
@@ -1967,7 +1977,7 @@ bool pool_submit(ShardedPool* pool, task_fn fn, void* arg)
 
     for (;;) {
         if (atomic_get(&pool->shutdown)) {
-            atomic_u64_add(&pool->stat_failures, 1);
+            POOL_STAT_ADD(pool, stat_failures, 1);
             pool_api_leave(pool);
             return false;
         }
@@ -1998,12 +2008,12 @@ bool pool_submit(ShardedPool* pool, task_fn fn, void* arg)
 
         /* tudo cheio e no teto → backpressure: espera (lento), nunca falha */
         if (g_current_worker_pool == pool) {
-            atomic_u64_add(&pool->stat_failures, 1);
+            POOL_STAT_ADD(pool, stat_failures, 1);
             pool_api_leave(pool);
             return false;
         }
 
-        atomic_u64_add(&pool->stat_backpressure, 1);
+        POOL_STAT_ADD(pool, stat_backpressure, 1);
         submit_backoff(&spins);
     }
 }
@@ -2300,13 +2310,13 @@ void pool_stats(ShardedPool* pool, PoolStats* out)
     if (!pool || !pool_api_enter(pool)) return;
 
     out->shard_count     = atomic_get(&pool->active_lanes);
-    out->total_submitted = atomic_u64_get(&pool->stat_submitted);
-    out->submit_failures = atomic_u64_get(&pool->stat_failures);
-    out->total_handoffs  = atomic_u64_get(&pool->stat_handoffs);
-    out->total_stolen    = atomic_u64_get(&pool->stat_stolen);
-    out->total_rescued   = atomic_u64_get(&pool->stat_rescued);
-    out->submit_backpressure = atomic_u64_get(&pool->stat_backpressure);
-    out->total_expansions    = atomic_u64_get(&pool->stat_expansions);
+    out->total_submitted = POOL_STAT_GET(pool, stat_submitted);
+    out->submit_failures = POOL_STAT_GET(pool, stat_failures);
+    out->total_handoffs  = POOL_STAT_GET(pool, stat_handoffs);
+    out->total_stolen    = POOL_STAT_GET(pool, stat_stolen);
+    out->total_rescued   = POOL_STAT_GET(pool, stat_rescued);
+    out->submit_backpressure = POOL_STAT_GET(pool, stat_backpressure);
+    out->total_expansions    = POOL_STAT_GET(pool, stat_expansions);
     out->reserve_count   = atomic_get(&pool->reserve_count);
 
     int active   = 0;

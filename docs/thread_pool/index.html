@@ -424,7 +424,7 @@
         <!-- high water bracket -->
         <line class="lnm dash" x1="40" y1="220" x2="860" y2="220"/>
         <text class="s-mut" x="40" y="240">offset = (id+1) % n  ·  varre n = max_active_ever (high-water)</text>
-        <text class="s-g" x="40" y="262" style="font-size:11px">stat_stolen++ a cada roubo bem-sucedido — exposto em pool_stats()</text>
+        <text class="s-g" x="40" y="262" style="font-size:11px">stat_stolen++ somente com POOL_ENABLE_STATS — exposto em pool_stats()</text>
       </svg>
       <figcaption>Steal: W0 com ring vazio rouba de lane 1/2 e até de lanes desativadas (residuais), seguindo o high-water.</figcaption>
     </figure>
@@ -1079,7 +1079,7 @@
   <!-- ===================================================== -->
   <section id="f14">
     <h2><span class="num">14</span> Infra de teste &amp; log <span class="chip aux">auxiliar</span></h2>
-    <p class="lead">Compilado com <code>POOL_TEST_HOOKS</code>, o módulo permite injetar falhas e congelar threads em pontos exatos para reproduzir corridas de forma determinística. Em produção, <code>pool_stats</code> expõe os contadores de operação e o log é entregue por um hook registrável.</p>
+    <p class="lead">Compilado com <code>POOL_TEST_HOOKS</code>, o modulo permite injetar falhas e congelar threads em pontos exatos para reproduzir corridas de forma deterministica. Em producao, <code>pool_stats</code> continua expondo estado funcional do pool; os contadores decorativos <code>total_*</code> sao opt-in via <code>POOL_ENABLE_STATS</code> para nao pagar atomics globais no caminho quente.</p>
 
     <figure>
       <svg class="dgm" viewBox="0 0 900 220" role="img" aria-label="Ferramentas de teste e log">
@@ -1105,17 +1105,17 @@
 
         <rect class="n" x="610" y="64" width="260" height="110" rx="9"/>
         <text class="s-lbl s-bold" x="740" y="92" text-anchor="middle">pool_stats()</text>
-        <text class="s-mut" x="740" y="114" text-anchor="middle" style="font-size:9.5px">submitted · stolen · handoffs</text>
-        <text class="s-mut" x="740" y="130" text-anchor="middle" style="font-size:9.5px">rescued · expansions</text>
-        <text class="s-mut" x="740" y="146" text-anchor="middle" style="font-size:9.5px">backpressure · reserve · pending</text>
-        <text class="s-mut" x="740" y="162" text-anchor="middle" style="font-size:9px">visibilidade em produção</text>
+        <text class="s-mut" x="740" y="114" text-anchor="middle" style="font-size:9.5px">estado funcional sempre disponivel</text>
+        <text class="s-mut" x="740" y="130" text-anchor="middle" style="font-size:9.5px">total_* somente com POOL_ENABLE_STATS</text>
+        <text class="s-mut" x="740" y="146" text-anchor="middle" style="font-size:9.5px">POOL_TEST_HOOKS liga stats para regressao</text>
+        <text class="s-mut" x="740" y="162" text-anchor="middle" style="font-size:9px">default de producao: counters decorativos off</text>
       </svg>
-      <figcaption>Ferramentas só de teste (hooks/barreiras) ao lado da telemetria de produção (<code>pool_stats</code>) e do log registrável.</figcaption>
+      <figcaption>Ferramentas de teste (hooks/barreiras), log registravel e telemetria: estado funcional sempre disponivel; contadores <code>total_*</code> opcionais.</figcaption>
     </figure>
 
     <ul class="k">
       <li><b>Determinismo de corrida:</b> barreiras param threads em pontos exatos (ex.: a janela TOCTOU) para testes reprodutíveis.</li>
-      <li><b>Telemetria viva:</b> <code>pool_stats</code> expõe contadores de submit, steal, handoff, resgate, expansão e backpressure.</li>
+      <li><b>Telemetria viva:</b> <code>pool_stats</code> expoe estado funcional sempre; contadores de submit, steal, handoff, resgate, expansao e backpressure exigem <code>POOL_ENABLE_STATS=1</code> (automatico em <code>POOL_TEST_HOOKS</code>).</li>
       <li><b>Log desacoplado:</b> sem hook, a biblioteca é silenciosa; severidades vão para um <code>pool_log_fn</code> registrável.</li>
     </ul>
     <p class="ref"><b>Código:</b> POOL_TEST_HOOKS · pool_test_* · pool_set_log_hook · pool_log · pool_stats</p>
