@@ -170,6 +170,7 @@
     <li><a href="#f12">Thresholds CPU/bloqueio</a></li>
     <li><a href="#f13">Robustez de alloc/start</a></li>
     <li><a href="#f14">Infra de teste &amp; log</a></li>
+    <li><a href="#benchmark-final">Benchmark final</a></li>
   </ol>
 </nav>
 
@@ -1119,6 +1120,314 @@
     </ul>
     <p class="ref"><b>Código:</b> POOL_TEST_HOOKS · pool_test_* · pool_set_log_hook · pool_log · pool_stats</p>
   </section>
+
+  <!-- BENCHMARK_FINAL_START -->
+  <!-- ===================================================== -->
+  <!-- 15 BENCHMARK FINAL -->
+  <!-- ===================================================== -->
+  <section id="benchmark-final">
+    <h2><span class="num">15</span> Benchmark final <span class="chip scale">comparativo</span></h2>
+    <p class="lead">Resultado final do benchmark oficial apos a decisao de manter o <code>thread_pool.c</code> atual. As tabelas abaixo preservam apenas <code>atual-v16</code>, <code>WinTP</code> e <code>TBB</code>, agora com indicadores de latencia, throughput, tempo de parede e uso medio de CPU.</p>
+
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">Como o benchmark foi feito</h3>
+    <p>Mede-se a <b>latencia real de submit&rarr;inicio de execucao</b> de cada task: o produtor grava um timestamp no submit e o worker grava outro no instante em que comeca a rodar; a diferenca, em ms, e a amostra de fila/agendamento. No benchmark oficial de CPU os timestamps sao obtidos com <code>QueryPerformanceCounter</code>, e cada adaptador/cenario roda isoladamente para permitir medir CPU do processo via <code>GetProcessTimes</code>. Para cada combinacao foram coletados <b>p50, p99, p999, MAX</b>, <b>throughput</b>, <b>tempo de parede</b> e <b>CPU media</b>, usando a mediana de 7 repeticoes. Sempre lado a lado com a <b>Windows Thread Pool</b> (<code>WinTP</code>) e o <b>Intel TBB</b> como referencias externas.</p>
+
+    <p>Os <b>18 cenarios</b> cruzam <i>tipo de carga</i> (rapida / media / mista / mista-massiva / rajada) com <i>pressao</i> (baixa / media / alta / ultra / satur). Os casos decisivos sao <code>media/alta</code> e <code>media/ultra</code> &mdash; a <b>zona de transicao</b> em que ha sobre-subscricao moderada e o parking pode custar latencia &mdash; e os <code>mista*</code>, dominados por tasks longas (onde todos convergem porque o gargalo e a propria carga).</p>
+
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">Trajetoria dos testes</h3>
+    <p><b>Fase 1 &mdash; exploracao estatica (~28 forks, v0..v28).</b> Variou-se de forma isolada o spin, o yield e o parking. Confirmou-se um trade-off fundamental sem almoco gratis: <i>yield/park</i> derruba a cauda mas pode piorar o p50 em cargas leves-mistas; <i>spin</i> preserva o p50 mas estraga a cauda sob sobre-subscricao (stalls de quantum do scheduler do Windows, nao bug de fila). Elegeu-se o <b>v16</b> &mdash; <i>park adaptativo</i>: detecta preempcao por gap de TSC (&gt; budget/8) durante o spin e desiste para o parking &mdash; como o equilibrio mais limpo, sem celula quebrada. Foi essa logica que se <b>incorporou ao <code>thread_pool.c</code></b> (coluna <code>atual-v16</code>).</p>
+    <p><b>Fase 2 &mdash; variantes dirigidas (v31..v48).</b> Ja com o v16 como base de producao, testaram-se ajustes focados em recuperar o p50 residual do v16 na zona de transicao (<code>media/alta</code> ~4&nbsp;ms, <code>media/ultra</code> ~3,7&nbsp;ms) <i>sem</i> regredir a cauda. As familias e suas conclusoes (numeros da rodada experimental de variantes):</p>
+
+    <ul class="k">
+      <li><b>atual-v16</b> (base incorporada, park adaptativo): melhor ou empatado em cargas leves e em rajada &mdash; p50 ~1&nbsp;&micro;s em <code>rapida/*</code>, <code>satur/*</code> e <code>rajada-*</code> &mdash; e competitivo nos <code>mista*</code> pesados. Fraqueza unica: p50 na transicao <code>media/alta-ultra</code>.</li>
+      <li><b>v35-WakeSel4</b> / <b>v36-WakeSel2</b> (acorda seletivamente 4 ou 2 workers): o <b>WakeSel4 ataca exatamente a fraqueza do v16</b> &mdash; <code>media/alta</code> p50 <code>0,027</code> vs <code>4,25</code> (~150&times;) e ainda melhora a cauda <code>media/alta</code> p999. O <b>WakeSel2 subprovisiona</b>: ganha em <code>alta</code> mas <i>piora</i> <code>media/ultra</code> p50 (<code>5,65</code> &gt; <code>3,71</code>) por acordar poucos workers.</li>
+      <li><b>v47-BatchGate</b> / <b>v48-BatchWake</b> / <b>v31-Batch</b> (agrupam wake/submit): <b>maiores ganhos no p50 da transicao</b> (v47 <code>media/alta</code> p50 <code>0,0065</code>; v48 <code>rapida/ultra</code> p99 <code>0,082</code> vs <code>6,16</code>). Custo recorrente: <b>piora as caudas de micro-rajada</b> &mdash; <code>rajada-mista</code> MAX ~74-100&nbsp;ms (v16 <code>31</code>) e <code>mista/baixa</code> p50 5-9&nbsp;ms (v16 <code>1,98</code>); o v31 ainda regride a cauda <code>media/ultra</code> p999 (<code>263</code> vs <code>140</code>).</li>
+      <li><b>v46-HotGuard</b> (guarda do caminho quente): excelente em <code>media/ultra</code> (p50 <code>0,0061</code>, p999 <code>46</code> &mdash; o melhor do grupo) e bom em rajada, mas perde pontos no <code>media/media</code> e no MAXmed de <code>mista-massiva/ultra</code>.</li>
+      <li><b>v41-AdapP8</b> / <b>v43-LateP8</b> (variacoes do limiar de park /8 e park tardio): em geral <b>neutras ou levemente piores</b> que o v16, sem ganho que justifique a troca; o v43 chega a destacar so o MAX de <code>mista-massiva/alta</code> (<code>365</code>, melhor da linha).</li>
+    </ul>
+
+    <div class="note">
+      <b>Conclusao.</b> Nenhuma variante experimental <b>dominou o v16 em todas as metricas &times; 18 cenarios</b> &mdash; cada ganho na transicao <code>media/*</code> veio pago em outra dimensao (cauda de rajada, ultra subprovisionado, ou complexidade extra). Isso reconfirma o &ldquo;no free lunch&rdquo; da Fase 1. Por isso o <b>v16 permanece como padrao de uso geral</b> (incorporado). A rodada oficial abaixo compara somente o <code>thread_pool.c</code> atual contra <code>WinTP</code> e <code>TBB</code>: o <code>atual-v16</code> tende a entregar menor latencia de submit&rarr;execucao na maior parte dos cenarios, enquanto <code>WinTP</code> e <code>TBB</code> podem vencer em throughput ou consumir menos CPU em alguns perfis, especialmente cargas rapidas/saturadas.
+    </div>
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">O que ainda falta incluir</h3>
+    <p>Esta secao agora inclui a rodada limpa de confirmacao com <code>atual-v16</code>, <code>WinTP</code> e <code>TBB</code>. Ainda nao inclui os <b>logs brutos completos</b>, os <b>comandos exatos de build/execucao</b> dentro da propria pagina, nem a <b>configuracao detalhada da maquina</b> usada na rodada (CPU, Windows, plano de energia, compilador e flags). Tambem ficam fora destas tabelas os testes contratuais/de estabilidade do pool, porque o bloco abaixo registra somente performance e uso de CPU. A comparacao com ideias de Go/Tokio permanece como referencia conceitual de scheduler; nao foi incluido aqui um benchmark nativo de Tokio.</p>
+
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">Resultados oficiais por metrica</h3>
+    <p>As tabelas abaixo foram geradas a partir de <code>thread_pool_cpu_bench_results.csv</code>. Cada celula representa a mediana de <b>7 repeticoes</b> do mesmo adaptador/cenario. A coluna <code>cpu_cores</code> indica quantos cores logicos equivalentes o processo consumiu em media durante o cenario; <code>cpu_pct_machine</code> e esse valor normalizado pelo total de processadores logicos da maquina.</p>
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">p50 - latencia submit-&gt;execucao (ms)</h3>
+    <table class="api">
+      <thead>
+        <tr>
+          <th>Cenario</th>
+          <th>atual-v16</th>
+          <th>WinTP</th>
+          <th>TBB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">rapida/baixa</td><td>0.001500</td><td>0.019100</td><td>0.002400</td></tr>
+        <tr><td class="mono">rapida/media</td><td>0.001200</td><td>0.017200</td><td>0.002300</td></tr>
+        <tr><td class="mono">rapida/alta</td><td>0.001100</td><td>0.014700</td><td>0.001800</td></tr>
+        <tr><td class="mono">rapida/ultra</td><td>0.001200</td><td>0.012900</td><td>0.001700</td></tr>
+        <tr><td class="mono">media/baixa</td><td>0.345300</td><td>1.008500</td><td>7.298900</td></tr>
+        <tr><td class="mono">media/media</td><td>6.076800</td><td>16.758500</td><td>31.902800</td></tr>
+        <tr><td class="mono">media/alta</td><td>34.424400</td><td>73.176800</td><td>90.536400</td></tr>
+        <tr><td class="mono">media/ultra</td><td>69.347600</td><td>143.976000</td><td>169.244400</td></tr>
+        <tr><td class="mono">mista/baixa</td><td>0.104400</td><td>0.182100</td><td>5.832700</td></tr>
+        <tr><td class="mono">mista/media</td><td>0.066800</td><td>9.324600</td><td>24.346400</td></tr>
+        <tr><td class="mono">mista/alta</td><td>0.065600</td><td>47.708700</td><td>64.024000</td></tr>
+        <tr><td class="mono">mista/ultra</td><td>0.078300</td><td>106.338100</td><td>118.844400</td></tr>
+        <tr><td class="mono">satur/alta</td><td>0.001200</td><td>0.013500</td><td>0.001600</td></tr>
+        <tr><td class="mono">satur/ultra</td><td>0.001100</td><td>0.012500</td><td>0.001500</td></tr>
+        <tr><td class="mono">rajada-curta/media</td><td>0.001200</td><td>0.018100</td><td>0.002100</td></tr>
+        <tr><td class="mono">rajada-mista/media</td><td>0.164000</td><td>23.376300</td><td>38.633800</td></tr>
+        <tr><td class="mono">mista-massiva/alta</td><td>0.064600</td><td>87.190400</td><td>112.242400</td></tr>
+        <tr><td class="mono">mista-massiva/ultra</td><td>0.091400</td><td>149.411500</td><td>180.682400</td></tr>
+      </tbody>
+    </table>
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">p99 - latencia submit-&gt;execucao (ms)</h3>
+    <table class="api">
+      <thead>
+        <tr>
+          <th>Cenario</th>
+          <th>atual-v16</th>
+          <th>WinTP</th>
+          <th>TBB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">rapida/baixa</td><td>0.003400</td><td>0.098500</td><td>0.009300</td></tr>
+        <tr><td class="mono">rapida/media</td><td>0.002900</td><td>0.106400</td><td>0.005600</td></tr>
+        <tr><td class="mono">rapida/alta</td><td>0.002300</td><td>0.097700</td><td>0.004600</td></tr>
+        <tr><td class="mono">rapida/ultra</td><td>0.002500</td><td>0.101900</td><td>0.004300</td></tr>
+        <tr><td class="mono">media/baixa</td><td>17.811300</td><td>2.678100</td><td>14.449900</td></tr>
+        <tr><td class="mono">media/media</td><td>34.736200</td><td>44.738300</td><td>67.774300</td></tr>
+        <tr><td class="mono">media/alta</td><td>87.547000</td><td>150.993400</td><td>185.243900</td></tr>
+        <tr><td class="mono">media/ultra</td><td>166.733700</td><td>294.937100</td><td>344.780800</td></tr>
+        <tr><td class="mono">mista/baixa</td><td>5.910600</td><td>1.981800</td><td>11.868700</td></tr>
+        <tr><td class="mono">mista/media</td><td>7.503000</td><td>28.772900</td><td>53.570200</td></tr>
+        <tr><td class="mono">mista/alta</td><td>33.282700</td><td>101.945600</td><td>135.373600</td></tr>
+        <tr><td class="mono">mista/ultra</td><td>86.997900</td><td>215.684400</td><td>248.286600</td></tr>
+        <tr><td class="mono">satur/alta</td><td>0.002800</td><td>0.095900</td><td>0.004300</td></tr>
+        <tr><td class="mono">satur/ultra</td><td>0.002300</td><td>0.088300</td><td>0.005200</td></tr>
+        <tr><td class="mono">rajada-curta/media</td><td>0.002600</td><td>0.106100</td><td>0.006500</td></tr>
+        <tr><td class="mono">rajada-mista/media</td><td>40.531800</td><td>56.932400</td><td>81.999300</td></tr>
+        <tr><td class="mono">mista-massiva/alta</td><td>75.206900</td><td>177.898700</td><td>222.101300</td></tr>
+        <tr><td class="mono">mista-massiva/ultra</td><td>154.993200</td><td>303.036500</td><td>365.120200</td></tr>
+      </tbody>
+    </table>
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">p999 - latencia submit-&gt;execucao (ms)</h3>
+    <table class="api">
+      <thead>
+        <tr>
+          <th>Cenario</th>
+          <th>atual-v16</th>
+          <th>WinTP</th>
+          <th>TBB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">rapida/baixa</td><td>0.007200</td><td>0.113300</td><td>0.065600</td></tr>
+        <tr><td class="mono">rapida/media</td><td>0.006400</td><td>0.166100</td><td>0.074500</td></tr>
+        <tr><td class="mono">rapida/alta</td><td>0.005600</td><td>0.131600</td><td>0.055900</td></tr>
+        <tr><td class="mono">rapida/ultra</td><td>0.005400</td><td>0.164100</td><td>0.035100</td></tr>
+        <tr><td class="mono">media/baixa</td><td>19.399700</td><td>2.796200</td><td>14.668700</td></tr>
+        <tr><td class="mono">media/media</td><td>36.865000</td><td>45.325600</td><td>68.574300</td></tr>
+        <tr><td class="mono">media/alta</td><td>93.705200</td><td>152.467300</td><td>187.294300</td></tr>
+        <tr><td class="mono">media/ultra</td><td>180.298700</td><td>297.714600</td><td>348.200900</td></tr>
+        <tr><td class="mono">mista/baixa</td><td>6.266500</td><td>2.043700</td><td>12.137700</td></tr>
+        <tr><td class="mono">mista/media</td><td>8.852400</td><td>29.213700</td><td>54.482400</td></tr>
+        <tr><td class="mono">mista/alta</td><td>36.469600</td><td>102.947200</td><td>137.431600</td></tr>
+        <tr><td class="mono">mista/ultra</td><td>96.823100</td><td>217.932600</td><td>250.723900</td></tr>
+        <tr><td class="mono">satur/alta</td><td>0.005700</td><td>0.138600</td><td>0.038100</td></tr>
+        <tr><td class="mono">satur/ultra</td><td>0.005300</td><td>0.134300</td><td>0.014600</td></tr>
+        <tr><td class="mono">rajada-curta/media</td><td>0.005800</td><td>0.141700</td><td>0.068300</td></tr>
+        <tr><td class="mono">rajada-mista/media</td><td>43.800200</td><td>57.582100</td><td>82.988100</td></tr>
+        <tr><td class="mono">mista-massiva/alta</td><td>87.824600</td><td>179.570100</td><td>225.850300</td></tr>
+        <tr><td class="mono">mista-massiva/ultra</td><td>166.127200</td><td>305.917300</td><td>368.508600</td></tr>
+      </tbody>
+    </table>
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">MAX - maior latencia observada (ms)</h3>
+    <table class="api">
+      <thead>
+        <tr>
+          <th>Cenario</th>
+          <th>atual-v16</th>
+          <th>WinTP</th>
+          <th>TBB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">rapida/baixa</td><td>0.027300</td><td>0.225000</td><td>0.083800</td></tr>
+        <tr><td class="mono">rapida/media</td><td>0.072600</td><td>0.229900</td><td>0.099400</td></tr>
+        <tr><td class="mono">rapida/alta</td><td>0.037600</td><td>0.265900</td><td>0.107500</td></tr>
+        <tr><td class="mono">rapida/ultra</td><td>0.036800</td><td>0.220700</td><td>0.107500</td></tr>
+        <tr><td class="mono">media/baixa</td><td>19.411500</td><td>2.809000</td><td>14.751500</td></tr>
+        <tr><td class="mono">media/media</td><td>37.001400</td><td>45.393600</td><td>68.686100</td></tr>
+        <tr><td class="mono">media/alta</td><td>95.107100</td><td>152.646100</td><td>187.384600</td></tr>
+        <tr><td class="mono">media/ultra</td><td>180.773200</td><td>298.051100</td><td>348.376700</td></tr>
+        <tr><td class="mono">mista/baixa</td><td>6.440800</td><td>2.053200</td><td>12.164800</td></tr>
+        <tr><td class="mono">mista/media</td><td>8.910000</td><td>29.250800</td><td>54.652100</td></tr>
+        <tr><td class="mono">mista/alta</td><td>36.629600</td><td>103.039500</td><td>137.574700</td></tr>
+        <tr><td class="mono">mista/ultra</td><td>97.452200</td><td>218.196000</td><td>251.240900</td></tr>
+        <tr><td class="mono">satur/alta</td><td>0.036100</td><td>0.255500</td><td>0.109200</td></tr>
+        <tr><td class="mono">satur/ultra</td><td>0.059000</td><td>0.239100</td><td>0.136200</td></tr>
+        <tr><td class="mono">rajada-curta/media</td><td>0.054700</td><td>0.257700</td><td>0.120800</td></tr>
+        <tr><td class="mono">rajada-mista/media</td><td>44.203300</td><td>57.658500</td><td>83.004200</td></tr>
+        <tr><td class="mono">mista-massiva/alta</td><td>88.340500</td><td>179.786900</td><td>226.392100</td></tr>
+        <tr><td class="mono">mista-massiva/ultra</td><td>166.926700</td><td>306.171300</td><td>368.726200</td></tr>
+      </tbody>
+    </table>
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">Throughput (Mtask/s)</h3>
+    <table class="api">
+      <thead>
+        <tr>
+          <th>Cenario</th>
+          <th>atual-v16</th>
+          <th>WinTP</th>
+          <th>TBB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">rapida/baixa</td><td>0.388827</td><td>0.647002</td><td>0.629505</td></tr>
+        <tr><td class="mono">rapida/media</td><td>0.464417</td><td>0.768009</td><td>0.955498</td></tr>
+        <tr><td class="mono">rapida/alta</td><td>0.519753</td><td>0.866212</td><td>1.107607</td></tr>
+        <tr><td class="mono">rapida/ultra</td><td>0.544719</td><td>0.961726</td><td>1.280215</td></tr>
+        <tr><td class="mono">media/baixa</td><td>0.713521</td><td>0.432309</td><td>0.643097</td></tr>
+        <tr><td class="mono">media/media</td><td>0.541011</td><td>0.551482</td><td>0.546042</td></tr>
+        <tr><td class="mono">media/alta</td><td>0.465539</td><td>0.476968</td><td>0.475336</td></tr>
+        <tr><td class="mono">media/ultra</td><td>0.405573</td><td>0.426530</td><td>0.407667</td></tr>
+        <tr><td class="mono">mista/baixa</td><td>0.694297</td><td>0.436363</td><td>0.649559</td></tr>
+        <tr><td class="mono">mista/media</td><td>0.646124</td><td>0.645433</td><td>0.638657</td></tr>
+        <tr><td class="mono">mista/alta</td><td>0.582317</td><td>0.590899</td><td>0.589456</td></tr>
+        <tr><td class="mono">mista/ultra</td><td>0.524480</td><td>0.546986</td><td>0.523104</td></tr>
+        <tr><td class="mono">satur/alta</td><td>0.541018</td><td>1.027639</td><td>1.288823</td></tr>
+        <tr><td class="mono">satur/ultra</td><td>0.544119</td><td>1.098805</td><td>1.715213</td></tr>
+        <tr><td class="mono">rajada-curta/media</td><td>0.515366</td><td>0.771989</td><td>0.955682</td></tr>
+        <tr><td class="mono">rajada-mista/media</td><td>0.513135</td><td>0.481241</td><td>0.476965</td></tr>
+        <tr><td class="mono">mista-massiva/alta</td><td>0.577078</td><td>0.599282</td><td>0.574684</td></tr>
+        <tr><td class="mono">mista-massiva/ultra</td><td>0.495009</td><td>0.511465</td><td>0.493230</td></tr>
+      </tbody>
+    </table>
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">Tempo de parede (ms)</h3>
+    <table class="api">
+      <thead>
+        <tr>
+          <th>Cenario</th>
+          <th>atual-v16</th>
+          <th>WinTP</th>
+          <th>TBB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">rapida/baixa</td><td>51.437</td><td>30.912</td><td>31.771</td></tr>
+        <tr><td class="mono">rapida/media</td><td>129.194</td><td>78.124</td><td>62.795</td></tr>
+        <tr><td class="mono">rapida/alta</td><td>230.879</td><td>138.534</td><td>108.342</td></tr>
+        <tr><td class="mono">rapida/ultra</td><td>330.445</td><td>187.164</td><td>140.601</td></tr>
+        <tr><td class="mono">media/baixa</td><td>28.030</td><td>46.263</td><td>31.100</td></tr>
+        <tr><td class="mono">media/media</td><td>110.904</td><td>108.798</td><td>109.882</td></tr>
+        <tr><td class="mono">media/alta</td><td>257.766</td><td>251.589</td><td>252.453</td></tr>
+        <tr><td class="mono">media/ultra</td><td>443.817</td><td>422.010</td><td>441.537</td></tr>
+        <tr><td class="mono">mista/baixa</td><td>28.806</td><td>45.833</td><td>30.790</td></tr>
+        <tr><td class="mono">mista/media</td><td>92.861</td><td>92.961</td><td>93.947</td></tr>
+        <tr><td class="mono">mista/alta</td><td>206.073</td><td>203.081</td><td>203.578</td></tr>
+        <tr><td class="mono">mista/ultra</td><td>343.197</td><td>329.076</td><td>344.100</td></tr>
+        <tr><td class="mono">satur/alta</td><td>295.739</td><td>155.697</td><td>124.144</td></tr>
+        <tr><td class="mono">satur/ultra</td><td>441.080</td><td>218.419</td><td>139.924</td></tr>
+        <tr><td class="mono">rajada-curta/media</td><td>116.422</td><td>77.721</td><td>62.782</td></tr>
+        <tr><td class="mono">rajada-mista/media</td><td>116.928</td><td>124.678</td><td>125.796</td></tr>
+        <tr><td class="mono">mista-massiva/alta</td><td>311.916</td><td>300.359</td><td>313.216</td></tr>
+        <tr><td class="mono">mista-massiva/ultra</td><td>484.840</td><td>469.240</td><td>486.589</td></tr>
+      </tbody>
+    </table>
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">CPU media consumida (cores logicos)</h3>
+    <p>Indicador principal de uso de CPU: <code>1.0</code> equivale a um core logico ocupado durante toda a janela do cenario.</p>
+    <table class="api">
+      <thead>
+        <tr>
+          <th>Cenario</th>
+          <th>atual-v16</th>
+          <th>WinTP</th>
+          <th>TBB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">rapida/baixa</td><td>11.716</td><td>3.100</td><td>7.880</td></tr>
+        <tr><td class="mono">rapida/media</td><td>12.130</td><td>2.827</td><td>13.633</td></tr>
+        <tr><td class="mono">rapida/alta</td><td>11.975</td><td>2.685</td><td>15.674</td></tr>
+        <tr><td class="mono">rapida/ultra</td><td>12.330</td><td>3.163</td><td>14.395</td></tr>
+        <tr><td class="mono">media/baixa</td><td>17.367</td><td>10.786</td><td>15.575</td></tr>
+        <tr><td class="mono">media/media</td><td>15.075</td><td>14.346</td><td>15.162</td></tr>
+        <tr><td class="mono">media/alta</td><td>15.231</td><td>15.333</td><td>15.102</td></tr>
+        <tr><td class="mono">media/ultra</td><td>15.234</td><td>15.720</td><td>14.719</td></tr>
+        <tr><td class="mono">mista/baixa</td><td>16.273</td><td>9.387</td><td>15.732</td></tr>
+        <tr><td class="mono">mista/media</td><td>15.657</td><td>13.429</td><td>14.983</td></tr>
+        <tr><td class="mono">mista/alta</td><td>15.788</td><td>15.256</td><td>14.801</td></tr>
+        <tr><td class="mono">mista/ultra</td><td>15.805</td><td>15.244</td><td>14.600</td></tr>
+        <tr><td class="mono">satur/alta</td><td>12.416</td><td>3.232</td><td>14.375</td></tr>
+        <tr><td class="mono">satur/ultra</td><td>12.354</td><td>3.400</td><td>14.129</td></tr>
+        <tr><td class="mono">rajada-curta/media</td><td>11.624</td><td>2.831</td><td>12.529</td></tr>
+        <tr><td class="mono">rajada-mista/media</td><td>15.099</td><td>14.031</td><td>13.174</td></tr>
+        <tr><td class="mono">mista-massiva/alta</td><td>15.823</td><td>15.563</td><td>14.510</td></tr>
+        <tr><td class="mono">mista-massiva/ultra</td><td>15.632</td><td>15.451</td><td>14.667</td></tr>
+      </tbody>
+    </table>
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">CPU media consumida (% da maquina)</h3>
+    <p>Percentual medio da maquina inteira, calculado a partir do total de processadores logicos.</p>
+    <table class="api">
+      <thead>
+        <tr>
+          <th>Cenario</th>
+          <th>atual-v16</th>
+          <th>WinTP</th>
+          <th>TBB</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">rapida/baixa</td><td>73.23</td><td>19.38</td><td>49.25</td></tr>
+        <tr><td class="mono">rapida/media</td><td>75.81</td><td>17.67</td><td>85.20</td></tr>
+        <tr><td class="mono">rapida/alta</td><td>74.85</td><td>16.78</td><td>97.97</td></tr>
+        <tr><td class="mono">rapida/ultra</td><td>77.06</td><td>19.77</td><td>89.97</td></tr>
+        <tr><td class="mono">media/baixa</td><td>108.54</td><td>67.41</td><td>97.34</td></tr>
+        <tr><td class="mono">media/media</td><td>94.22</td><td>89.66</td><td>94.76</td></tr>
+        <tr><td class="mono">media/alta</td><td>95.20</td><td>95.83</td><td>94.39</td></tr>
+        <tr><td class="mono">media/ultra</td><td>95.21</td><td>98.25</td><td>91.99</td></tr>
+        <tr><td class="mono">mista/baixa</td><td>101.70</td><td>58.67</td><td>98.32</td></tr>
+        <tr><td class="mono">mista/media</td><td>97.86</td><td>83.93</td><td>93.65</td></tr>
+        <tr><td class="mono">mista/alta</td><td>98.68</td><td>95.35</td><td>92.50</td></tr>
+        <tr><td class="mono">mista/ultra</td><td>98.78</td><td>95.28</td><td>91.25</td></tr>
+        <tr><td class="mono">satur/alta</td><td>77.60</td><td>20.20</td><td>89.84</td></tr>
+        <tr><td class="mono">satur/ultra</td><td>77.21</td><td>21.25</td><td>88.31</td></tr>
+        <tr><td class="mono">rajada-curta/media</td><td>72.65</td><td>17.69</td><td>78.31</td></tr>
+        <tr><td class="mono">rajada-mista/media</td><td>94.37</td><td>87.69</td><td>82.34</td></tr>
+        <tr><td class="mono">mista-massiva/alta</td><td>98.90</td><td>97.27</td><td>90.69</td></tr>
+        <tr><td class="mono">mista-massiva/ultra</td><td>97.70</td><td>96.57</td><td>91.67</td></tr>
+      </tbody>
+    </table>
+
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">Evolucao futura: runtime async/cooperativo</h3>
+    <p>Uma linha futura, separada do <code>thread_pool</code> atual, e estudar um runtime async/cooperativo inspirado em conceitos de Tokio. Nesse modelo, a task nao e apenas um callback que entra no worker e roda ate terminar: ela precisa poder pausar em um ponto explicito de <code>await</code>/<code>yield</code>, devolver a thread para o executor, e depois continuar quando o evento aguardado estiver pronto.</p>
+    <p>Para isso, ainda faltaria implementar uma API e uma representacao de task com <b>estado reentrante</b>, ou seja, capaz de salvar onde parou e retomar depois; um mecanismo de <b>reenfileirar continuacoes</b> quando timers, canais, sockets ou outros eventos forem sinalizados; uma camada de <b>integracao com eventos/I/O/timers</b>; e regras de <b>cooperacao explicita</b>, onde tasks CPU-bound longas precisariam chamar algo equivalente a <code>yield_now()</code> para nao monopolizar um worker.</p>
+    <p>Esse caminho nao deve ser tratado como uma substituicao direta ou uma micro-otimizacao do pool nativo. Ele seria uma camada nova, possivelmente construida sobre o proprio <code>thread_pool</code> para executar polls/continuacoes, mas com semantica diferente: menos foco em acordar threads para callbacks independentes, mais foco em alternar muitas tasks leves que aguardam eventos sem bloquear a thread.</p>
+
+    <h3 style="margin:22px 0 6px; font-size:15px; color:#eef0fa">Backlog de otimizacao: throughput e tempo de parede</h3>
+    <p>Os resultados oficiais mostram uma diferenca importante entre <b>latencia de inicio</b> e <b>tempo total de drenagem</b>. O <code>thread_pool</code> atual tende a iniciar tasks rapidamente, mas em cargas de microtasks pode perder em <code>Tempo de parede</code> e <code>Mtask/s</code> para <code>WinTP</code> e <code>TBB</code>. Isso indica custo no caminho completo por task: submit, fila, wake, contadores, checks de resgate/handoff e drenagem do lote. As melhorias abaixo ficam registradas para uma etapa futura, sem alterar o comportamento atual.</p>
+
+    <ul class="k">
+      <li><b>1. Submit em lote (<code>pool_submit_many</code> ou batch interno).</b> Hoje cada <code>pool_submit</code> paga push, atomics, wake, estatisticas e checks auxiliares individualmente. Uma API de lote permitiria amortizar esses custos por lane e aproximar o pool do modelo batch/throughput eficiente usado por runtimes maduros. Deve ser a primeira hipotese a testar para melhorar <code>Tempo de parede</code> e <code>Mtask/s</code> em <code>rapida/*</code>, <code>satur/*</code> e <code>rajada-curta</code>.</li>
+      <li><b>2. Coalescing de wake.</b> O caminho atual acorda a lane a cada submit. Para microtasks, isso pode ser mais caro que a propria task. Uma alternativa e acordar apenas na transicao <code>fila vazia -&gt; fila com trabalho</code>, ou acordar por grupos de N submits. A justificativa e reduzir chamadas de sinalizacao/kernel sem prejudicar muito o p50 em baixa carga.</li>
+      <li><b>3. Amostragem dos checks de rescue/handoff no submit.</b> <code>submit_check_handoff</code> e <code>submit_check_rescue</code> preservam cauda e ajudam tasks longas, mas rodam no caminho quente. Em cargas de tasks muito pequenas, podem virar overhead dominante. Uma versao futura pode executar esses checks a cada N submits, quando backlog cruzar threshold, ou quando a lane ja tiver evidencias de espera real.</li>
+      <li><b>4. Batch pop / batch steal.</b> O worker hoje tenta pegar uma task por vez e o steal pode varrer lanes repetidamente. Para throughput, vale testar roubo em lote pequeno e drenagem local de varias tasks consecutivas antes de voltar ao scan global. A meta e reduzir atomics, leituras de contadores e varreduras sob carga alta.</li>
+      <li><b>5. Fila especializada para o caso comum.</b> A fila atual e MPMC generica e correta, mas paga CAS por item. Como cada lane tem owner principal e padroes previsiveis de acesso, pode existir um fast path SPSC/MPSC/SPMC ou uma operacao batch sobre o ring, mantendo o caminho MPMC como fallback. Isso deve ser validado com cuidado para nao regredir seguranca, backpressure e submit reentrante.</li>
+      <li><b>6. Reducao de atomics por task executada.</b> O worker marca inicio/fim com contadores e timestamps para suportar handoff, busy count e diagnostico. Em microtasks, esse custo aparece em todas as tasks. Uma opcao futura e um modo de monitoramento amostrado ou um fast path para task curta, mantendo a precisao completa quando thresholds de task longa estiverem habilitados.</li>
+      <li><b>7. Steal mais seletivo.</b> O steal varre ate o high-water de lanes para capturar residuais de lanes desativadas. E robusto, mas pode custar throughput sob alta rotacao. Um cursor por worker, mascara de lanes com backlog ou ranking leve pode reduzir scans vazios sem perder a capacidade de drenar residuais.</li>
+    </ul>
+
+    <div class="note">
+      <b>Prioridade sugerida.</b> Comecar por <code>submit_many</code> + coalescing de wake, porque atacam diretamente o custo por task observado nas tabelas de <code>Tempo de parede</code> e <code>Mtask/s</code>. Depois testar amostragem de rescue/handoff e batch pop/steal. Mudancas na fila e nos atomics de start/end tem maior risco de regressao semantica, entao devem vir depois, com benchmark e testes contratuais separados.
+    </div>
+  </section>
+  <!-- BENCHMARK_FINAL_END -->
 
   <footer>
     Documentação gerada a partir da arquitetura de <span class="mono">Xplatbase/Xplatbase/src/thread_pool.c</span>.

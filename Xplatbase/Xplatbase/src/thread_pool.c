@@ -716,12 +716,23 @@ static bool spin_check_continue(WSWorker* w)
 static bool spin_phase1(WSWorker* w, WSLane* lane, Task* out, uint64_t budget_cycles)
 {
     if (budget_cycles > 0) {
+        /* Spin adaptativo: se uma iteracao demorou muito mais que o esperado
+         * (gap de TSC > budget/8), este worker foi PREEMPTADO — sinal de
+         * oversubscription. Em vez de continuar spinando (e disputar o core que
+         * quem tem trabalho/produtores precisa), abandona o spin e vai parquear,
+         * liberando o core. Sob baixa carga o gap e minusculo -> spin normal,
+         * preservando o p50 de microssegundos. (era v16 nos experimentos) */
         uint64_t deadline = xpl_tsc() + budget_cycles;
+        uint64_t gthr = budget_cycles / 8; if (gthr < 1) gthr = 1;
+        uint64_t prev = xpl_tsc();
         int checks = 0;
         for (;;) {
             if (worker_try_any(w, lane, out)) return true;
             if (!spin_check_continue(w))      return false;
+            uint64_t now = xpl_tsc();
+            if (now - prev > gthr) return false;   /* preemptado -> sai do spin, parqueia */
             xcpu_pause();
+            prev = now;
             if (++checks >= 64) {
                 checks = 0;
                 if (xpl_tsc() >= deadline) return false;

@@ -1,0 +1,39 @@
+
+=== CRASH DETECTADO ===
+Signal: 22 (SIGABRT)
+Stack trace:
+  0: atomic_sub64 (0x7ff7db0210c0)
+  1: atomic_sub64 (0x7ff7db0210c0)
+  2: raise (0x7fffc52516a0)
+  3: abort (0x7fffc5252820)
+  4: atomic_sub64 (0x7ff7db0210c0)
+  5: atomic_sub64 (0x7ff7db0210c0)
+  6: platform_init (0x7ff7db0317e0)
+  7: BaseThreadInitThunk (0x7fffc66e7360)
+  8: RtlUserThreadStart (0x7fffc7abcc70)
+
+=== CRASH DETECTADO ===
+Signal: 22 (SIGABRT)
+Stack trace:
+  0: atomic_sub64 (0x7ff6e91810c0)
+  1: atomic_sub64 (0x7ff6e91810c0)
+  2: raise (0x7fffc52516a0)
+  3: abort (0x7fffc5252820)
+  4: atomic_sub64 (0x7ff6e91810c0)
+  5: atomic_sub64 (0x7ff6e91810c0)
+  6: platform_init (0x7ff6e9191a90)
+  7: BaseThreadInitThunk (0x7fffc66e7360)
+  8: RtlUserThreadStart (0x7fffc7abcc70)
+
+=== CRASH DETECTADO ===
+Signal: 22 (SIGABRT)
+Stack trace:
+  0: atomic_sub64 (0x7ff72ea910c0)
+  1: atomic_sub64 (0x7ff72ea910c0)
+  2: raise (0x7fffc52516a0)
+  3: abort (0x7fffc5252820)
+  4: atomic_sub64 (0x7ff72ea910c0)
+  5: atomic_sub64 (0x7ff72ea910c0)
+  6: platform_init (0x7ff72eaa9ee0)
+  7: BaseThreadInitThunk (0x7fffc66e7360)
+  8: RtlUserThreadStart (0x7fffc7abcc70)
