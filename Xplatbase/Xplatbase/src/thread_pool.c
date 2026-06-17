@@ -67,6 +67,10 @@
 #define POOL_INLINE static inline __attribute__((always_inline))
 #endif
 
+ // internal
+static ThreadPool* GlobalPool = NULL;   /* opcional, para casos simples; nao precisa ser thread-safe */
+
+
 #ifdef XPLATBASE_WIN
     #include <intrin.h>
     typedef HANDLE       pool_thread_t;
@@ -272,7 +276,8 @@ static POOL_FN pool_monitor_fn(void* raw){
     POOL_RET;
 }
 
-ThreadPool* pool_create(int cores_override){
+ThreadPool* pool_create_relative(int cores_override)
+{
     int cores=cores_override>0?cores_override:xcpu_count(); if(cores<1)cores=1;
     int nw=cores; if(nw<1)nw=1;
     int nc=cores*POOL_CORE_NUM/POOL_CORE_DEN; if(nc<1)nc=1; if(nc>nw)nc=nw;
@@ -286,38 +291,43 @@ ThreadPool* pool_create(int cores_override){
     pool->ctrs=(xatomic_int*)calloc((size_t)pool->n_ctrs,sizeof(xatomic_int));
     pool->shards=(PoolShard*)calloc((size_t)G,sizeof(PoolShard));
     pool->workers=(PoolWorker*)calloc((size_t)nt,sizeof(PoolWorker));
-    if(!pool->ctrs||!pool->shards||!pool->workers){ pool_destroy(pool); return NULL; }
+    if(!pool->ctrs||!pool->shards||!pool->workers){ pool_destroy_relative(pool); return NULL; }
     thread_wait_init(false);
-    for (int s=0;s<G;s++){
+    for (int s=0;s<G;s++)
+    {
         ring_queue_init(&pool->shards[s].ring, POOL_SHARD_CAP);
         pool->shards[s].buf=malloc((size_t)POOL_SHARD_CAP*sizeof(PoolTask));
-        if (pool->shards[s].ring.capacity==0 || !pool->shards[s].buf){ pool_destroy(pool); return NULL; }
+        if (pool->shards[s].ring.capacity==0 || !pool->shards[s].buf){ pool_destroy_relative(pool); return NULL; }
     }
-    for (int i=0;i<nt;i++){
+    for (int i=0;i<nt;i++)
+    {
         PoolWorker* w=&pool->workers[i];
         w->pool=pool; w->index=i; w->is_core=(i<nc)?1:0; w->is_elastic=(i>=nw)?1:0;
         w->shard_cursor=(uint32_t)(i%G); w->steal_cursor=(uint32_t)i;
         thread_wait_prepare(&w->wait);
         atomic_set(&w->parked, w->is_elastic?1:0);
-        if (!pool_deque_init(&w->deque, POOL_DEQUE_CAP)){ pool_destroy(pool); return NULL; }
+        if (!pool_deque_init(&w->deque, POOL_DEQUE_CAP)){ pool_destroy_relative(pool); return NULL; }
     }
-    for (int i=0;i<nt;i++){
+    for (int i=0;i<nt;i++)
+    {
         if (!pool_thread_start(&pool->workers[i].handle, pool_worker_fn, &pool->workers[i])){
             atomic_set(&pool->stop,1);
             for (int j=0;j<i;j++){ thread_wait_wake(&pool->workers[j].wait); pool_thread_join(pool->workers[j].handle); }
-            pool_destroy(pool); return NULL;
+            pool_destroy_relative(pool); return NULL;
         }
     }
     thread_wait_prepare(&pool->mon_wait);
     if (!pool_thread_start(&pool->mon_handle, pool_monitor_fn, pool)){
         atomic_set(&pool->stop,1);
         for (int i=0;i<nt;i++){ thread_wait_wake(&pool->workers[i].wait); pool_thread_join(pool->workers[i].handle); }
-        pool_destroy(pool); return NULL;
+        pool_destroy_relative(pool); return NULL;
     }
     return pool;
 }
 
-bool pool_submit(ThreadPool* pool, pool_task_fn fn, void* arg){
+
+boolean pool_submit_relative(ThreadPool* pool, pool_task_fn fn, void* arg)
+{
     if (!pool || !fn) return false;
     if (atomic_get(&pool->stop)) return false;
 
@@ -348,18 +358,22 @@ bool pool_submit(ThreadPool* pool, pool_task_fn fn, void* arg){
         else                pool_sleep0();
         spins++;
     }
+    return true;
 }
 
-static long pool_total_pending(ThreadPool* pool){
+static long pool_total_pending(ThreadPool* pool)
+{
     long s=0; for (int i=0;i<pool->n_ctrs;i++) s+=atomic_get(&pool->ctrs[i]); return s;
 }
-void pool_wait_idle(ThreadPool* pool){ if(!pool)return; while (pool_total_pending(pool)>0) pool_sleep0(); }
-void pool_dims(ThreadPool* pool, int* w, int* c){ if(!pool)return; if(w)*w=pool->n_workers; if(c)*c=pool->n_core; }
 
-void pool_destroy(ThreadPool* pool){
+void pool_wait_idle_relative(ThreadPool* pool){ if(!pool)return; while (pool_total_pending(pool)>0) pool_sleep0(); }
+void pool_dims_relative(ThreadPool* pool, int* w, int* c){ if(!pool)return; if(w)*w=pool->n_workers; if(c)*c=pool->n_core; }
+
+void pool_destroy_relative(ThreadPool* pool)
+{
     if (!pool) return;
     if (!atomic_get(&pool->stop)){
-        pool_wait_idle(pool);
+        pool_wait_idle_relative(pool);
         atomic_set(&pool->stop,1);
         thread_wait_wake(&pool->mon_wait);
         if (pool->mon_handle) pool_thread_join(pool->mon_handle);
@@ -380,4 +394,31 @@ void pool_destroy(ThreadPool* pool){
     free(pool->ctrs);
     free(pool);
     thread_wait_shutdown();
+}
+
+
+// internal
+void pool_create() 
+{
+    if (!GlobalPool) { GlobalPool = pool_create_relative(0); }
+}
+
+void pool_destroy() 
+{ 
+    if (GlobalPool) { pool_destroy_relative(GlobalPool); GlobalPool = 0; }
+}
+
+boolean pool_submit(pool_task_fn fn, void* arg) 
+{ 
+    if (GlobalPool) { return pool_submit_relative(GlobalPool, fn, arg); } return false;
+}
+
+void pool_wait_idle()
+{
+    pool_wait_idle_relative(GlobalPool);
+}
+
+void pool_dims(int* w, int* c) 
+{ 
+    pool_dims_relative(GlobalPool, w, c);
 }

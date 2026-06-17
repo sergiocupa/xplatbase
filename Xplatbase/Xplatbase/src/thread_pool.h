@@ -37,21 +37,25 @@ extern "C" {
 typedef struct ThreadPool ThreadPool;
 typedef void (*pool_task_fn)(void*);
 
-/* cores_override: 0 -> usa xcpu_count(). Retorna NULL em falha. */
-XPLATBASE_API ThreadPool* pool_create(int cores_override);
 
-/* Espera as tasks em voo drenarem, para e junta os workers, libera tudo. */
-XPLATBASE_API void        pool_destroy(ThreadPool* p);
+// public
+XPLATBASE_API ThreadPool* pool_create_relative(int cores_override);
+XPLATBASE_API void        pool_destroy_relative(ThreadPool* p);
+XPLATBASE_API boolean     pool_submit_relative(ThreadPool* p, pool_task_fn fn, void* arg);
+XPLATBASE_API void        pool_wait_idle_relative(ThreadPool* p);
+XPLATBASE_API void        pool_dims_relative(ThreadPool* p, int* out_workers, int* out_core);
 
-/* Submit. Externo: round-robin nas shards (backpressure, nunca falha exceto
- * shutdown). Reentrante (de dentro de uma task): push no deque local. */
-XPLATBASE_API bool        pool_submit(ThreadPool* p, pool_task_fn fn, void* arg);
 
-/* Bloqueia ate todas as tasks submetidas terminarem. */
-XPLATBASE_API void        pool_wait_idle(ThreadPool* p);
+// internal
+void pool_create();
+void pool_destroy();
 
-/* out_workers = total de workers (core+reserva); out_core = workers core. */
-XPLATBASE_API void        pool_dims(ThreadPool* p, int* out_workers, int* out_core);
+// public
+XPLATBASE_API boolean pool_submit(pool_task_fn fn, void* arg);
+XPLATBASE_API void pool_wait_idle();
+XPLATBASE_API void pool_dims(int* w, int* c);
+
+
 
 #ifdef __cplusplus
 }
