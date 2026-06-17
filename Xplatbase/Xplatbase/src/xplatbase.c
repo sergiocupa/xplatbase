@@ -12,6 +12,7 @@
 //  
 //  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 
+#include "thread_pool.h"
 #include "../include/xplatbase.h"
 #include "event_handler.h"
 #include <stdio.h>
@@ -43,6 +44,8 @@ void platform_init()
 
 	test_utf8();
 	xpb_event_init();
+
+	pool_create();
 
 	platform_initialized = true;
 }

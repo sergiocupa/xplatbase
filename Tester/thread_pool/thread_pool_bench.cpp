@@ -90,7 +90,7 @@ static Res run_flat(const Scen& s, int wrk, CR cr, SU su, DE de){
     finish(r,qpc_ms(t0,t1),c0,c1,lat,tasks);
     return r;
 }
-static Res flat_pool(const Scen& s){ ThreadPool*p=nullptr;int w=0,c=0; Res r=run_flat(s,0,[&]{p=pool_create(0);pool_dims(p,&w,&c);},[&](BTask*t){while(!pool_submit(p,tramp,t)){}},[&]{pool_destroy(p);}); r.wrk=w; return r; }
+static Res flat_pool(const Scen& s){ ThreadPool*p=nullptr;int w=0,c=0; Res r=run_flat(s,0,[&]{p=pool_create_relative(0);pool_dims_relative(p,&w,&c);},[&](BTask*t){while(!pool_submit_relative(p,tramp,t)){}},[&]{pool_destroy_relative(p);}); r.wrk=w; return r; }
 static Res flat_wintp(const Scen& s,int wk){ PTP_POOL p=nullptr; TP_CALLBACK_ENVIRON e;
     return run_flat(s,wk,[&]{p=CreateThreadpool(NULL);SetThreadpoolThreadMaximum(p,(DWORD)wk);SetThreadpoolThreadMinimum(p,(DWORD)wk);InitializeThreadpoolEnvironment(&e);SetThreadpoolCallbackPool(&e,p);},
         [&](BTask*t){while(!TrySubmitThreadpoolCallback(wintp_simple,t,&e))Sleep(0);}, [&]{DestroyThreadpoolEnvironment(&e);CloseThreadpool(p);}); }
@@ -135,7 +135,7 @@ static void submit_child(SpawnCtx* c, int idx){       /* adapter: 0 oficial, 1 T
     c->outstanding->fetch_add(1,std::memory_order_relaxed);
     QueryPerformanceCounter(&na->enq);
     int a=c->adapter;
-    if (a==0) { while(!pool_submit(c->pool,node_tramp,na)){} }
+    if (a==0) { while(!pool_submit_relative(c->pool,node_tramp,na)){} }
 #ifdef TBB_AVAILABLE
     else if (a==1) { c->tg->run([na]{ node_run(na); }); }
 #endif
@@ -156,7 +156,7 @@ static Res spawn_once(int adapter, const Tree& tree, NodeArg* args, int cpus){
 #ifdef TBB_AVAILABLE
     tbb::global_control*gc=nullptr; tbb::task_arena*ar=nullptr; tbb::task_group tg;
 #endif
-    if (adapter==0){ pp=pool_create(0); ctx.pool=pp; int l; pool_dims(pp,&wrk,&l); }
+    if (adapter==0){ pp=pool_create_relative(0); ctx.pool=pp; int l; pool_dims_relative(pp,&wrk,&l); }
 #ifdef TBB_AVAILABLE
     else if (adapter==1){ gc=new tbb::global_control(tbb::global_control::max_allowed_parallelism,(size_t)cpus); ar=new tbb::task_arena(cpus); ar->initialize(); ctx.tg=&tg; wrk=cpus; }
 #endif
@@ -170,7 +170,7 @@ static Res spawn_once(int adapter, const Tree& tree, NodeArg* args, int cpus){
     { submit_child(&ctx,0); while(outstanding.load(std::memory_order_acquire)>0) Sleep(0); }
     LARGE_INTEGER t1=qpc_now(); CpuSnap c1=cpu_snap();
 
-    if (adapter==0) pool_destroy(pp);
+    if (adapter==0) pool_destroy_relative(pp);
 #ifdef TBB_AVAILABLE
     else if (adapter==1){ delete ar; delete gc; }
 #endif
