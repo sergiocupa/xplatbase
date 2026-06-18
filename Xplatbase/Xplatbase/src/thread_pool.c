@@ -1,8 +1,22 @@
 /*
- * thread_pool.c — pool OFICIAL (ver thread_pool.h). Design consolidado (V2.03):
+ * thread_pool.c — pool OFICIAL (ver thread_pool.h). Design consolidado (V2.04):
  *   arena (shards MPMC compartilhadas) + deque Chase-Lev local (spawn) +
  *   core/reserva + worker elastico (monitor detecta presos -> acorda extras).
  *   pending por contador-indexado-na-task (baixa contencao, correto com steal).
+ *
+ *   V2.04 incorpora as correcoes/otimizacoes validadas no bench de variantes:
+ *     - Bug 1: in_task tratado como PROFUNDIDADE (submit reentrante com deque
+ *       cheio roda a task aninhada via pool_run sem zerar o flag da task externa).
+ *     - Bug 2/3: thread_wait_init/shutdown pareados via wait_inited; o retorno
+ *       do init passa a ser usado.
+ *     - Perf A: contadores 'ctrs' com padding de linha de cache (anti false-sharing).
+ *     - Perf B: atomicos quentes do struct (submit_rr/wake_rr/n_parked_core/stop)
+ *       em linhas de cache separadas.
+ *     - Perf C: wakeup direcionado — o submit acorda exatamente um core de fato
+ *       parqueado (em vez de round-robin cego).
+ *     - Perf D: contador de conclusao por-worker (64 bits) — decremento single-writer
+ *       no proprio executor; soma global conservada.
+ *     - Perf E: o monitor acorda um LOTE de elasticos por tick (rampa mais rapida).
  */
 
 #include "thread_pool.h"
@@ -106,6 +120,13 @@ static ThreadPool* GlobalPool = NULL;   /* opcional, para casos simples; nao pre
     static int pool_cas64(pool_a64* p, long long e, long long d){ return atomic_compare_exchange_strong_explicit(p,&e,d,memory_order_seq_cst,memory_order_relaxed); }
 #endif
 
+/* Perf A+D: contador de pending de 64 bits, cada um na sua propria linha de
+ * cache (o decremento por-worker do Perf D pode acumular drift grande). */
+typedef struct XPL_ALIGN(XPL_CACHELINE) {
+    xatomic_int64 v;
+    char _pad[XPL_CACHELINE - sizeof(xatomic_int64)];
+} PoolCtr;
+
 typedef struct { pool_task_fn fn; void* arg; int ctr; } PoolTask;
 
 typedef struct XPL_ALIGN(XPL_CACHELINE) {
@@ -154,13 +175,13 @@ typedef struct XPL_ALIGN(XPL_CACHELINE) {
     uint32_t      shard_cursor;
     uint32_t      steal_cursor;
     volatile long done_count;     /* progresso (single-writer = este worker) */
-    volatile int  in_task;
+    volatile int  in_task;        /* profundidade (Bug 1) */
     long          mon_last;       /* uso exclusivo do monitor */
-    xatomic_int   parked;         /* elastico: 1 = parqueado */
+    xatomic_int   parked;         /* elastico e core (Perf C): 1 = parqueado */
     char          _pad[XPL_CACHELINE];
 } PoolWorker;
 
-struct ThreadPool {
+struct XPL_ALIGN(XPL_CACHELINE) ThreadPool {
     int            n_core;
     int            n_workers;      /* core + reserva (sem elasticos) */
     int            n_total;        /* n_workers + n_elastic */
@@ -168,12 +189,19 @@ struct ThreadPool {
     int            n_shards;
     PoolShard*     shards;
     PoolWorker*    workers;        /* [0,n_core)=core [n_core,n_workers)=reserva [n_workers,n_total)=elastico */
-    xatomic_int*   ctrs;
+    PoolCtr*       ctrs;
     int            n_ctrs;         /* n_shards + n_total */
+    int            wait_inited;    /* Bug 2/3: pareia thread_wait_init/shutdown */
+    /* Perf B: atomicos quentes em linhas de cache separadas */
+    char           _padb0[XPL_CACHELINE];
     xatomic_uint32 submit_rr;
+    char           _padb1[XPL_CACHELINE - sizeof(xatomic_uint32)];
     xatomic_uint32 wake_rr;
+    char           _padb2[XPL_CACHELINE - sizeof(xatomic_uint32)];
     xatomic_int    n_parked_core;
+    char           _padb3[XPL_CACHELINE - sizeof(xatomic_int)];
     xatomic_int    stop;
+    char           _padb4[XPL_CACHELINE - sizeof(xatomic_int)];
     pool_thread_t  mon_handle;
     xwait_t        mon_wait;
 };
@@ -185,11 +213,13 @@ static __thread PoolWorker* g_pool_self;
 #endif
 
 POOL_INLINE void pool_run(ThreadPool* pool, PoolWorker* self, PoolTask* t){
-    self->in_task=1;
+    self->in_task++;          /* Bug 1: profundidade (suporta pool_run aninhado) */
     t->fn(t->arg);
-    self->in_task=0;
+    self->in_task--;
     self->done_count++;
-    atomic_sub(&pool->ctrs[t->ctr],1);
+    /* Perf D: decrementa o contador DESTE worker (single-writer no decremento);
+     * a soma global continua conservada (todo +1 tem um -1 em algum indice). */
+    atomic_sub64(&pool->ctrs[pool->n_shards + self->index].v, 1);
 }
 
 POOL_INLINE bool pool_try_get(ThreadPool* pool, PoolWorker* self, PoolTask* out){
@@ -243,9 +273,10 @@ static POOL_FN pool_worker_fn(void* raw){
         if (pool_try_get(pool,self,&t)){ pool_run(pool,self,&t); continue; }
         if (is_core){ if (pool_spin(pool,self,&t)){ pool_run(pool,self,&t); continue; } }
         if (atomic_get(&pool->stop)) break;
-        if (is_core) atomic_add(&pool->n_parked_core,1);
+        /* Perf C: marca este core como parqueado para wakeup direcionado. */
+        if (is_core){ atomic_set(&self->parked,1); atomic_add(&pool->n_parked_core,1); }
         thread_wait_sleep_for(&self->wait, POOL_PARK_TIMEOUT_US);
-        if (is_core) atomic_sub(&pool->n_parked_core,1);
+        if (is_core){ atomic_sub(&pool->n_parked_core,1); atomic_set(&self->parked,0); }
     }
     POOL_RET;
 }
@@ -267,10 +298,12 @@ static POOL_FN pool_monitor_fn(void* raw){
         int backlog=0;
         for (int s=0;s<pool->n_shards;s++) if(!ring_queue_empty(&pool->shards[s].ring)){ backlog=1; break; }
         if (!backlog) continue;
-        for (int e=pool->n_workers;e<pool->n_total;e++){
+        /* Perf E: acorda ate 'stuck' elasticos por tick (em vez de 1 por 5ms). */
+        int to_wake=stuck;
+        for (int e=pool->n_workers;e<pool->n_total && to_wake>0;e++){
             PoolWorker* w=&pool->workers[e];
             int exp=1;
-            if (atomic_cas(&w->parked,&exp,0)){ thread_wait_wake(&w->wait); break; }
+            if (atomic_cas(&w->parked,&exp,0)){ thread_wait_wake(&w->wait); to_wake--; }
         }
     }
     POOL_RET;
@@ -288,11 +321,12 @@ ThreadPool* pool_create_relative(int cores_override)
     ThreadPool* pool=(ThreadPool*)calloc(1,sizeof(ThreadPool)); if(!pool) return NULL;
     pool->n_core=nc; pool->n_workers=nw; pool->n_elastic=ne; pool->n_total=nt; pool->n_shards=G;
     pool->n_ctrs=G+nt;
-    pool->ctrs=(xatomic_int*)calloc((size_t)pool->n_ctrs,sizeof(xatomic_int));
+    pool->ctrs=(PoolCtr*)calloc((size_t)pool->n_ctrs,sizeof(PoolCtr));
     pool->shards=(PoolShard*)calloc((size_t)G,sizeof(PoolShard));
     pool->workers=(PoolWorker*)calloc((size_t)nt,sizeof(PoolWorker));
     if(!pool->ctrs||!pool->shards||!pool->workers){ pool_destroy_relative(pool); return NULL; }
-    thread_wait_init(false);
+    /* Bug 2/3: so registra shutdown se o init de fato elevou o timer (return). */
+    pool->wait_inited = thread_wait_init(false) ? 1 : 0;
     for (int s=0;s<G;s++)
     {
         ring_queue_init(&pool->shards[s].ring, POOL_SHARD_CAP);
@@ -334,7 +368,7 @@ boolean pool_submit_relative(ThreadPool* pool, pool_task_fn fn, void* arg)
     PoolWorker* me=g_pool_self;
     if (me && me->pool==pool){       /* reentrante: deque local */
         PoolTask t = { fn, arg, pool->n_shards + me->index };
-        atomic_add(&pool->ctrs[t.ctr],1);
+        atomic_add64(&pool->ctrs[t.ctr].v,1);
         if (pool_deque_push(&me->deque,&t)) return true;
         pool_run(pool,me,&t);
         return true;
@@ -343,15 +377,23 @@ boolean pool_submit_relative(ThreadPool* pool, pool_task_fn fn, void* arg)
     for (;;){
         int s=(int)(atomic_u32_add(&pool->submit_rr,1u)%(uint32_t)G);
         PoolTask t = { fn, arg, s };
-        atomic_add(&pool->ctrs[s],1);
+        atomic_add64(&pool->ctrs[s].v,1);
         if (xring_push_mp(&pool->shards[s].ring, pool->shards[s].buf, &t)){
             if (atomic_get(&pool->n_parked_core) > 0){
-                uint32_t k=atomic_u32_add(&pool->wake_rr,1u)%(uint32_t)pool->n_core;
-                thread_wait_wake(&pool->workers[k].wait);
+                /* Perf C: acorda exatamente UM core que esteja de fato parqueado. */
+                int nc=pool->n_core;
+                uint32_t start=atomic_u32_add(&pool->wake_rr,1u);
+                for (int j=0;j<nc;j++){
+                    int idx=(int)((start+(uint32_t)j)%(uint32_t)nc);
+                    int exp=1;
+                    if (atomic_cas(&pool->workers[idx].parked,&exp,0)){
+                        thread_wait_wake(&pool->workers[idx].wait); break;
+                    }
+                }
             }
             return true;
         }
-        atomic_sub(&pool->ctrs[s],1);
+        atomic_sub64(&pool->ctrs[s].v,1);
         if (atomic_get(&pool->stop)) return false;
         if      (spins<64)  xcpu_pause();
         else if (spins<256) pool_yield();
@@ -361,9 +403,9 @@ boolean pool_submit_relative(ThreadPool* pool, pool_task_fn fn, void* arg)
     return true;
 }
 
-static long pool_total_pending(ThreadPool* pool)
+static long long pool_total_pending(ThreadPool* pool)
 {
-    long s=0; for (int i=0;i<pool->n_ctrs;i++) s+=atomic_get(&pool->ctrs[i]); return s;
+    long long s=0; for (int i=0;i<pool->n_ctrs;i++) s+=atomic_get64(&pool->ctrs[i].v); return s;
 }
 
 void pool_wait_idle_relative(ThreadPool* pool){ if(!pool)return; while (pool_total_pending(pool)>0) pool_sleep0(); }
@@ -392,24 +434,25 @@ void pool_destroy_relative(ThreadPool* pool)
         free(pool->shards);
     }
     free(pool->ctrs);
+    /* Bug 2/3: so faz shutdown se o init foi pareado. */
+    if (pool->wait_inited) thread_wait_shutdown();
     free(pool);
-    thread_wait_shutdown();
 }
 
 
 // internal
-void pool_create() 
+void pool_create()
 {
     if (!GlobalPool) { GlobalPool = pool_create_relative(0); }
 }
 
-void pool_destroy() 
-{ 
+void pool_destroy()
+{
     if (GlobalPool) { pool_destroy_relative(GlobalPool); GlobalPool = 0; }
 }
 
-boolean pool_submit(pool_task_fn fn, void* arg) 
-{ 
+boolean pool_submit(pool_task_fn fn, void* arg)
+{
     if (GlobalPool) { return pool_submit_relative(GlobalPool, fn, arg); } return false;
 }
 
@@ -418,7 +461,7 @@ void pool_wait_idle()
     pool_wait_idle_relative(GlobalPool);
 }
 
-void pool_dims(int* w, int* c) 
-{ 
+void pool_dims(int* w, int* c)
+{
     pool_dims_relative(GlobalPool, w, c);
 }
