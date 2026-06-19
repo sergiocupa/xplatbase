@@ -85,6 +85,10 @@
     <ClCompile Include="$(SRCDIR)\atomics.c" />
     <ClCompile Include="$(SRCDIR)\thread_wait.c" />
     <ClCompile Include="$(SRCDIR)\thread_activity_win.c" />
+    <ClCompile Include="$(SRCDIR)\thread_handler.c" />
+    <ClCompile Include="$(SRCDIR)\memory_pool.c" />
+    <ClCompile Include="$(SRCDIR)\list_hander.c" />
+    <ClCompile Include="$(SRCDIR)\memory_handler.c" />
     <ClCompile Include="$(SRCDIR)\xplatbase.c" />
     <ClCompile Include="$(SRCDIR)\event_handler.c" />
   </ItemGroup>

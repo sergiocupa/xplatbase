@@ -22,15 +22,20 @@ extern "C" {
 
     #include "../include/xplatbase.h"
     #include "atomics.h"
+    #include "thread_handler.h"
 
 
     #ifdef XPLATBASE_WIN
+
+        typedef CONDITION_VARIABLE xcond_t;
 
         typedef struct {
             xatomic_int signal;   /* 0 = dormindo, 1 = sinalizado (WaitOnAddress/WakeByAddress) */
         } xwait_t;
 
     #else
+
+        typedef pthread_cond_t xcond_t;
 
         typedef struct {
             atomic_int futex_val;   /* 0 = sleeping, 1 = signaled */
@@ -47,6 +52,51 @@ extern "C" {
     XPLATBASE_API void    thread_wait_sleep(xwait_t* w);
     XPLATBASE_API boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us);
     XPLATBASE_API void    thread_wait_wake(xwait_t* w);
+
+
+
+
+    XTHREAD_INLINE void thread_cond_init(xcond_t* cond)
+    {
+#ifdef XPLATBASE_WIN
+        InitializeConditionVariable(cond);
+#else
+        pthread_cond_init(cond, NULL);
+#endif
+    }
+
+
+
+    XTHREAD_INLINE void thread_cond_signal(xcond_t* cond)
+    {
+#ifdef XPLATBASE_WIN
+        WakeConditionVariable(cond);
+#else
+        pthread_cond_signal(cond);
+#endif
+    }
+
+
+
+    XTHREAD_INLINE void thread_cond_wait(xcond_t* cond, xmutex_t* mutex)
+    {
+#ifdef XPLATBASE_WIN
+        SleepConditionVariableCS(cond, mutex, INFINITE);
+#else
+        pthread_cond_wait(cond, mutex);
+#endif
+    }
+
+
+
+    XTHREAD_INLINE void thread_cond_destroy(xcond_t* cond)
+    {
+#ifdef XPLATBASE_WIN
+        (void)cond;
+#else
+        pthread_cond_destroy(cond);
+#endif
+    }
 
 
 #ifdef __cplusplus

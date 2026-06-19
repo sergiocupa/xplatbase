@@ -28,6 +28,7 @@
 #include "atomics.h"
 #include "ring_queue.h"
 #include "thread_wait.h"
+#include "thread_handler.h"
 
 #ifndef POOL_CORE_NUM
 #define POOL_CORE_NUM      7
@@ -85,40 +86,20 @@
 static ThreadPool* GlobalPool = NULL;   /* opcional, para casos simples; nao precisa ser thread-safe */
 
 
-#ifdef XPLATBASE_WIN
-    #include <intrin.h>
-    typedef HANDLE       pool_thread_t;
-    typedef DWORD WINAPI pool_fn_sig(void*);
-    static bool pool_thread_start(pool_thread_t* o, pool_fn_sig* fn, void* a){ *o=CreateThread(NULL,0,fn,a,0,NULL); return *o!=NULL; }
-    static void pool_thread_join(pool_thread_t h){ WaitForSingleObject(h,INFINITE); CloseHandle(h); }
-    static void pool_yield(void){ SwitchToThread(); }
-    static void pool_sleep0(void){ Sleep(0); }
-    #define POOL_FN   DWORD WINAPI
-    #define POOL_RET  return 0
-    typedef volatile LONG64 pool_a64;
-    #define pool_ld(p)        (*(p))
-    #define pool_st(p,v)      (*(p) = (LONG64)(v))
-    #define pool_fence()      MemoryBarrier()
-    static int pool_cas64(pool_a64* p, LONG64 e, LONG64 d){ return InterlockedCompareExchange64(p,d,e)==e; }
-#else
-    #include <pthread.h>
-    #include <sched.h>
-    #include <time.h>
-    #include <stdatomic.h>
-    typedef pthread_t pool_thread_t;
-    typedef void*     pool_fn_sig(void*);
-    static bool pool_thread_start(pool_thread_t* o, pool_fn_sig* fn, void* a){ memset(o,0,sizeof(*o)); return pthread_create(o,NULL,fn,a)==0; }
-    static void pool_thread_join(pool_thread_t h){ pthread_join(h,NULL); }
-    static void pool_yield(void){ sched_yield(); }
-    static void pool_sleep0(void){ struct timespec z={0,0}; nanosleep(&z,NULL); }
-    #define POOL_FN   void*
-    #define POOL_RET  return NULL
-    typedef _Atomic long long pool_a64;
-    #define pool_ld(p)        atomic_load_explicit((p), memory_order_relaxed)
-    #define pool_st(p,v)      atomic_store_explicit((p),(long long)(v), memory_order_relaxed)
-    #define pool_fence()      atomic_thread_fence(memory_order_seq_cst)
-    static int pool_cas64(pool_a64* p, long long e, long long d){ return atomic_compare_exchange_strong_explicit(p,&e,d,memory_order_seq_cst,memory_order_relaxed); }
-#endif
+typedef Thread* pool_thread_t;
+typedef xthread_func_t pool_fn_sig;
+typedef xthread_atomic64 pool_a64;
+
+#define pool_thread_start(o,fn,a) (((*(o)) = thread_create((fn), (a), NULL)) != NULL)
+#define pool_thread_join(h)      thread_join(&(h))
+#define pool_yield()             thread_yield()
+#define pool_sleep0()            thread_sleep0()
+#define POOL_FN                  xthread_result_t
+#define POOL_RET                 return (xthread_result_t)0
+#define pool_ld(p)               thread_atomic64_load((p))
+#define pool_st(p,v)             thread_atomic64_store((p), (long long)(v))
+#define pool_fence()             thread_fence()
+#define pool_cas64(p,e,d)        thread_atomic64_cas((p), (long long)(e), (long long)(d))
 
 /* Perf A+D: contador de pending de 64 bits, cada um na sua propria linha de
  * cache (o decremento por-worker do Perf D pode acumular drift grande). */

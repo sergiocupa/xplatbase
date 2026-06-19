@@ -1,6 +1,7 @@
 #include "thread_wait.h"
 #include <stdbool.h>
 
+
 /* ======================================================================== */
 /*  CPU pause/yield                                                         */
 /* ======================================================================== */
@@ -89,7 +90,7 @@ boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
 void thread_wait_wake(xwait_t* w)
 {
     atomic_set(&w->signal, 1);
-    WakeByAddressSingle(&w->signal);
+    WakeByAddressSingle((PVOID)&w->signal);
 }
 
 /* No-op: sem handle para fechar. */

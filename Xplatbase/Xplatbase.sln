@@ -1,4 +1,4 @@
-﻿
+
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 18
 VisualStudioVersion = 18.7.11903.348 stable
@@ -6,6 +6,8 @@ MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Xplatbase", "Xplatbase\Xplatbase.vcxproj", "{F217B4D5-F6BC-4FCE-AF5E-BEEF9FE1F3E8}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "thread_pool_bench", "..\Tester\thread_pool\thread_pool_bench.vcxproj", "{7E9C2A10-3B4D-4F5A-9C1E-2D6F8A0B1C23}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "memory_pool_test", "..\Tester\memory_pool\memory_pool_test.vcxproj", "{9A15B8D7-6D1D-4E48-A905-311427CF4C17}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -31,6 +33,14 @@ Global
 		{7E9C2A10-3B4D-4F5A-9C1E-2D6F8A0B1C23}.Release|x64.Build.0 = Release|x64
 		{7E9C2A10-3B4D-4F5A-9C1E-2D6F8A0B1C23}.Release|x86.ActiveCfg = Release|x64
 		{7E9C2A10-3B4D-4F5A-9C1E-2D6F8A0B1C23}.Release|x86.Build.0 = Release|x64
+		{9A15B8D7-6D1D-4E48-A905-311427CF4C17}.Debug|x64.ActiveCfg = Debug|x64
+		{9A15B8D7-6D1D-4E48-A905-311427CF4C17}.Debug|x64.Build.0 = Debug|x64
+		{9A15B8D7-6D1D-4E48-A905-311427CF4C17}.Debug|x86.ActiveCfg = Debug|x64
+		{9A15B8D7-6D1D-4E48-A905-311427CF4C17}.Debug|x86.Build.0 = Debug|x64
+		{9A15B8D7-6D1D-4E48-A905-311427CF4C17}.Release|x64.ActiveCfg = Release|x64
+		{9A15B8D7-6D1D-4E48-A905-311427CF4C17}.Release|x64.Build.0 = Release|x64
+		{9A15B8D7-6D1D-4E48-A905-311427CF4C17}.Release|x86.ActiveCfg = Release|x64
+		{9A15B8D7-6D1D-4E48-A905-311427CF4C17}.Release|x86.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

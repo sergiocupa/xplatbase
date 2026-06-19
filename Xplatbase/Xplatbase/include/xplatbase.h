@@ -68,8 +68,10 @@ extern "C" {
 		#pragma comment(lib, "dbghelp.lib")
 
 
+        #ifndef XPLATBASE_NO_AUTO_INIT
 	    #pragma section(".CRT$XCU", read)
 		    __declspec(allocate(".CRT$XCU")) static void (*init_ptr)() = platform_init;
+        #endif
 
 	#else 
 
@@ -159,7 +161,7 @@ extern "C" {
     #define xpb_list_init(_this,initial_count,type) xpb_list_init_ext(_this, initial_count, sizeof(type), __func__, __FILE__, __LINE__)
     #define xpb_list_new(initial_count,type)        xpb_list_new_ext(initial_count, sizeof(type), __func__, __FILE__, __LINE__)
     #define xpb_list_add(_this,instance,type)       xpb_list_add_ext(_this,  instance, sizeof(type), __func__, __FILE__, __LINE__)
-
+    #define xpb_list_remove(_this,instance)         xpb_list_remove_ext(_this, instance)
 
 
 
