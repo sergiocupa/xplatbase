@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 static int g_failed = 0;
 
@@ -104,45 +105,34 @@ static void test_thread_lane_lifecycle(void)
     CHECK("callback encerrou lane", s.lanes_destroyed >= 1);
 }
 
-static void test_async_refill(void)
+static void test_span_growth(void)
 {
-    enum { N = 80 };
-    MemBuffer buffers[N];
+    /* v2: sem worker assincrono. Consumir mais blocos do que cabe num span
+     * (64KB) deve disparar refill sincrono = alocar spans adicionais. */
+    enum { N = 5000 };
+    MemBuffer* buffers;
     MemPoolStats s;
     int i;
     int all_allocs_ok = 1;
-    int saw_async = 0;
 
-    printf("\nTESTE 4: refill assincrono por threshold\n");
+    printf("\nTESTE 4: crescimento por spans (refill sincrono)\n");
     reset_pool();
-    memset(buffers, 0, sizeof(buffers));
+    buffers = (MemBuffer*)calloc(N, sizeof(MemBuffer));
 
     for (i = 0; i < N; i++)
     {
         buffers[i] = memop_alloc(32);
         if (!buffers[i].Ptr) all_allocs_ok = 0;
+        else { ((char*)buffers[i].Ptr)[0] = (char)i; }
     }
-    CHECK("allocs durante consumo", all_allocs_ok);
-
-    for (i = 0; i < 200; i++)
-    {
-        memop_get_stats(&s);
-        if (s.async_refills > 0)
-        {
-            saw_async = 1;
-            break;
-        }
-        thread_sleep0();
-    }
+    CHECK("5000 allocs de 32B ok", all_allocs_ok);
 
     memop_get_stats(&s);
-    CHECK("threshold gerou pedido assincrono", s.async_requests > 0);
-    CHECK("worker executou refill assincrono", saw_async || s.async_refills > 0);
+    CHECK("consumo > 1 span alocou spans extras", s.sync_refills >= 2);
+    CHECK("alloc_count contabilizado", s.alloc_count >= (uint64)N);
 
-    for (i = 0; i < N; i++)
-    {
-        memop_free(&buffers[i]);
-    }
+    for (i = 0; i < N; i++) memop_free(&buffers[i]);
+    free(buffers);
 }
 
 int main(void)
@@ -152,7 +142,7 @@ int main(void)
     test_basic_alloc_free();
     test_size_classes();
     test_thread_lane_lifecycle();
-    test_async_refill();
+    test_span_growth();
 
     memop_shutdown();
 

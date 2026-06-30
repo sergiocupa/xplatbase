@@ -42,6 +42,11 @@ extern "C" {
     MemBuffer memop_alloc(uint64 size);
     void memop_free(MemBuffer* buffer);
 
+    /* Fast path de ponteiro cru: void* em registrador, sem o struct MemBuffer.
+     * Mesma semantica de memop_alloc/free, mas sem carregar o tamanho de volta. */
+    void* memop_alloc_raw(uint64 size);
+    void  memop_free_raw(void* ptr);
+
     void memop_get_stats(MemPoolStats* out_stats);
     void memop_test_reset(void);
 
