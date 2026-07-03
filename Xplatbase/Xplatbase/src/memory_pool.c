@@ -62,11 +62,18 @@ typedef struct MemFreeBlock
 
 typedef struct MemHeap MemHeap;
 
+/* Estado do span (so o dono le/escreve; nada de atomico):
+ *   AVAILABLE -> na lista da classe (heap->spans[c]): tem/pode ter blocos.
+ *   FULL      -> na lista full do heap: esgotado; NUNCA varrido pelo alloc.
+ * A transicao de volta e O(1): free local religa na classe (modelo rp/mimalloc). */
+#define MEMOP_SPAN_AVAILABLE 0u
+#define MEMOP_SPAN_FULL      1u
+
 /* Cabecalho no inicio de cada span 64KB-alinhado. */
 typedef struct MemSpan
 {
     MemHeap*       owner;
-    struct MemSpan* next;        /* lista (dupla) da classe no heap dono */
+    struct MemSpan* next;        /* lista dupla: classe (AVAILABLE) ou full (FULL) */
     struct MemSpan* prev;
     MemFreeBlock*  local_free;   /* so o dono toca (sem atomico)  */
     xatomic_ptr    remote_free;  /* frees cross-thread (Treiber)  */
@@ -75,12 +82,19 @@ typedef struct MemSpan
     uint32 block_count;          /* nro de blocos no span (large: unidades 64KB) */
     uint32 used;                 /* so o dono ajusta (nao-atomico) */
     uint32 bump_idx;             /* carve PREGUICOSO: proximo bloco nunca entregue */
+    uint32 state;                /* MEMOP_SPAN_AVAILABLE | MEMOP_SPAN_FULL */
 } MemSpan;
-/* sizeof(MemSpan) deve caber em MEMOP_SPAN_HEADER (64B): 5 ptr + 5 uint32 = 60 -> 64 */
+/* sizeof(MemSpan) deve caber em MEMOP_SPAN_HEADER (64B): 5 ptr + 6 uint32 = 64 */
+typedef char memop_span_header_fits[(sizeof(MemSpan) <= 64) ? 1 : -1];
 
 struct MemHeap
 {
-    MemSpan* spans[MEMOP_CLASS_COUNT];
+    MemSpan* spans[MEMOP_CLASS_COUNT];  /* AVAILABLE por classe (so spans uteis) */
+    /* Spans FULL (esgotados), fora do caminho do alloc. O refill checa ate K
+     * deles (round-robin) antes de criar span novo, p/ reaproveitar frees
+     * remotos que chegaram a spans cheios. */
+    MemSpan* full_head;
+    MemSpan* full_tail;
     uint32   id;
     int      active;
     MemHeap* hnext;
@@ -509,6 +523,7 @@ static MemSpan* span_create(MemHeap* heap, uint32 class_id)
     span->class_id = class_id;
     span->stride = stride;
     span->used = 0;
+    span->state = MEMOP_SPAN_AVAILABLE;
     /* Carve PREGUICOSO: blocos sao entregues incrementando bump_idx (sem escrever
      * a free-list inteira na criacao). So blocos LIBERADOS vao para local_free. */
     span->bump_idx = 0;
@@ -534,6 +549,7 @@ static uint32 span_drain_remote(MemSpan* span)
         n++;
         b = nx;
     }
+    span->used -= n;   /* contrato: o dono ajusta 'used' ao drenar (nao-atomico) */
     return n;
 }
 
@@ -599,14 +615,44 @@ static void heap_list_unlink(MemHeap* heap, uint32 class_id, MemSpan* span)
     span->prev = span->next = NULL;
 }
 
-/* Entrega um bloco da classe quando a cabeca nao tem local_free imediato.
- * Tenta, em ordem: bump da cabeca -> outro span com free/bump/remote -> span novo.
- * Promove o span util para a cabeca (fast path da proxima alloc) e ja faz used++. */
+/* Lista FULL do heap (dupla, com cauda p/ round-robin). So o dono toca. */
+static void heap_full_push_tail(MemHeap* heap, MemSpan* span)
+{
+    span->next = NULL;
+    span->prev = heap->full_tail;
+    if (heap->full_tail) heap->full_tail->next = span;
+    else                 heap->full_head = span;
+    heap->full_tail = span;
+    span->state = MEMOP_SPAN_FULL;
+}
+
+static void heap_full_unlink(MemHeap* heap, MemSpan* span)
+{
+    if (span->prev) span->prev->next = span->next;
+    else            heap->full_head = span->next;
+    if (span->next) span->next->prev = span->prev;
+    else            heap->full_tail = span->prev;
+    span->prev = span->next = NULL;
+    span->state = MEMOP_SPAN_AVAILABLE;
+}
+
+/* Quantos spans FULL checar (drain remoto) antes de criar span novo. */
+#ifndef MEMOP_FULL_SCAN_K
+#define MEMOP_FULL_SCAN_K 2
+#endif
+
+/* Entrega um bloco da classe quando a cabeca nao tem local_free/bump imediato.
+ * A lista da classe contem SO spans com blocos potenciais: spans esgotados sao
+ * movidos para a lista full do heap (fora do caminho do alloc) e voltam O(1)
+ * quando um free os reabastece. Antes de criar span novo, checa ate K spans
+ * full (round-robin) p/ reaproveitar frees remotos pendentes. */
 static MemFreeBlock* memop_refill(MemHeap* heap, uint32 class_id)
 {
     uint32   stride = g_class_stride[class_id];
     MemSpan* span = heap->spans[class_id];
     MemFreeBlock* b;
+    MemSpan* start;
+    int k;
 
     while (span)
     {
@@ -619,10 +665,45 @@ static MemFreeBlock* memop_refill(MemHeap* heap, uint32 class_id)
             goto got;
         }
         if (span_drain_remote(span) > 0) { b = span->local_free; span->local_free = b->next; goto got; }
-        span = span->next;
+        /* esgotado: sai da classe -> lista full (nao sera mais varrido) */
+        {
+            MemSpan* nx = span->next;
+            heap_list_unlink(heap, class_id, span);
+            heap_full_push_tail(heap, span);
+            span = nx;
+        }
     }
 
-    /* nenhum span util: cria um (carve preguicoso, O(1)) e entrega o 1o via bump */
+    /* classe sem span util: tenta reaproveitar ate K spans full (frees remotos
+     * pendentes) antes de pedir memoria nova; rotaciona p/ cobrir todos ao longo
+     * do tempo (round-robin amortizado O(1)). */
+    start = NULL;
+    for (k = 0; k < MEMOP_FULL_SCAN_K; k++)
+    {
+        MemSpan* fs = heap->full_head;
+        if (!fs || fs == start) break;
+        if (!start) start = fs;
+        if (span_drain_remote(fs) > 0)
+        {
+            heap_full_unlink(heap, fs);
+            heap_list_insert_head(heap, fs->class_id, fs);
+            if (fs->class_id == class_id)   /* serve a esta alloc? */
+            {
+                span = fs;
+                b = span->local_free;
+                span->local_free = b->next;
+                goto got;
+            }
+            continue;   /* reativou outra classe (conta no limite K) */
+        }
+        if (heap->full_tail != fs)          /* rotaciona: proximo refill checa outro */
+        {
+            heap_full_unlink(heap, fs);
+            heap_full_push_tail(heap, fs);
+        }
+    }
+
+    /* cria span novo (carve preguicoso, O(1)) e entrega o 1o bloco via bump */
     span = span_create(heap, class_id);
     if (!span) return NULL;
     heap_list_insert_head(heap, class_id, span);
@@ -661,6 +742,7 @@ static void* memop_alloc_large(MemHeap* heap, uint64 size)
     lspan->block_count = (uint32)units;
     lspan->used = 1;
     lspan->bump_idx = 0;   /* large nao usa bump; higiene (chunk reciclado) */
+    lspan->state = MEMOP_SPAN_AVAILABLE;   /* nunca lido p/ large; higiene */
     MEMOP_STAT(heap->s_alloc++);
     MEMOP_STAT(heap->s_span_allocs++);
     return (char*)mem + MEMOP_SPAN_HEADER;
@@ -759,9 +841,16 @@ void memop_free_raw(void* ptr)
         span->used--;
         MEMOP_STAT(g_heap->s_free++);
 
+        /* span estava FULL: religa na cabeca da classe, O(1) (rp/mimalloc).
+         * E isto que mantem a lista da classe so com spans uteis. */
+        if (span->state == MEMOP_SPAN_FULL)
+        {
+            heap_full_unlink(g_heap, span);                       /* -> AVAILABLE */
+            heap_list_insert_head(g_heap, span->class_id, span);
+        }
         /* span vazio: devolve ao cache global (reclamacao), mantendo ao menos
          * um span residente por classe para nao ficar realocando na fronteira. */
-        if (span->used == 0 && (span->prev || span->next))
+        else if (span->used == 0 && (span->prev || span->next))
         {
             heap_list_unlink(g_heap, span->class_id, span);
             chunk_release(g_heap, span);
@@ -909,6 +998,34 @@ void memop_on_ended_thread(const Thread* thr)
             span = next;
         }
         h->spans[c] = kept;
+    }
+    /* lista FULL: mesmo tratamento (drenar; vazios -> cache global; vivos ficam
+     * no heap morto ate o shutdown, recebendo frees remotos normalmente). */
+    {
+        MemSpan* span = h->full_head;
+        MemSpan* kept = NULL;
+        MemSpan* kept_tail = NULL;
+        h->full_head = h->full_tail = NULL;
+        while (span)
+        {
+            MemSpan* next = span->next;
+            span_drain_remote(span);
+            if (span->used == 0)
+            {
+                chunk_release(NULL, span);
+            }
+            else
+            {
+                span->next = NULL;
+                span->prev = kept_tail;
+                if (kept_tail) kept_tail->next = span;
+                else           kept = span;
+                kept_tail = span;
+            }
+            span = next;
+        }
+        h->full_head = kept;
+        h->full_tail = kept_tail;
     }
     chunk_local_to_global(h);   /* cache local da thread morta -> global */
 

@@ -135,6 +135,93 @@ static void test_span_growth(void)
     free(buffers);
 }
 
+/* TESTE 5: frees REMOTOS a spans cheios devem reativa-los (lista full ->
+ * classe) quando o dono volta a alocar, sem precisar criar spans novos. */
+typedef struct RemoteCtx
+{
+    MemBuffer* bufs;
+    volatile int ready;      /* worker terminou round 1            */
+    volatile int freed;      /* main liberou tudo (frees remotos)  */
+    volatile int round2_ok;  /* worker realocou tudo no round 2    */
+    uint64 refills_r1;       /* sync_refills apos o round 1        */
+} RemoteCtx;
+
+enum { RN = 3000 };   /* 3000 x 64B ~= 3 spans da classe 64 */
+
+#ifdef XPLATBASE_WIN
+static DWORD WINAPI remote_owner_fn(void* arg)
+#else
+static void* remote_owner_fn(void* arg)
+#endif
+{
+    RemoteCtx* ctx = (RemoteCtx*)arg;
+    MemPoolStats s;
+    int i, ok = 1;
+
+    for (i = 0; i < RN; i++)
+    {
+        ctx->bufs[i] = memop_alloc(64);
+        if (!ctx->bufs[i].Ptr) ok = 0;
+        else ((char*)ctx->bufs[i].Ptr)[0] = (char)i;
+    }
+    memop_get_stats(&s);
+    ctx->refills_r1 = s.sync_refills;
+    ctx->ready = 1;
+
+    while (!ctx->freed) thread_sleep0();
+
+    /* round 2: os blocos voltaram por free REMOTO; deve reaproveitar os spans
+     * reativados em vez de pedir memoria nova. */
+    for (i = 0; i < RN; i++)
+    {
+        ctx->bufs[i] = memop_alloc(64);
+        if (!ctx->bufs[i].Ptr) ok = 0;
+        else ((char*)ctx->bufs[i].Ptr)[0] = (char)(i + 1);
+    }
+    for (i = 0; i < RN; i++) memop_free(&ctx->bufs[i]);
+    ctx->round2_ok = ok;
+    return (xthread_result_t)0;
+}
+
+static void test_remote_free_reactivation(void)
+{
+    RemoteCtx ctx;
+    MemBuffer warm;
+    MemPoolStats s1, s2;
+    Thread* t;
+    int status = 0;
+    int i;
+
+    printf("\nTESTE 5: free remoto reativa spans cheios\n");
+    reset_pool();
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.bufs = (MemBuffer*)calloc(RN, sizeof(MemBuffer));
+
+    /* garante heap na main (stats de free remoto sao do heap do liberador) */
+    warm = memop_alloc(16);
+    memop_free(&warm);
+
+    t = thread_create(remote_owner_fn, &ctx, &status);
+    CHECK("thread dona criada", status == 1 && t != NULL);
+
+    while (!ctx.ready) thread_sleep0();
+
+    /* frees REMOTOS: main libera blocos cujo dono e o worker */
+    for (i = 0; i < RN; i++) memop_free(&ctx.bufs[i]);
+    memop_get_stats(&s1);
+    ctx.freed = 1;
+
+    thread_join(&t);
+    memop_get_stats(&s2);
+
+    CHECK("frees remotos contabilizados", s1.remote_frees >= (uint64)RN);
+    CHECK("round 2 realocou tudo", ctx.round2_ok == 1);
+    CHECK("reativou spans (sem criar novos)", s2.sync_refills <= ctx.refills_r1 + 1);
+
+    free(ctx.bufs);
+}
+
 int main(void)
 {
     printf("memory_pool_test\n");
@@ -143,6 +230,7 @@ int main(void)
     test_size_classes();
     test_thread_lane_lifecycle();
     test_span_growth();
+    test_remote_free_reactivation();
 
     memop_shutdown();
 
