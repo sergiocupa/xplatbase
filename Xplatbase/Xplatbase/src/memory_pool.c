@@ -27,6 +27,7 @@
 #include <malloc.h>
 #define MEMOP_TLS __declspec(thread)
 #else
+#include <time.h>
 #define MEMOP_TLS __thread
 #endif
 
@@ -101,15 +102,52 @@ struct MemHeap
 #define MEMOP_SEG_SPANS 64         /* 64 * 64KB = 4 MB por segmento do SO */
 #endif
 #define MEMOP_SEG_SIZE ((size_t)MEMOP_SEG_SPANS * MEMOP_SPAN_SIZE)
+#define MEMOP_SEG_MASK (~((uintptr_t)MEMOP_SEG_SIZE - 1u))
+/* chunk -> segmento por mascara (segmento e 4MB-alinhado, header no offset 0). */
+#define MEMOP_SEG_OF(p) ((MemSegment*)((uintptr_t)(p) & MEMOP_SEG_MASK))
 
-/* Um segmento = uma alocacao grande e alinhada do SO, fatiada em MEMOP_SEG_SPANS
- * chunks de 64KB. A memoria de um segmento NUNCA volta ao SO em runtime: fica
- * cacheada para reuso e so e liberada no shutdown (poucos mmap/commit, sem churn). */
+/* ---- Purga com atraso (devolve segmentos ociosos ao SO) ----------------
+ * Liga em 3 mecanismos para nao cair em "vale falso" (liberar memoria que
+ * sera reusada logo):
+ *   1) ATRASO: um segmento so e elegivel apos ficar ocioso > DELAY_MS.
+ *   2) AMORTIZACAO: o tamanho do cache entra numa media exponencial (EWMA)
+ *      antes de decidir -> picos transitorios nao disparam purga.
+ *   3) HISTERESE: comeca a purgar acima de HIGH e so para abaixo de LOW
+ *      -> evita thrash na fronteira de um unico limiar. */
+#ifndef MEMOP_PURGE_ENABLE
+#define MEMOP_PURGE_ENABLE 1
+#endif
+#ifndef MEMOP_PURGE_DELAY_MS
+#define MEMOP_PURGE_DELAY_MS 500u   /* ocioso > isto para virar elegivel */
+#endif
+#ifndef MEMOP_PURGE_PERIOD_MS
+#define MEMOP_PURGE_PERIOD_MS 100u  /* intervalo minimo entre avaliacoes */
+#endif
+#ifndef MEMOP_PURGE_EWMA_SHIFT
+#define MEMOP_PURGE_EWMA_SHIFT 2     /* alpha = 1/4 (suavizacao) */
+#endif
+#define MEMOP_MB_CHUNKS (uint32)((1024u*1024u)/MEMOP_SPAN_SIZE)  /* 16 chunks/MB */
+#ifndef MEMOP_PURGE_HIGH_MB
+#define MEMOP_PURGE_HIGH_MB 64u      /* cache suavizado acima disto -> purga */
+#endif
+#ifndef MEMOP_PURGE_LOW_MB
+#define MEMOP_PURGE_LOW_MB 32u       /* histerese: purga ate cair a isto */
+#endif
+#define MEMOP_PURGE_HIGH ((int)(MEMOP_PURGE_HIGH_MB * MEMOP_MB_CHUNKS))
+#define MEMOP_PURGE_LOW  ((int)(MEMOP_PURGE_LOW_MB  * MEMOP_MB_CHUNKS))
+
+/* Um segmento = uma alocacao de 4MB do SO, alinhada a 4MB, fatiada em
+ * MEMOP_SEG_SPANS chunks de 64KB. O HEADER mora no chunk 0 (offset 0), entao
+ * 'chunk -> segmento' e uma mascara O(1). Chunks 1..63 sao usaveis (63).
+ * Em runtime a memoria fica cacheada para reuso; segmentos OCIOSOS ha muito
+ * tempo sao devolvidos ao SO pela purga (alem do shutdown). */
 typedef struct MemSegment
 {
     struct MemSegment* next;
-    void*  base;               /* ponteiro original (span_os_alloc) p/ liberar */
-    uint32 next_chunk;         /* bump: proximo chunk de 64KB ainda nao entregue */
+    uint32 next_chunk;         /* bump: proximo chunk (1..63) nunca entregue */
+    uint32 live;               /* chunks doled atualmente FORA do cache global */
+    uint64 idle_since;         /* ms quando 'live' zerou (0 = em uso) */
+    uint32 doomed;             /* marca temporaria durante a purga */
 } MemSegment;
 
 typedef struct MemPool
@@ -125,7 +163,13 @@ typedef struct MemPool
     xmutex_t    cache_lock;
     void*       span_cache;   /* lista simples: link no offset 0 do chunk */
     int         cache_count;
-    MemSegment* segments;     /* todos os segmentos, liberados no shutdown */
+    MemSegment* segments;     /* todos os segmentos (libera no shutdown/purga) */
+
+    /* estado da purga (sob cache_lock) */
+    int    cache_avg;         /* EWMA de cache_count (amortizacao) */
+    int    purging;           /* modo histerese: 1 = purgando ate LOW */
+    uint64 last_purge_ms;     /* ultima avaliacao (throttle por PERIOD) */
+    uint64 purge_count;       /* segmentos devolvidos ao SO (stat) */
 } MemPool;
 
 /* Classes finas (~25% de passo): baixa fragmentacao interna sem sacrificar
@@ -162,6 +206,16 @@ static void* span_os_alloc(size_t size)
 #endif
 }
 
+/* Segmento de 4MB ALINHADO a 4MB (para 'chunk -> segmento' por mascara). */
+static void* seg_os_alloc(void)
+{
+#ifdef XPLATBASE_WIN
+    return _aligned_malloc(MEMOP_SEG_SIZE, MEMOP_SEG_SIZE);
+#else
+    return aligned_alloc(MEMOP_SEG_SIZE, MEMOP_SEG_SIZE);
+#endif
+}
+
 static void span_os_free(void* p)
 {
 #ifdef XPLATBASE_WIN
@@ -171,20 +225,32 @@ static void span_os_free(void* p)
 #endif
 }
 
+/* Relogio monotonico em milissegundos (resolucao grossa basta p/ a purga). */
+static uint64 memop_now_ms(void)
+{
+#ifdef XPLATBASE_WIN
+    return (uint64)GetTickCount64();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64)ts.tv_sec * 1000u + (uint64)(ts.tv_nsec / 1000000);
+#endif
+}
+
 /* Cache de chunks de 64KB em dois niveis:
  *   - por-thread (heap->local_cache): SEM lock, e o caminho normal (hot).
  *   - global (G.span_cache): so quando o local esgota/transborda; balanceia
  *     entre threads.
- * Quando ambos esgotam, dola-se um chunk por BUMP de um segmento grande do SO
- * (amortiza mmap/commit em MEMOP_SEG_SPANS chunks, sem tocar paginas a frente).
- * Nada volta ao SO ate o shutdown. */
+ * Quando ambos esgotam, dola-se um chunk por BUMP de um segmento (amortiza
+ * mmap/commit em ~63 chunks, sem tocar paginas a frente). 'seg->live' conta os
+ * chunks doled que NAO estao no cache global (em uso ou em cache local); quando
+ * zera, o segmento fica candidato a purga (devolucao ao SO). */
 static void* chunk_acquire(MemHeap* heap)
 {
     void* mem;
-    void* base;
     MemSegment* seg;
 
-    if (heap && heap->local_cache)
+    if (heap && heap->local_cache)   /* hot: cache local, sem lock e sem mudar 'live' */
     {
         mem = heap->local_cache;
         heap->local_cache = *(void**)mem;
@@ -193,59 +259,137 @@ static void* chunk_acquire(MemHeap* heap)
     }
 
     thread_mutex_lock(&G.cache_lock);
-    /* 1) chunk liberado (reuso de algo ja tocado) */
+    /* 1) chunk liberado (reuso) -> sai do cache global, entra em uso */
     if (G.span_cache)
     {
         mem = G.span_cache;
         G.span_cache = *(void**)mem;
         G.cache_count--;
+        MEMOP_SEG_OF(mem)->live++;
         thread_mutex_unlock(&G.cache_lock);
         return mem;
     }
-    /* 2) bump do segmento corrente: dola o proximo chunk SEM toca-lo (a pagina
-     *    so falha quando o chunk for realmente usado) -> sem storm de page fault. */
+    /* 2) bump do segmento corrente: dola o proximo chunk SEM toca-lo */
     if (G.segments && G.segments->next_chunk < MEMOP_SEG_SPANS)
     {
         seg = G.segments;
-        mem = (char*)seg->base + (size_t)seg->next_chunk * MEMOP_SPAN_SIZE;
+        mem = (char*)seg + (size_t)seg->next_chunk * MEMOP_SPAN_SIZE;
         seg->next_chunk++;
+        seg->live++;
         thread_mutex_unlock(&G.cache_lock);
         return mem;
     }
     thread_mutex_unlock(&G.cache_lock);
 
-    /* 3) segmento esgotado/inexistente: aloca um novo (1 chamada do SO p/ ate
-     *    MEMOP_SEG_SPANS chunks). chunk 0 vai pro chamador; o resto via bump. */
-    base = span_os_alloc(MEMOP_SEG_SIZE);
-    if (!base) return NULL;
-    seg = (MemSegment*)malloc(sizeof(MemSegment));
-    if (!seg) { span_os_free(base); return NULL; }
-    seg->base = base;
-    seg->next_chunk = 1;
+    /* 3) segmento novo (4MB do SO, alinhado). HEADER no chunk 0; entrega o chunk 1
+     *    ao chamador; chunks 2..63 ficam para bump. */
+    seg = (MemSegment*)seg_os_alloc();
+    if (!seg) return NULL;
+    seg->next_chunk = 2;
+    seg->live = 1;
+    seg->idle_since = 0;
+    seg->doomed = 0;
+    mem = (char*)seg + MEMOP_SPAN_SIZE;   /* chunk 1 */
 
     thread_mutex_lock(&G.cache_lock);
     seg->next = G.segments;
     G.segments = seg;
     thread_mutex_unlock(&G.cache_lock);
+    return mem;
+}
 
-    return base;   /* chunk 0 */
+/* Condena segmentos ociosos (live==0) e devolve os 4MB ao SO. Sob cache_lock.
+ *   force=1  -> trim explicito: ignora atraso e alvo (libera tudo ocioso agora).
+ *   force=0  -> automatico: respeita o ATRASO por segmento e para ao atingir 'target'. */
+static void purge_apply_locked(uint64 now, int force, int target)
+{
+    MemSegment** pp;
+    MemSegment*  doomed = NULL;
+    void**       link;
+
+    /* 1a passada: condena (desliga da lista de segmentos) */
+    pp = &G.segments;
+    while (*pp && (force || target > 0))
+    {
+        MemSegment* s = *pp;
+        if (s->live == 0 && (force || (now - s->idle_since) >= MEMOP_PURGE_DELAY_MS))
+        {
+            if (!force) target -= (int)(s->next_chunk - 1);  /* chunks doled (no cache) */
+            s->doomed = 1;
+            *pp = s->next;
+            s->next = doomed;
+            doomed = s;
+        }
+        else pp = &s->next;
+    }
+    if (!doomed) return;
+
+    /* 2a passada: extrai do cache global os chunks dos segmentos condenados */
+    link = &G.span_cache;
+    while (*link)
+    {
+        void* c = *link;
+        if (MEMOP_SEG_OF(c)->doomed) { *link = *(void**)c; G.cache_count--; }
+        else                          link = (void**)c;
+    }
+
+    /* devolve os 4MB ao SO (seg == base do segmento) */
+    while (doomed)
+    {
+        MemSegment* nx = doomed->next;
+        span_os_free(doomed);
+        G.purge_count++;
+        doomed = nx;
+    }
+}
+
+/* Avaliacao AUTOMATICA (piggyback no chunk_release). Throttle por PERIOD;
+ * amortizacao por EWMA; histerese HIGH/LOW; atraso por segmento. Sob cache_lock. */
+static void memop_purge_locked(uint64 now)
+{
+#if MEMOP_PURGE_ENABLE
+    int target;
+    if (now - G.last_purge_ms < MEMOP_PURGE_PERIOD_MS) return;
+    G.last_purge_ms = now;
+
+    /* amortizacao: media exponencial do tamanho do cache (nao reage a picos) */
+    G.cache_avg += (G.cache_count - G.cache_avg) / (1 << MEMOP_PURGE_EWMA_SHIFT);
+
+    /* histerese: liga acima de HIGH, desliga abaixo de LOW */
+    if (!G.purging) { if (G.cache_avg > MEMOP_PURGE_HIGH) G.purging = 1; else return; }
+    else            { if (G.cache_avg < MEMOP_PURGE_LOW)  { G.purging = 0; return; } }
+
+    target = G.cache_count - MEMOP_PURGE_LOW;   /* devolve ate cair a LOW */
+    if (target > 0) purge_apply_locked(now, 0, target);
+#else
+    (void)now;
+#endif
 }
 
 static void chunk_release(MemHeap* heap, void* mem)
 {
-    if (heap && heap->local_count < MEMOP_HEAP_CACHE_MAX)
+    MemSegment* seg;
+
+    if (heap && heap->local_count < MEMOP_HEAP_CACHE_MAX)   /* hot: local, sem lock */
     {
         *(void**)mem = heap->local_cache;
         heap->local_cache = mem;
         heap->local_count++;
         return;
     }
-    /* Excedente -> cache global. SEM devolucao ao SO: o chunk pertence a um
-     * segmento (liberado so no shutdown). Reuso vale mais que churn de mmap. */
+    /* Excedente -> cache global; o chunk volta a estar disponivel. */
     thread_mutex_lock(&G.cache_lock);
     *(void**)mem = G.span_cache;
     G.span_cache = mem;
     G.cache_count++;
+    seg = MEMOP_SEG_OF(mem);
+    if (seg->live > 0) seg->live--;
+    if (seg->live == 0)
+    {
+        uint64 now = memop_now_ms();
+        seg->idle_since = now;        /* inicia o relogio de ociosidade */
+        memop_purge_locked(now);
+    }
     thread_mutex_unlock(&G.cache_lock);
 }
 
@@ -274,7 +418,7 @@ static void segments_free_all(void)
     G.span_cache = NULL;   /* ponteiros p/ dentro dos segmentos: descartados */
     G.cache_count = 0;
     thread_mutex_unlock(&G.cache_lock);
-    while (s) { MemSegment* nx = s->next; span_os_free(s->base); free(s); s = nx; }
+    while (s) { MemSegment* nx = s->next; span_os_free(s); s = nx; }  /* seg == base */
 }
 
 static uint32 memop_align_up(uint32 v, uint32 a)
@@ -679,9 +823,21 @@ void memop_shutdown(void)
     atomic_set(&g_init_state, MEMOP_UNINIT);
 }
 
+/* Trim explicito (app-driven): devolve AGORA ao SO todos os segmentos ociosos,
+ * sem esperar o atraso/histerese. Util em pontos de ociosidade conhecidos. */
+void memop_purge(void)
+{
+    if (atomic_get(&g_init_state) != MEMOP_READY) return;
+    thread_mutex_lock(&G.cache_lock);
+    purge_apply_locked(memop_now_ms(), 1, 0);
+    thread_mutex_unlock(&G.cache_lock);
+}
+
 void memop_get_stats(MemPoolStats* out_stats)
 {
     MemHeap* h;
+    MemSegment* s;
+    uint64 segs = 0;
     if (!out_stats) return;
     memset(out_stats, 0, sizeof(*out_stats));
 
@@ -698,6 +854,13 @@ void memop_get_stats(MemPoolStats* out_stats)
     }
     /* async_* nao existem mais no v2 (mantidos 0 por compatibilidade de ABI) */
     memop_unlock();
+
+    thread_mutex_lock(&G.cache_lock);
+    for (s = G.segments; s; s = s->next) segs++;
+    out_stats->os_reserved_bytes = segs * (uint64)MEMOP_SEG_SIZE;
+    out_stats->cached_chunks     = (uint64)G.cache_count;
+    out_stats->purge_count       = G.purge_count;
+    thread_mutex_unlock(&G.cache_lock);
 }
 
 void memop_test_reset(void)

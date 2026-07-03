@@ -33,6 +33,9 @@ extern "C" {
         uint64 async_refills;
         uint64 async_requests;
         uint64 remote_frees;
+        uint64 os_reserved_bytes;  /* memoria 4MB-segment reservada do SO agora */
+        uint64 cached_chunks;      /* chunks de 64KB livres no cache global */
+        uint64 purge_count;        /* segmentos devolvidos ao SO pela purga */
     }
     MemPoolStats;
 
@@ -49,6 +52,10 @@ extern "C" {
 
     void memop_get_stats(MemPoolStats* out_stats);
     void memop_test_reset(void);
+
+    /* Trim explicito: devolve ao SO os segmentos ociosos agora (app-driven).
+     * A purga automatica (com atraso/histerese) roda sozinha; isto e opcional. */
+    void memop_purge(void);
 
     void memop_on_created_thread(const Thread* thr);
     void memop_on_ended_thread(const Thread* thr);
