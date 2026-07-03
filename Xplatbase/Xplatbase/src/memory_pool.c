@@ -24,10 +24,10 @@
 #include <stdint.h>
 
 #ifdef XPLATBASE_WIN
-#include <malloc.h>
 #define MEMOP_TLS __declspec(thread)
 #else
 #include <time.h>
+#include <sys/mman.h>
 #define MEMOP_TLS __thread
 #endif
 
@@ -211,12 +211,40 @@ static uint32 g_class_stride[MEMOP_CLASS_COUNT];
 /*  SO: alocacao de span alinhado a MEMOP_SPAN_SIZE                        */
 /* ----------------------------------------------------------------------- */
 
+/* Paginas DIRETO do SO (VirtualAlloc/mmap), sem o CRT heap no caminho:
+ *   - menos overhead por chamada (sem bookkeeping/headers do heap do CRT);
+ *   - _aligned_malloc(4MB,4MB) over-aloca p/ alinhar e nao apara as pontas
+ *     (~ate 4MB de commit charge desperdicado POR SEGMENTO); aqui nao.
+ * O commit e charge apenas: as paginas so viram RAM no primeiro toque. */
+
 static void* span_os_alloc(size_t size)
 {
 #ifdef XPLATBASE_WIN
-    return _aligned_malloc(size, MEMOP_SPAN_SIZE);
+    /* VirtualAlloc ja retorna alinhado a 64KB (granularidade do Windows) */
+    return VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #else
-    return aligned_alloc(MEMOP_SPAN_SIZE, size);
+    /* mmap alinha so a 4KB: over-mapeia e APARA as pontas (munmap parcial ok) */
+    size_t over = size + MEMOP_SPAN_SIZE;
+    char*  raw  = (char*)mmap(NULL, over, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    char*  base;
+    size_t pre, post;
+    if (raw == MAP_FAILED) return NULL;
+    base = (char*)(((uintptr_t)raw + (MEMOP_SPAN_SIZE - 1u)) & ~(uintptr_t)(MEMOP_SPAN_SIZE - 1u));
+    pre  = (size_t)(base - raw);
+    post = over - pre - size;
+    if (pre)  munmap(raw, pre);
+    if (post) munmap(base + size, post);
+    return base;
+#endif
+}
+
+static void span_os_free(void* p, size_t size)
+{
+#ifdef XPLATBASE_WIN
+    (void)size;
+    VirtualFree(p, 0, MEM_RELEASE);
+#else
+    munmap(p, size);
 #endif
 }
 
@@ -224,18 +252,36 @@ static void* span_os_alloc(size_t size)
 static void* seg_os_alloc(void)
 {
 #ifdef XPLATBASE_WIN
-    return _aligned_malloc(MEMOP_SEG_SIZE, MEMOP_SEG_SIZE);
+    int tries;
+    /* tentativa direta: frequentemente o SO ja devolve alinhado */
+    void* p = VirtualAlloc(NULL, MEMOP_SEG_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (p && (((uintptr_t)p & (MEMOP_SEG_SIZE - 1u)) == 0)) return p;
+    if (p) VirtualFree(p, 0, MEM_RELEASE);
+    /* over-RESERVA (sem commit, sem custo) p/ descobrir endereco alinhado e
+     * realoca fixo nele; corrida com outra thread -> tenta de novo */
+    for (tries = 0; tries < 8; tries++)
+    {
+        void* r = VirtualAlloc(NULL, MEMOP_SEG_SIZE * 2, MEM_RESERVE, PAGE_NOACCESS);
+        uintptr_t aligned;
+        if (!r) return NULL;
+        aligned = ((uintptr_t)r + (MEMOP_SEG_SIZE - 1u)) & ~(uintptr_t)(MEMOP_SEG_SIZE - 1u);
+        VirtualFree(r, 0, MEM_RELEASE);
+        p = VirtualAlloc((void*)aligned, MEMOP_SEG_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (p) return p;
+    }
+    return NULL;
 #else
-    return aligned_alloc(MEMOP_SEG_SIZE, MEMOP_SEG_SIZE);
-#endif
-}
-
-static void span_os_free(void* p)
-{
-#ifdef XPLATBASE_WIN
-    _aligned_free(p);
-#else
-    free(p);
+    size_t over = MEMOP_SEG_SIZE * 2;
+    char*  raw  = (char*)mmap(NULL, over, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    char*  base;
+    size_t pre, post;
+    if (raw == MAP_FAILED) return NULL;
+    base = (char*)(((uintptr_t)raw + (MEMOP_SEG_SIZE - 1u)) & ~(uintptr_t)(MEMOP_SEG_SIZE - 1u));
+    pre  = (size_t)(base - raw);
+    post = over - pre - MEMOP_SEG_SIZE;
+    if (pre)  munmap(raw, pre);
+    if (post) munmap(base + MEMOP_SEG_SIZE, post);
+    return base;
 #endif
 }
 
@@ -351,7 +397,7 @@ static void purge_apply_locked(uint64 now, int force, int target)
     while (doomed)
     {
         MemSegment* nx = doomed->next;
-        span_os_free(doomed);
+        span_os_free(doomed, MEMOP_SEG_SIZE);
         G.purge_count++;
         doomed = nx;
     }
@@ -432,7 +478,7 @@ static void segments_free_all(void)
     G.span_cache = NULL;   /* ponteiros p/ dentro dos segmentos: descartados */
     G.cache_count = 0;
     thread_mutex_unlock(&G.cache_lock);
-    while (s) { MemSegment* nx = s->next; span_os_free(s); s = nx; }  /* seg == base */
+    while (s) { MemSegment* nx = s->next; span_os_free(s, MEMOP_SEG_SIZE); s = nx; }  /* seg == base */
 }
 
 static uint32 memop_align_up(uint32 v, uint32 a)
@@ -826,7 +872,7 @@ void memop_free_raw(void* ptr)
     {
         MEMOP_STAT(if (g_heap) g_heap->s_free++);
         if (span->block_count == 1) chunk_release(g_heap, span); /* 64KB -> cache */
-        else                        span_os_free(span);          /* multi-unidade: SO */
+        else span_os_free(span, (size_t)span->block_count * MEMOP_SPAN_SIZE); /* multi-unidade: SO */
         return;
     }
 
