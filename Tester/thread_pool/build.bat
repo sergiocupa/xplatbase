@@ -14,7 +14,7 @@ if not exist obj mkdir obj
 
 set FLAGS=/nologo /O2 /MD /EHsc /std:c++17 /D_CRT_SECURE_NO_WARNINGS /DTBB_AVAILABLE /I "%SRC%" /I "..\..\Xplatbase\Xplatbase\include" /I "%TBB_DIR%\include"
 
-set SRCS=thread_pool_bench.cpp %SRC%\thread_pool.c %SRC%\ring_queue.c %SRC%\atomics.c %SRC%\thread_wait.c %SRC%\thread_activity_win.c %SRC%\xplatbase.c %SRC%\event_handler.c
+set SRCS=thread_pool_bench.cpp %SRC%\thread_pool.c %SRC%\ring_queue.c %SRC%\atomics.c %SRC%\thread_wait.c %SRC%\thread_handler.c %SRC%\list_hander.c %SRC%\memory_handler.c %SRC%\memory_pool.c %SRC%\thread_activity_win.c %SRC%\event_handler.c
 set LIBS=/link /LIBPATH:"%TBB_DIR%\lib" tbb12.lib DbgHelp.lib
 
 cl %FLAGS% %SRCS% /Fe:thread_pool_bench.exe /Fo:obj\ %LIBS%

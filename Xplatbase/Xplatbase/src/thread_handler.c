@@ -118,6 +118,10 @@ Thread* thread_create(xthread_func_t* func, void* arg, int* status)
     thr->Func.arg = arg;
     thr->Joined = 0;
 
+    /* garante a lista inicializada mesmo sem thread_init()/platform_init()
+     * (ex.: link sem o auto-init do CRT, ou LTCG que o descarta) */
+    thread_handler_init_once();
+
     thread_lock();
     xpb_list_add(&Threads, thr, Thread);
     thread_unlock();

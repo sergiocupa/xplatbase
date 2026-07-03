@@ -1,11 +1,15 @@
 /*
- * Tester/V2/thread_pool_bench.cpp
+ * Tester/thread_pool_bench.cpp
  *
- * Bench oficial: thread_pool (oficial: arena + core/reserva + elastico) vs TBB vs WinTP.
+ * Bench oficial: thread_pool (oficial V2.05) vs TBB vs WinTP.
+ * (As variantes por grupo g1..g4/all/final foram consolidadas no oficial;
+ *  historico de resultados nos thread_pool_bench_results_run*.tsv.)
  *
- * Tabelas (uma por cenario): flat-externo, spawn-arvore, os 18 classicos e
- * lento-misto. Colunas: latencias (us no console / ms no TSV), maxms = MEDIA das
- * rodadas, max10 = media dos 10 maiores, Mtask/s, tasks/s, cores, cpu%.
+ * Tabelas (uma por cenario): flat-externo, spawn-arvore, os classicos,
+ * malloc-default (tasks que alocam/liberam com malloc padrao) e lento-misto.
+ * Colunas: latencias (us no console / ms no TSV), maxms = MEDIA das rodadas,
+ * max10 = media dos 10 maiores, Mtask/s, tasks/s, cores, cpu%,
+ * xTBB/xWinTP = velocidade relativa (Mtask/s adapter / referencia; >1 = mais rapido).
  *
  * Build: build.bat   Run: thread_pool_bench.exe [reps] [N_flat]
  * Salva thread_pool_bench_results.tsv (ms, 6 casas, ponto decimal, tab).
@@ -20,12 +24,29 @@
 #include <atomic>
 #include <random>
 
-#include "thread_pool.h"   /* pool oficial */
+extern "C" {
+#include "thread_pool.h"                    /* pool oficial (V2.05) */
+#include "memory_pool.h"                    /* cenarios mempool/* (interacao) */
+#include "thread_handler.h"
+}
 
 #ifdef TBB_AVAILABLE
 #include <tbb/task_arena.h>
 #include <tbb/task_group.h>
 #include <tbb/global_control.h>
+#endif
+
+/* Stub: isola o bench do platform_init real (memory_pool WIP + pool global de
+ * 33 threads criado no CRT init). Mesmo padrao do bench/linux/bench_linux.c.
+ * xplatbase.c e memory_pool.c ficam FORA do link (ver build.bat). */
+extern "C" XPLATBASE_API void platform_init(void) {}
+
+#ifdef TBB_AVAILABLE
+/* global_control e process-wide no TBB; criar/destruir por rep gera crash
+ * intermitente no teardown (ver crash.log: tbb::detail::r1::create).
+ * Singleton criado no primeiro uso e nunca destruido. */
+static tbb::global_control* g_tbb_gc = nullptr;
+static void tbb_ensure_gc(int wk){ if (!g_tbb_gc) g_tbb_gc = new tbb::global_control(tbb::global_control::max_allowed_parallelism,(size_t)wk); }
 #endif
 
 static LARGE_INTEGER g_freq;
@@ -46,11 +67,68 @@ static CpuSnap cpu_snap(){ FILETIME c,e,k,u; GetProcessTimes(GetCurrentProcess()
 static double cpu_ms(CpuSnap a, CpuSnap b){ return (double)(b.t100ns-a.t100ns)/10000.0; }
 
 struct Res { double wall_ms,p50,p99,p999,maxv,max10,mtask_s,tasks_s,cores,cpu_pct; int wrk; };
-struct Scen { const char* name; int tasks; int wmin, wmax, long_every, long_us; };
+struct Scen { const char* name; int tasks; int wmin, wmax, long_every, long_us; int allocs; int alloc_pool; };
+
+/* ===================== API generica dos pools ===================== */
+struct PoolAPI {
+    void* (*create)(int);
+    void  (*destroy)(void*);
+    bool  (*submit)(void*, void(*)(void*), void*);
+    void  (*wait_idle)(void*);
+    void  (*dims)(void*, int*, int*);
+};
+
+#define MK_API(pfx, T, CRE, DES, SUB, WID, DIM)                                        \
+    static void* pfx##_cr(int c){ return (void*)CRE(c); }                             \
+    static void  pfx##_de(void* p){ DES((T*)p); }                                     \
+    static bool  pfx##_su(void* p, void(*f)(void*), void* a){ return SUB((T*)p,f,a) != 0; } \
+    static void  pfx##_wi(void* p){ WID((T*)p); }                                     \
+    static void  pfx##_dm(void* p,int* w,int* c){ DIM((T*)p,w,c); }
+
+MK_API(of, ThreadPool,   pool_create_relative, pool_destroy_relative, pool_submit_relative, pool_wait_idle_relative, pool_dims_relative)
+
+#define NPOOL 1
+static const PoolAPI POOLS[NPOOL] = {
+    { of_cr, of_de, of_su, of_wi, of_dm },
+};
+
+static const char* NM[] = {"oficial","TBB","WinTP"};
+#define NADAPT 3
 
 /* ===================== flat ===================== */
-struct BTask { LARGE_INTEGER enq, start; int work_us; std::atomic<int>* done; };
-static void task_body(BTask* t){ t->start=qpc_now(); precise_sleep_us(t->work_us); t->done->fetch_add(1,std::memory_order_relaxed); }
+struct BTask { LARGE_INTEGER enq, start; int work_us; int alloc_n; int alloc_pool; uint32_t alloc_seed; std::atomic<int>* done; };
+
+/* cenario malloc-default: aloca/escreve/libera com o malloc padrao do CRT */
+static void alloc_work(int n, uint32_t seed){
+    void* ptrs[16]; int k = n>16?16:n;
+    for (int i=0;i<k;i++){
+        uint32_t sz = 64u + (lcg(&seed) % 1985u);          /* 64..2048B */
+        ptrs[i]=malloc(sz);
+        if (ptrs[i]){ ((volatile char*)ptrs[i])[0]=(char)i; ((volatile char*)ptrs[i])[sz-1]=(char)sz; }
+    }
+    for (int i=0;i<k;i++) free(ptrs[i]);
+}
+
+/* cenario mempool: mesma carga, mas via memory_pool (memop_alloc_raw/free_raw).
+ * Objetivo: interacao thread_pool x memory_pool (lanes por worker, churn de
+ * threads, free remoto eventual), nao performance. */
+static void alloc_work_pool(int n, uint32_t seed){
+    void* ptrs[16]; int k = n>16?16:n;
+    for (int i=0;i<k;i++){
+        uint32_t sz = 64u + (lcg(&seed) % 1985u);          /* 64..2048B */
+        ptrs[i]=memop_alloc_raw(sz);
+        if (ptrs[i]){ ((volatile char*)ptrs[i])[0]=(char)i; ((volatile char*)ptrs[i])[sz-1]=(char)sz; }
+    }
+    for (int i=0;i<k;i++) memop_free_raw(ptrs[i]);
+}
+
+static void task_body(BTask* t){
+    t->start=qpc_now();
+    if      (t->alloc_n && t->alloc_pool) alloc_work_pool(t->alloc_n, t->alloc_seed);
+    else if (t->alloc_n)                  alloc_work(t->alloc_n, t->alloc_seed);
+    else                                  precise_sleep_us(t->work_us);
+    t->done->fetch_add(1,std::memory_order_relaxed);
+}
 static void tramp(void* a){ task_body((BTask*)a); }
 static VOID CALLBACK wintp_simple(PTP_CALLBACK_INSTANCE,PVOID a){ task_body((BTask*)a); }
 static void drain_counter(std::atomic<int>& d,int n){ while(d.load(std::memory_order_acquire)<n) Sleep(0); }
@@ -62,6 +140,9 @@ static void fill_work(std::vector<BTask>& T, const Scen& s){
         if (s.wmax>s.wmin){ int span=s.wmax-s.wmin+1; w=s.wmin+(int)(lcg(&rnd)%(uint32_t)span); }
         if (s.long_every>0 && (i%s.long_every)==0) w=s.long_us;
         T[i].work_us=w;
+        T[i].alloc_n=s.allocs;
+        T[i].alloc_pool=s.alloc_pool;
+        T[i].alloc_seed=0x9E3779B9u*(uint32_t)(i+1);
     }
 }
 static void finish(Res& r, double wall, CpuSnap c0, CpuSnap c1, std::vector<double>& lat, int tasks){
@@ -90,15 +171,22 @@ static Res run_flat(const Scen& s, int wrk, CR cr, SU su, DE de){
     finish(r,qpc_ms(t0,t1),c0,c1,lat,tasks);
     return r;
 }
-static Res flat_pool(const Scen& s){ ThreadPool*p=nullptr;int w=0,c=0; Res r=run_flat(s,0,[&]{p=pool_create_relative(0);pool_dims_relative(p,&w,&c);},[&](BTask*t){while(!pool_submit_relative(p,tramp,t)){}},[&]{pool_destroy_relative(p);}); r.wrk=w; return r; }
+static Res flat_pool(const Scen& s, const PoolAPI& api){
+    void* p=nullptr; int w=0,c=0;
+    Res r=run_flat(s,0,
+        [&]{p=api.create(0);api.dims(p,&w,&c);},
+        [&](BTask*t){while(!api.submit(p,tramp,t)){}},
+        [&]{api.destroy(p);});
+    r.wrk=w; return r;
+}
 static Res flat_wintp(const Scen& s,int wk){ PTP_POOL p=nullptr; TP_CALLBACK_ENVIRON e;
     return run_flat(s,wk,[&]{p=CreateThreadpool(NULL);SetThreadpoolThreadMaximum(p,(DWORD)wk);SetThreadpoolThreadMinimum(p,(DWORD)wk);InitializeThreadpoolEnvironment(&e);SetThreadpoolCallbackPool(&e,p);},
         [&](BTask*t){while(!TrySubmitThreadpoolCallback(wintp_simple,t,&e))Sleep(0);}, [&]{DestroyThreadpoolEnvironment(&e);CloseThreadpool(p);}); }
 static Res flat_tbb(const Scen& s,int wk){
 #ifdef TBB_AVAILABLE
-    tbb::global_control*gc=nullptr; tbb::task_arena*ar=nullptr;
-    return run_flat(s,wk,[&]{gc=new tbb::global_control(tbb::global_control::max_allowed_parallelism,(size_t)wk);ar=new tbb::task_arena(wk);ar->initialize();},
-        [&](BTask*t){ar->enqueue([t]{task_body(t);});}, [&]{delete ar;delete gc;});
+    tbb::task_arena*ar=nullptr;
+    return run_flat(s,wk,[&]{tbb_ensure_gc(wk);ar=new tbb::task_arena(wk);ar->initialize();},
+        [&](BTask*t){ar->enqueue([t]{task_body(t);});}, [&]{delete ar;});
 #else
     Res r; memset(&r,0,sizeof(r)); return r;
 #endif
@@ -122,7 +210,7 @@ struct SpawnCtx;
 struct NodeArg { SpawnCtx* ctx; int idx; LARGE_INTEGER enq, start; };
 struct SpawnCtx {
     const Tree* tree; NodeArg* args; std::atomic<long long>* outstanding; int adapter;
-    ThreadPool* pool; PTP_CALLBACK_ENVIRON env;
+    const PoolAPI* papi; void* pph; PTP_CALLBACK_ENVIRON env;
 #ifdef TBB_AVAILABLE
     tbb::task_group* tg;
 #endif
@@ -130,14 +218,14 @@ struct SpawnCtx {
 static void node_run(NodeArg* na);
 static void node_tramp(void* a){ node_run((NodeArg*)a); }
 static VOID CALLBACK node_wintp(PTP_CALLBACK_INSTANCE,PVOID a){ node_run((NodeArg*)a); }
-static void submit_child(SpawnCtx* c, int idx){       /* adapter: 0 oficial, 1 TBB, 2 WinTP */
+static void submit_child(SpawnCtx* c, int idx){   /* adapter: 0..5 pools, 6 TBB, 7 WinTP */
     NodeArg* na=&c->args[idx]; na->ctx=c; na->idx=idx;
     c->outstanding->fetch_add(1,std::memory_order_relaxed);
     QueryPerformanceCounter(&na->enq);
     int a=c->adapter;
-    if (a==0) { while(!pool_submit_relative(c->pool,node_tramp,na)){} }
+    if (a<NPOOL) { while(!c->papi->submit(c->pph,node_tramp,na)){} }
 #ifdef TBB_AVAILABLE
-    else if (a==1) { c->tg->run([na]{ node_run(na); }); }
+    else if (a==NPOOL) { c->tg->run([na]{ node_run(na); }); }
 #endif
     else { while(!TrySubmitThreadpoolCallback(node_wintp,na,c->env))Sleep(0); }
 }
@@ -152,27 +240,27 @@ static Res spawn_once(int adapter, const Tree& tree, NodeArg* args, int cpus){
     SpawnCtx ctx; memset(&ctx,0,sizeof(ctx));
     ctx.tree=&tree; ctx.args=args; ctx.outstanding=&outstanding; ctx.adapter=adapter;
     int wrk=cpus;
-    ThreadPool* pp=nullptr; PTP_POOL wp=nullptr; TP_CALLBACK_ENVIRON env;
+    void* pp=nullptr; PTP_POOL wp=nullptr; TP_CALLBACK_ENVIRON env;
 #ifdef TBB_AVAILABLE
-    tbb::global_control*gc=nullptr; tbb::task_arena*ar=nullptr; tbb::task_group tg;
+    tbb::task_arena*ar=nullptr; tbb::task_group tg;
 #endif
-    if (adapter==0){ pp=pool_create_relative(0); ctx.pool=pp; int l; pool_dims_relative(pp,&wrk,&l); }
+    if (adapter<NPOOL){ ctx.papi=&POOLS[adapter]; pp=ctx.papi->create(0); ctx.pph=pp; int l; ctx.papi->dims(pp,&wrk,&l); }
 #ifdef TBB_AVAILABLE
-    else if (adapter==1){ gc=new tbb::global_control(tbb::global_control::max_allowed_parallelism,(size_t)cpus); ar=new tbb::task_arena(cpus); ar->initialize(); ctx.tg=&tg; wrk=cpus; }
+    else if (adapter==NPOOL){ tbb_ensure_gc(cpus); ar=new tbb::task_arena(cpus); ar->initialize(); ctx.tg=&tg; wrk=cpus; }
 #endif
     else { wp=CreateThreadpool(NULL); SetThreadpoolThreadMaximum(wp,(DWORD)cpus); SetThreadpoolThreadMinimum(wp,(DWORD)cpus); InitializeThreadpoolEnvironment(&env); SetThreadpoolCallbackPool(&env,wp); ctx.env=&env; wrk=cpus; }
 
     CpuSnap c0=cpu_snap(); LARGE_INTEGER t0=qpc_now();
 #ifdef TBB_AVAILABLE
-    if (adapter==1){ ar->execute([&]{ submit_child(&ctx,0); tg.wait(); }); }
+    if (adapter==NPOOL){ ar->execute([&]{ submit_child(&ctx,0); tg.wait(); }); }
     else
 #endif
     { submit_child(&ctx,0); while(outstanding.load(std::memory_order_acquire)>0) Sleep(0); }
     LARGE_INTEGER t1=qpc_now(); CpuSnap c1=cpu_snap();
 
-    if (adapter==0) pool_destroy_relative(pp);
+    if (adapter<NPOOL) ctx.papi->destroy(pp);
 #ifdef TBB_AVAILABLE
-    else if (adapter==1){ delete ar; delete gc; }
+    else if (adapter==NPOOL){ delete ar; }
 #endif
     else { DestroyThreadpoolEnvironment(&env); CloseThreadpool(wp); }
 
@@ -184,9 +272,6 @@ static Res spawn_once(int adapter, const Tree& tree, NodeArg* args, int cpus){
 }
 
 /* ===================== driver ===================== */
-static const char* NM[3]={"oficial","TBB","WinTP"};
-#define NADAPT 3
-
 struct Row { char name[64]; Res r[NADAPT]; };
 static std::vector<Row> g_rows;
 static void record_row(const char* name, Res* res){
@@ -195,14 +280,21 @@ static void record_row(const char* name, Res* res){
     g_rows.push_back(row);
 }
 static const char* f6(char* buf, double v){ snprintf(buf,32,"%.6f",v); return buf; }
+/* velocidade relativa (Mtask/s do adapter / Mtask/s da referencia); >1 = mais rapido */
+static double rel_speed(const Res& r, const Res& ref){ return ref.mtask_s>0 ? r.mtask_s/ref.mtask_s : 0.0; }
+
 static void write_tsv(const char* path){
     FILE* f=fopen(path,"w"); if(!f){ fprintf(stderr,"nao abriu %s\n",path); return; }
-    fprintf(f,"scenario\tadapter\twrk\twall_ms\tp50_ms\tp99_ms\tp999_ms\tmax_ms\tmax10_ms\tMtask_s\ttasks_s\tcores\tcpu_pct\n");
+    fprintf(f,"scenario\tadapter\twrk\twall_ms\tp50_ms\tp99_ms\tp999_ms\tmax_ms\tmax10_ms\tMtask_s\ttasks_s\tcores\tcpu_pct\txTBB\txWinTP\n");
     char b[16][32];
-    for(const Row& row: g_rows) for(int i=0;i<NADAPT;i++){ const Res& r=row.r[i];
-        fprintf(f,"%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-            row.name, NM[i], r.wrk, f6(b[0],r.wall_ms), f6(b[1],r.p50), f6(b[2],r.p99), f6(b[3],r.p999),
-            f6(b[4],r.maxv), f6(b[5],r.max10), f6(b[6],r.mtask_s), f6(b[7],r.tasks_s), f6(b[8],r.cores), f6(b[9],r.cpu_pct)); }
+    for(const Row& row: g_rows){
+        const Res& tbb=row.r[NADAPT-2]; const Res& wtp=row.r[NADAPT-1];
+        for(int i=0;i<NADAPT;i++){ const Res& r=row.r[i];
+            fprintf(f,"%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+                row.name, NM[i], r.wrk, f6(b[0],r.wall_ms), f6(b[1],r.p50), f6(b[2],r.p99), f6(b[3],r.p999),
+                f6(b[4],r.maxv), f6(b[5],r.max10), f6(b[6],r.mtask_s), f6(b[7],r.tasks_s), f6(b[8],r.cores), f6(b[9],r.cpu_pct),
+                f6(b[10],rel_speed(r,tbb)), f6(b[11],rel_speed(r,wtp))); }
+    }
     fclose(f);
     fprintf(stderr,"\n>> resultados salvos em: %s  (TSV, ms, 6 casas, ponto decimal)\n",path); fflush(stderr);
 }
@@ -219,19 +311,20 @@ static void aggregate(Res* out, std::vector<Res>* per){
 }
 static void print_table(const char* title, Res* res){
     printf("\n=== %s ===\n",title);
-    printf("%-8s %4s %9s %9s %9s %9s %9s %9s %10s %12s %7s %7s\n",
-        "adapter","wrk","wall_ms","p50us","p99us","p999us","maxms","max10ms","Mtask/s","tasks/s","cores","cpu%");
-    printf("---------------------------------------------------------------------------------------------------------------------\n");
+    printf("%-8s %4s %9s %9s %9s %9s %9s %9s %10s %12s %7s %7s %7s %7s\n",
+        "adapter","wrk","wall_ms","p50us","p99us","p999us","maxms","max10ms","Mtask/s","tasks/s","cores","cpu%","xTBB","xWinTP");
+    printf("-------------------------------------------------------------------------------------------------------------------------------------\n");
     for(int i=0;i<NADAPT;i++)
-        printf("%-8s %4d %9.2f %9.3f %9.3f %9.3f %9.3f %9.3f %10.4f %12.0f %7.2f %7.1f\n",
+        printf("%-8s %4d %9.2f %9.3f %9.3f %9.3f %9.3f %9.3f %10.4f %12.0f %7.2f %7.1f %7.2f %7.2f\n",
             NM[i],res[i].wrk,res[i].wall_ms,res[i].p50*1000,res[i].p99*1000,res[i].p999*1000,res[i].maxv,res[i].max10,
-            res[i].mtask_s,res[i].tasks_s,res[i].cores,res[i].cpu_pct);
+            res[i].mtask_s,res[i].tasks_s,res[i].cores,res[i].cpu_pct,
+            rel_speed(res[i],res[NADAPT-2]),rel_speed(res[i],res[NADAPT-1]));
     record_row(title,res);
 }
 static void bench_flat(const Scen& s, int reps, int cpus){
     std::vector<Res> per[NADAPT];
     for(int rep=0;rep<reps;rep++) for(int a=0;a<NADAPT;a++){
-        Res r = a==0?flat_pool(s): a==1?flat_tbb(s,cpus): flat_wintp(s,cpus);
+        Res r = a<NPOOL ? flat_pool(s,POOLS[a]) : a==NPOOL ? flat_tbb(s,cpus) : flat_wintp(s,cpus);
         per[a].push_back(r);
         fprintf(stderr,"    [%s/%s] rep %d/%d  wall=%.1fms  %.3f Mtask/s  cpu=%.0f%%\n",s.name,NM[a],rep+1,reps,r.wall_ms,r.mtask_s,r.cpu_pct); fflush(stderr);
     }
@@ -245,8 +338,14 @@ int main(int argc,char**argv){
     g_cpus=logical_cpus();
     printf("CPUs=%d  reps=%d  N_flat=%d\n",g_cpus,reps,Nflat); fflush(stdout);
 
+    /* memory_pool: init + hooks de thread — todo worker de todo pool criado no
+     * bench ganha/perde lane (interacao thread_pool x memory_pool). Threads do
+     * TBB/WinTP nao passam pelos hooks e usam o fallback lazy do memop. */
+    memop_init();
+    thread_init(memop_on_created_thread, memop_on_ended_thread);
+
     fprintf(stderr,"\n## flat-externo\n"); fflush(stderr);
-    { Scen s={"flat-externo",Nflat,0,0,0,0}; bench_flat(s,reps,g_cpus); }
+    { Scen s={"flat-externo",Nflat,0,0,0,0,0}; bench_flat(s,reps,g_cpus); }
 
     fprintf(stderr,"\n## spawn-arvore\n"); fflush(stderr);
     {
@@ -262,29 +361,45 @@ int main(int argc,char**argv){
     }
 
     static Scen SCN[] = {
-        {"rapida/baixa",         20000,  0,  0,   0,   0},
-        {"rapida/media",         60000,  0,  0,   0,   0},
-        {"rapida/alta",         120000,  0,  0,   0,   0},
-        {"rapida/ultra",        180000,  0,  0,   0,   0},
-        {"media/baixa",          20000, 15, 25,   0,   0},
-        {"media/media",          60000, 15, 35,   0,   0},
-        {"media/alta",          120000, 15, 45,   0,   0},
-        {"media/ultra",         180000, 15, 55,   0,   0},
-        {"mista/baixa",          20000,  0,  5,  16, 250},
-        {"mista/media",          60000,  0,  5,  16, 300},
-        {"mista/alta",          120000,  0,  5,  16, 350},
-        {"mista/ultra",         180000,  0,  5,  16, 400},
-        {"satur/alta",          160000,  0,  0,   0,   0},
-        {"satur/ultra",         240000,  0,  0,   0,   0},
-        {"rajada-curta/media",   60000,  0,  0,   0,   0},
-        {"rajada-mista/media",   60000,  0,  5,  12, 300},
-        {"mista-massiva/alta",  180000,  0,  8,  24, 500},
-        {"mista-massiva/ultra", 240000,  0,  8,  24, 600},
-        {"lento-misto",           4000,  0,  0,   2, 8000},
+        {"rapida/baixa",         20000,  0,  0,   0,   0, 0},
+        {"rapida/media",         60000,  0,  0,   0,   0, 0},
+        {"rapida/alta",         120000,  0,  0,   0,   0, 0},
+        {"rapida/ultra",        180000,  0,  0,   0,   0, 0},
+        {"media/baixa",          20000, 15, 25,   0,   0, 0},
+        {"media/media",          60000, 15, 35,   0,   0, 0},
+        {"media/alta",          120000, 15, 45,   0,   0, 0},
+        {"media/ultra",         180000, 15, 55,   0,   0, 0},
+        {"mista/baixa",          20000,  0,  5,  16, 250, 0},
+        {"mista/media",          60000,  0,  5,  16, 300, 0},
+        {"mista/alta",          120000,  0,  5,  16, 350, 0},
+        {"mista/ultra",         180000,  0,  5,  16, 400, 0},
+        {"satur/alta",          160000,  0,  0,   0,   0, 0},
+        {"satur/ultra",         240000,  0,  0,   0,   0, 0},
+        {"rajada-curta/media",   60000,  0,  0,   0,   0, 0},
+        {"rajada-mista/media",   60000,  0,  5,  12, 300, 0},
+        {"mista-massiva/alta",  180000,  0,  8,  24, 500, 0},
+        {"mista-massiva/ultra", 240000,  0,  8,  24, 600, 0},
+        {"malloc-default/media", 60000,  0,  0,   0,   0, 8, 0},
+        {"malloc-default/alta", 120000,  0,  0,   0,   0, 8, 0},
+        {"mempool/media",        60000,  0,  0,   0,   0, 8, 1},
+        {"mempool/alta",        120000,  0,  0,   0,   0, 8, 1},
+        {"lento-misto",           4000,  0,  0,   2, 8000, 0, 0},
     };
     int nscn=(int)(sizeof(SCN)/sizeof(SCN[0]));
     for(int i=0;i<nscn;i++){ fprintf(stderr,"\n## %s\n",SCN[i].name); fflush(stderr); bench_flat(SCN[i],reps,g_cpus); }
 
     write_tsv("thread_pool_bench_results.tsv");
+
+    /* evidencia da interacao: lanes/allocs/frees devem estar pareados */
+    {
+        MemPoolStats st; memop_get_stats(&st);
+        printf("\n== memory_pool stats ==\n");
+        printf("lanes criadas/destruidas : %llu / %llu\n",(unsigned long long)st.lanes_created,(unsigned long long)st.lanes_destroyed);
+        printf("alloc/free               : %llu / %llu\n",(unsigned long long)st.alloc_count,(unsigned long long)st.free_count);
+        printf("frees remotos            : %llu\n",(unsigned long long)st.remote_frees);
+        printf("refills sync/async       : %llu / %llu (req async %llu)\n",(unsigned long long)st.sync_refills,(unsigned long long)st.async_refills,(unsigned long long)st.async_requests);
+        printf("reservado do SO / cache  : %llu KB / %llu chunks (purgas %llu)\n",(unsigned long long)(st.os_reserved_bytes/1024),(unsigned long long)st.cached_chunks,(unsigned long long)st.purge_count);
+        fflush(stdout);
+    }
     return 0;
 }

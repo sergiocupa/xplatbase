@@ -1,0 +1,19 @@
+
+=== CRASH DETECTADO ===
+Signal: 11 (SIGSEGV)
+Stack trace:
+  0: platform_init (0x7ff7b09ba900)
+  1: platform_init (0x7ff7b09ba900)
+  2: seh_filter_exe (0x7ffcaf4c0cc0)
+  3: platform_init (0x7ff7b09ba900)
+  4: _C_specific_handler (0x7ffc9694a920)
+  5: _chkstk (0x7ffcb19d2850)
+  6: RtlRaiseException (0x7ffcb19820d0)
+  7: KiUserExceptionDispatcher (0x7ffcb19d1450)
+  8: std::_Tree<std::_Tset_traits<tbb::detail::d1::global_control *,tbb::detail::r1::control_storage_comparator,tbb::detail::d1::tbb_allocator<tbb::detail::d1::global_control *>,0> >::_Find_lower_bound<tbb::detail::d1::global_control *> (0x7ffc8352bdd0)
+  9: tbb::detail::r1::create (0x7ffc8352b8c0)
+  10: tbb::detail::r1::create (0x7ffc8352b8c0)
+  11: tbb::detail::r1::create (0x7ffc8352b8c0)
+  12: platform_init (0x7ff7b09ba900)
+  13: BaseThreadInitThunk (0x7ffcafa17360)
+  14: RtlUserThreadStart (0x7ffcb197cc70)

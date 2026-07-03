@@ -1,13 +1,15 @@
 /*
- * thread_pool.h  — pool OFICIAL (consolidacao do design V2.03).
+ * thread_pool.h  — pool OFICIAL (design consolidado V2.05).
  *
  *   Work-stealing estilo ARENA + core/reserva + worker elastico:
  *     - Submit EXTERNO vai para G filas MPMC COMPARTILHADAS (shards = cores/4),
  *       round-robin; qualquer worker puxa de qualquer shard (task nao fica presa
- *       a um dono). Em regime quente os workers se auto-servem e o produtor so
- *       enfileira (acorda alguem so se houver core parqueado) -> submit barato.
- *     - Spawn (submit reentrante, de dentro de uma task) usa o deque Chase-Lev
- *       LOCAL do worker (push/take sem CAS). Steal entre deques.
+ *       a um dono). Ring Vyukov tipado inline (V2.05); consumidores reservam ate
+ *       POOL_BATCH tasks por CAS. Em regime quente os workers se auto-servem e o
+ *       produtor so enfileira (acorda alguem so se houver core parqueado).
+ *     - Spawn (submit reentrante, de dentro de uma task) vai para o LIFO slot
+ *       nao-roubavel do worker (V2.05, cache quente) com overflow para o deque
+ *       Chase-Lev LOCAL (push/take sem CAS). Steal entre deques.
  *     - core/reserva: n_core = cores*7/10 spinam e sao acordados pelo submit;
  *       os demais (reserva) sao park-first e so engajam sob backlog -> flat
  *       ~75% CPU + cauda baixa; spawn usa todos os cores.
@@ -21,7 +23,8 @@
  *
  *   Tunables (-D): POOL_CORE_NUM/DEN (7/10), POOL_ELASTIC_NUM/DEN (1/1),
  *   POOL_SHARD_DIV (4), POOL_SHARD_CAP, POOL_DEQUE_CAP, POOL_MON_MS (5),
- *   POOL_STUCK_MIN (2), POOL_SPIN_PAUSE/_YIELD/_SLEEP0.
+ *   POOL_STUCK_MIN (2), POOL_SPIN_PAUSE/_YIELD/_SLEEP0,
+ *   POOL_BATCH (2, V2.05), POOL_LIFO_CAP (8, V2.05).
  */
 
 #ifndef THREAD_POOL_H

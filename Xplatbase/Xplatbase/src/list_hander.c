@@ -1,4 +1,4 @@
-//  MIT License – Modified for Mandatory Attribution
+//  MIT License ï¿½ Modified for Mandatory Attribution
 //  
 //  Copyright(c) 2025 Sergio Paludo
 //
@@ -7,8 +7,8 @@
 //  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, 
 //  to use, copy, modify, merge, publish, distribute, and sublicense the software, including for commercial purposes, provided that:
 //  
-//     01. The original author’s credit is retained in all copies of the source code;
-//     02. The original author’s credit is included in any code generated, derived, or distributed from this software, including templates, libraries, or code - generating scripts.
+//     01. The original authorï¿½s credit is retained in all copies of the source code;
+//     02. The original authorï¿½s credit is included in any code generated, derived, or distributed from this software, including templates, libraries, or code - generating scripts.
 //  
 //  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 
@@ -26,8 +26,11 @@ void xpb_list_init_ext(ListXPB* list, int32 initial_count, uint64 type_size, con
     list->Max      = initial_count >= 0 ? initial_count : INITIAL_LIST_COUNT;
     list->Count    = 0;
 
-    int rs = allocate(list->Max * sizeof(void*), &list->Items);
-    if (rs < 0)
+    /* Items e o VETOR de ponteiros em si; allocate() devolvia o header
+     * BufferXPB (40B) aqui, e cada Items[i] escrevia dentro/alem do header
+     * -> corrupcao de heap a cada add (crashes intermitentes 0xC0000005). */
+    list->Items = (void**)malloc((size_t)list->Max * sizeof(void*));
+    if (!list->Items)
     {
         CallContextGlobalEvent ctx = { func, file, line };
         xpb_event_trigger_error(&ctx, "Falha ao alocar %zu itens para a lista.", list->Max);
@@ -66,7 +69,7 @@ void xpb_list_add_ext(ListXPB* list, void* instance, uint64 type_size, const cha
     if (type_size != list->TypeSize)
     {
         CallContextGlobalEvent ctx = { func, file, line };
-        xpb_event_trigger_error(&ctx, "Item a ser adicionado na lista com tamanho inválido. Informado: %zu | Esperado: %zu", type_size, list->TypeSize);
+        xpb_event_trigger_error(&ctx, "Item a ser adicionado na lista com tamanho invï¿½lido. Informado: %zu | Esperado: %zu", type_size, list->TypeSize);
         return;
     }
 
@@ -75,11 +78,12 @@ void xpb_list_add_ext(ListXPB* list, void* instance, uint64 type_size, const cha
     {
         list->Max  *= 2;
 
-        int rz = reallocate_pointer(list->Max, &list->Items);
+        /* tamanho em BYTES (faltava * sizeof(void*): realloc encolhia o vetor) */
+        int rz = reallocate_pointer(list->Max * sizeof(void*), (void**)&list->Items);
         if (rz < 0)
         {
             CallContextGlobalEvent ctx = { func, file, line };
-            xpb_event_trigger_error(&ctx, "Não foi possível realocar novo tamanho dos itens. Informado: %zu | Esperado: %zu", type_size, list->TypeSize);
+            xpb_event_trigger_error(&ctx, "Nï¿½o foi possï¿½vel realocar novo tamanho dos itens. Informado: %zu | Esperado: %zu", type_size, list->TypeSize);
             return;
         }
     }
