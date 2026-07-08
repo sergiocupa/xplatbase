@@ -183,7 +183,7 @@ static __declspec(thread) V3Worker* g_v3_self;
 static __thread V3Worker* g_v3_self;
 #endif
 
-static void v3_run(WSPoolV3* pool, V3Task* t){ t->fn(t->arg); atomic_sub(&pool->pending,1); }
+static void v3_run(WSPoolV3* pool, V3Task* t){ t->fn(t->arg); atomic_sub_inline(&pool->pending,1); }
 
 /* move ate BATCH itens do inbox proprio para o deque proprio. retorna nº movido. */
 static int v3_drain_inbox(V3Worker* self){
@@ -223,22 +223,22 @@ static bool v3_try_get(WSPoolV3* pool, V3Worker* self, V3Task* out){
 }
 
 static bool v3_spin(WSPoolV3* pool, V3Worker* self, V3Task* out){
-    for (int i=0;i<V3_SPIN_PAUSE;i++){ if (v3_try_get(pool,self,out)) return true; if (atomic_get(&pool->stop)) return false; xcpu_pause(); }
-    for (int i=0;i<V3_SPIN_YIELD;i++){ if (v3_try_get(pool,self,out)) return true; if (atomic_get(&pool->stop)) return false; v3_yield(); }
-    for (int i=0;i<V3_SPIN_SLEEP0;i++){ if (v3_try_get(pool,self,out)) return true; if (atomic_get(&pool->stop)) return false; v3_sleep0(); }
+    for (int i=0;i<V3_SPIN_PAUSE;i++){ if (v3_try_get(pool,self,out)) return true; if (atomic_get_inline(&pool->stop)) return false; xcpu_pause(); }
+    for (int i=0;i<V3_SPIN_YIELD;i++){ if (v3_try_get(pool,self,out)) return true; if (atomic_get_inline(&pool->stop)) return false; v3_yield(); }
+    for (int i=0;i<V3_SPIN_SLEEP0;i++){ if (v3_try_get(pool,self,out)) return true; if (atomic_get_inline(&pool->stop)) return false; v3_sleep0(); }
     return false;
 }
 
 static V3_FN v3_worker_fn(void* raw){
     V3Worker* self=(V3Worker*)raw; WSPoolV3* pool=self->pool; V3Task t;
     g_v3_self = self;   /* marca esta thread como worker (submit reentrante) */
-    while (!atomic_get(&pool->stop)){
+    while (!atomic_get_inline(&pool->stop)){
         if (v3_try_get(pool,self,&t)){ v3_run(pool,&t); continue; }
-        thread_wait_prepare(&self->wait);
+        thread_wait_prepare_inline(&self->wait);
         if (v3_try_get(pool,self,&t)){ v3_run(pool,&t); continue; }
         if (v3_spin(pool,self,&t))   { v3_run(pool,&t); continue; }
-        if (atomic_get(&pool->stop)) break;
-        thread_wait_sleep_for(&self->wait, V3_PARK_TIMEOUT_US);
+        if (atomic_get_inline(&pool->stop)) break;
+        thread_wait_sleep_for_inline(&self->wait, V3_PARK_TIMEOUT_US);
     }
     V3_RET;
 }
@@ -259,7 +259,7 @@ WSPoolV3* v3_pool_create(int cores_override){
     for (int i=0;i<nw;i++){
         V3Worker* w=&pool->workers[i];
         w->pool=pool; w->index=i; w->steal_cursor=(uint32_t)i;
-        thread_wait_prepare(&w->wait);
+        thread_wait_prepare_inline(&w->wait);
         if (!v3_deque_init(&w->deque, V3_DEQUE_CAP)){ v3_pool_destroy(pool); return NULL; }
         ring_queue_init(&w->inbox, V3_INBOX_CAP);
         w->inbox_buf = malloc((size_t)V3_INBOX_CAP*sizeof(V3Task));
@@ -267,8 +267,8 @@ WSPoolV3* v3_pool_create(int cores_override){
     }
     for (int i=0;i<nw;i++){
         if (!v3_thread_start(&pool->workers[i].handle, v3_worker_fn, &pool->workers[i])){
-            atomic_set(&pool->stop,1);
-            for (int j=0;j<i;j++){ thread_wait_wake(&pool->workers[j].wait); v3_thread_join(pool->workers[j].handle); }
+            atomic_set_inline(&pool->stop,1);
+            for (int j=0;j<i;j++){ thread_wait_wake_inline(&pool->workers[j].wait); v3_thread_join(pool->workers[j].handle); }
             v3_pool_destroy(pool); return NULL;
         }
     }
@@ -277,10 +277,10 @@ WSPoolV3* v3_pool_create(int cores_override){
 
 bool v3_pool_submit(WSPoolV3* pool, v3_task_fn fn, void* arg){
     if (!pool || !fn) return false;
-    if (atomic_get(&pool->stop)) return false;
+    if (atomic_get_inline(&pool->stop)) return false;
     V3Task t = { fn, arg, v3_rdtscp() };
     int nw = pool->n_workers;
-    atomic_add(&pool->pending,1);
+    atomic_add_inline(&pool->pending,1);
 
     /* reentrante (task dentro de task): empurra no deque LOCAL (Chase-Lev) — push
      * do dono sem CAS, sem wake; o proprio worker faz take() LIFO em seguida e os
@@ -290,23 +290,23 @@ bool v3_pool_submit(WSPoolV3* pool, v3_task_fn fn, void* arg){
         if (v3_deque_push(&me->deque, &t)) return true;
         /* deque local cheio: executa INLINE (evita self-deadlock do submit
          * reentrante; com Chase-Lev/LIFO o deque raramente enche). */
-        atomic_sub(&pool->pending, 1);
+        atomic_sub_inline(&pool->pending, 1);
         fn(arg);
         return true;
     }
 
     int spins=0;
     for (;;){
-        uint32_t start = atomic_u32_add(&pool->submit_rr,1u);
+        uint32_t start = atomic_u32_add_inline(&pool->submit_rr,1u);
         for (int probe=0;probe<nw;probe++){
             int idx=(int)((start+(uint32_t)probe)%(uint32_t)nw);
             V3Worker* w=&pool->workers[idx];
             if (xring_push_mp(&w->inbox, w->inbox_buf, &t)){
-                thread_wait_wake(&w->wait);
+                thread_wait_wake_inline(&w->wait);
                 return true;
             }
         }
-        if (atomic_get(&pool->stop)){ atomic_sub(&pool->pending,1); return false; }
+        if (atomic_get_inline(&pool->stop)){ atomic_sub_inline(&pool->pending,1); return false; }
         if      (spins<64)  xcpu_pause();
         else if (spins<256) v3_yield();
         else                v3_sleep0();
@@ -314,18 +314,18 @@ bool v3_pool_submit(WSPoolV3* pool, v3_task_fn fn, void* arg){
     }
 }
 
-void v3_pool_wait_idle(WSPoolV3* pool){ if (!pool) return; while (atomic_get(&pool->pending)>0) v3_sleep0(); }
+void v3_pool_wait_idle(WSPoolV3* pool){ if (!pool) return; while (atomic_get_inline(&pool->pending)>0) v3_sleep0(); }
 
 void v3_pool_dims(WSPoolV3* pool, int* w, int* l){ if(!pool)return; if(w)*w=pool->n_workers; if(l)*l=pool->n_workers; }
 
 void v3_pool_destroy(WSPoolV3* pool){
     if (!pool) return;
-    if (!atomic_get(&pool->stop)){
+    if (!atomic_get_inline(&pool->stop)){
         v3_pool_wait_idle(pool);
-        atomic_set(&pool->stop,1);
+        atomic_set_inline(&pool->stop,1);
         if (pool->workers)
             for (int i=0;i<pool->n_workers;i++){
-                thread_wait_wake(&pool->workers[i].wait);
+                thread_wait_wake_inline(&pool->workers[i].wait);
                 if (pool->workers[i].handle) v3_thread_join(pool->workers[i].handle);
             }
     }

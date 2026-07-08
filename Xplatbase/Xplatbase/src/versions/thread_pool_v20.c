@@ -159,7 +159,7 @@ static __declspec(thread) V20Worker* g_v20_self;
 static __thread V20Worker* g_v20_self;
 #endif
 
-V20_INLINE void v20_run(V20Worker* self, V20Task* t){ t->fn(t->arg); atomic_sub(&self->pending,1); }
+V20_INLINE void v20_run(V20Worker* self, V20Task* t){ t->fn(t->arg); atomic_sub_inline(&self->pending,1); }
 
 V20_INLINE int v20_drain_inbox(V20Worker* self){
     int moved=0; V20Task tmp;
@@ -188,29 +188,29 @@ V20_INLINE bool v20_try_get(WSPoolV20* pool, V20Worker* self, V20Task* out){
 }
 
 static bool v20_spin(WSPoolV20* pool, V20Worker* self, V20Task* out){
-    for (int i=0;i<V20_SPIN_PAUSE;i++){ if(v20_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; xcpu_pause(); }
-    for (int i=0;i<V20_SPIN_YIELD;i++){ if(v20_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; v20_yield(); }
-    for (int i=0;i<V20_SPIN_SLEEP0;i++){ if(v20_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; v20_sleep0(); }
+    for (int i=0;i<V20_SPIN_PAUSE;i++){ if(v20_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; xcpu_pause(); }
+    for (int i=0;i<V20_SPIN_YIELD;i++){ if(v20_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; v20_yield(); }
+    for (int i=0;i<V20_SPIN_SLEEP0;i++){ if(v20_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; v20_sleep0(); }
     return false;
 }
 
 /* spinner cap: limita quantos workers OCIOSOS spinam ao mesmo tempo. */
 V20_INLINE bool v20_spinner_enter(WSPoolV20* pool){
     for(;;){
-        int cur=atomic_get(&pool->spinners);
+        int cur=atomic_get_inline(&pool->spinners);
         if (cur >= pool->spin_cap) return false;
         int exp=cur;
-        if (atomic_cas(&pool->spinners, &exp, cur+1)) return true;
+        if (atomic_cas_inline(&pool->spinners, &exp, cur+1)) return true;
     }
 }
-V20_INLINE void v20_spinner_leave(WSPoolV20* pool){ atomic_sub(&pool->spinners,1); }
+V20_INLINE void v20_spinner_leave(WSPoolV20* pool){ atomic_sub_inline(&pool->spinners,1); }
 
 static V20_FN v20_worker_fn(void* raw){
     V20Worker* self=(V20Worker*)raw; WSPoolV20* pool=self->pool; V20Task t;
     g_v20_self=self;
-    while (!atomic_get(&pool->stop)){
+    while (!atomic_get_inline(&pool->stop)){
         if (v20_try_get(pool,self,&t)){ v20_run(self,&t); continue; }
-        thread_wait_prepare(&self->wait);
+        thread_wait_prepare_inline(&self->wait);
         if (v20_try_get(pool,self,&t)){ v20_run(self,&t); continue; }
 
         if (v20_spinner_enter(pool)){
@@ -219,8 +219,8 @@ static V20_FN v20_worker_fn(void* raw){
             if (got){ v20_run(self,&t); continue; }
         }
         /* sem vaga de spin (ou spin nao achou): parqueia; acorda por demanda. */
-        if (atomic_get(&pool->stop)) break;
-        thread_wait_sleep_for(&self->wait, V20_PARK_TIMEOUT_US);
+        if (atomic_get_inline(&pool->stop)) break;
+        thread_wait_sleep_for_inline(&self->wait, V20_PARK_TIMEOUT_US);
     }
     V20_RET;
 }
@@ -237,7 +237,7 @@ WSPoolV20* v20_pool_create(int cores_override){
     for (int i=0;i<nw;i++){
         V20Worker* w=&pool->workers[i];
         w->pool=pool; w->index=i; w->steal_cursor=(uint32_t)i;
-        thread_wait_prepare(&w->wait);
+        thread_wait_prepare_inline(&w->wait);
         if (!v20_deque_init(&w->deque, V20_DEQUE_CAP)){ v20_pool_destroy(pool); return NULL; }
         ring_queue_init(&w->inbox, V20_INBOX_CAP);
         w->inbox_buf=malloc((size_t)V20_INBOX_CAP*sizeof(V20Task));
@@ -245,8 +245,8 @@ WSPoolV20* v20_pool_create(int cores_override){
     }
     for (int i=0;i<nw;i++){
         if (!v20_thread_start(&pool->workers[i].handle, v20_worker_fn, &pool->workers[i])){
-            atomic_set(&pool->stop,1);
-            for (int j=0;j<i;j++){ thread_wait_wake(&pool->workers[j].wait); v20_thread_join(pool->workers[j].handle); }
+            atomic_set_inline(&pool->stop,1);
+            for (int j=0;j<i;j++){ thread_wait_wake_inline(&pool->workers[j].wait); v20_thread_join(pool->workers[j].handle); }
             v20_pool_destroy(pool); return NULL;
         }
     }
@@ -255,12 +255,12 @@ WSPoolV20* v20_pool_create(int cores_override){
 
 bool v20_pool_submit(WSPoolV20* pool, v20_task_fn fn, void* arg){
     if (!pool || !fn) return false;
-    if (atomic_get(&pool->stop)) return false;
+    if (atomic_get_inline(&pool->stop)) return false;
     V20Task t = { fn, arg };
 
     V20Worker* me=g_v20_self;
     if (me && me->pool==pool){
-        atomic_add(&me->pending,1);
+        atomic_add_inline(&me->pending,1);
         if (v20_deque_push(&me->deque,&t)) return true;
         v20_run(me,&t);
         return true;
@@ -268,15 +268,15 @@ bool v20_pool_submit(WSPoolV20* pool, v20_task_fn fn, void* arg){
 
     int nw=pool->n_workers; int spins=0;
     for (;;){
-        uint32_t start=atomic_u32_add(&pool->submit_rr,1u);
+        uint32_t start=atomic_u32_add_inline(&pool->submit_rr,1u);
         for (int probe=0;probe<nw;probe++){
             int idx=(int)((start+(uint32_t)probe)%(uint32_t)nw);
             V20Worker* w=&pool->workers[idx];
-            atomic_add(&w->pending,1);
-            if (xring_push_mp(&w->inbox,w->inbox_buf,&t)){ thread_wait_wake(&w->wait); return true; }
-            atomic_sub(&w->pending,1);
+            atomic_add_inline(&w->pending,1);
+            if (xring_push_mp(&w->inbox,w->inbox_buf,&t)){ thread_wait_wake_inline(&w->wait); return true; }
+            atomic_sub_inline(&w->pending,1);
         }
-        if (atomic_get(&pool->stop)) return false;
+        if (atomic_get_inline(&pool->stop)) return false;
         if      (spins<64)  xcpu_pause();
         else if (spins<256) v20_yield();
         else                v20_sleep0();
@@ -285,19 +285,19 @@ bool v20_pool_submit(WSPoolV20* pool, v20_task_fn fn, void* arg){
 }
 
 static long v20_total_pending(WSPoolV20* pool){
-    long s=0; for (int i=0;i<pool->n_workers;i++) s+=atomic_get(&pool->workers[i].pending); return s;
+    long s=0; for (int i=0;i<pool->n_workers;i++) s+=atomic_get_inline(&pool->workers[i].pending); return s;
 }
 void v20_pool_wait_idle(WSPoolV20* pool){ if(!pool)return; while (v20_total_pending(pool)>0) v20_sleep0(); }
 void v20_pool_dims(WSPoolV20* pool, int* w, int* l){ if(!pool)return; if(w)*w=pool->n_workers; if(l)*l=pool->spin_cap; }
 
 void v20_pool_destroy(WSPoolV20* pool){
     if (!pool) return;
-    if (!atomic_get(&pool->stop)){
+    if (!atomic_get_inline(&pool->stop)){
         v20_pool_wait_idle(pool);
-        atomic_set(&pool->stop,1);
+        atomic_set_inline(&pool->stop,1);
         if (pool->workers)
             for (int i=0;i<pool->n_workers;i++){
-                thread_wait_wake(&pool->workers[i].wait);
+                thread_wait_wake_inline(&pool->workers[i].wait);
                 if (pool->workers[i].handle) v20_thread_join(pool->workers[i].handle);
             }
     }

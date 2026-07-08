@@ -3,30 +3,12 @@
 
 
 /* ======================================================================== */
-/*  CPU pause/yield                                                         */
-/* ======================================================================== */
-
-#if defined(_WIN32)
-#include <intrin.h>
-#define xwait_cpu_pause()  _mm_pause()
-#elif defined(__x86_64__) || defined(__i386__)
-#define xwait_cpu_pause()  __asm__ __volatile__("pause" ::: "memory")
-#elif defined(__aarch64__)
-#define xwait_cpu_pause()  __asm__ __volatile__("yield" ::: "memory")
-#elif defined(__arm__) && defined(__ARM_ARCH) && __ARM_ARCH >= 7
-#define xwait_cpu_pause()  __asm__ __volatile__("yield" ::: "memory")
-#else
-#define xwait_cpu_pause()  __asm__ __volatile__("" ::: "memory")
-#endif
-
-/* ======================================================================== */
-/*  Windows - WaitOnAddress / WakeByAddressSingle (equivalente ao futex)   */
+/*  Windows - resolucao do timer do sistema (estado global de refcount)    */
 /* ======================================================================== */
 
 #ifdef _WIN32
 
 #include <mmsystem.h>
-#pragma comment(lib, "Synchronization.lib")
 #pragma comment(lib, "Winmm.lib")
 
 static SRWLOCK g_timer_lock = SRWLOCK_INIT;
@@ -57,61 +39,12 @@ void thread_wait_shutdown(void)
     ReleaseSRWLockExclusive(&g_timer_lock);
 }
 
-/* Reseta o sinal para 0 antes de entrar na fase de espera. */
-void thread_wait_prepare(xwait_t* w)
-{
-    atomic_set(&w->signal, 0);
-}
-
-/* Dorme ate ser acordada (sem timeout). */
-void thread_wait_sleep(xwait_t* w)
-{
-    LONG expected = 0;
-    while (atomic_get(&w->signal) == 0)
-        WaitOnAddress(&w->signal, &expected, sizeof(LONG), INFINITE);
-    atomic_set(&w->signal, 0);
-}
-
-/* Dorme com timeout (microsegundos). true = acordou por wake, false = timeout.
- * WaitOnAddress: dorme apenas se *address == *compare no momento da chamada,
- * portanto nao ha race entre wake-antes-de-sleep. */
-boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
-{
-    LONG  expected = 0;
-    DWORD ms       = (DWORD)(timeout_us / 1000);
-    if (ms == 0) ms = 1;
-
-    BOOL woken = WaitOnAddress(&w->signal, &expected, sizeof(LONG), ms);
-    atomic_set(&w->signal, 0);
-    return woken != FALSE;
-}
-
-/* Acorda a thread imediatamente. */
-void thread_wait_wake(xwait_t* w)
-{
-    atomic_set(&w->signal, 1);
-    WakeByAddressSingle((PVOID)&w->signal);
-}
-
-/* No-op: sem handle para fechar. */
-void thread_wait_destroy(xwait_t* w)
-{
-    (void)w;
-}
-
 /* ======================================================================== */
-/*  Linux - futex syscall direta                                            */
+/*  Linux - futex nao precisa de estado de inicializacao                    */
 /* ======================================================================== */
 
 #elif defined(__linux__)
 
-#include <linux/futex.h>
-#include <sys/syscall.h>
-#include <unistd.h>
-#include <time.h>
-#include <errno.h>
-
-/* Init - futex nao precisa */
 boolean thread_wait_init(boolean fast_mode)
 {
     (void)fast_mode;
@@ -122,58 +55,56 @@ void thread_wait_shutdown(void)
 {
 }
 
-/* Libera recursos da instancia (no-op no Linux) */
-void thread_wait_destroy(xwait_t* w)
-{
-    (void)w;
-}
-
-/* Registrar thread antes de usar */
-void thread_wait_prepare(xwait_t* w)
-{
-    atomic_store_explicit(&w->futex_val, 0, memory_order_relaxed);
-}
-
-/* Dorme ate ser acordada - loop por causa de spurious wakeup (EINTR, etc) */
-void thread_wait_sleep(xwait_t* w)
-{
-    while (atomic_load_explicit(&w->futex_val, memory_order_acquire) == 0)
-        syscall(SYS_futex, &w->futex_val, FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
-            0, NULL, NULL, 0);
-
-    atomic_store_explicit(&w->futex_val, 0, memory_order_relaxed);
-}
-
-/* Dorme com timeout (microsegundos). true = acordou por wake, false = timeout */
-boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
-{
-    struct timespec ts;
-    ts.tv_sec = timeout_us / 1000000LL;
-    ts.tv_nsec = (timeout_us % 1000000LL) * 1000LL;
-
-    while (atomic_load_explicit(&w->futex_val, memory_order_acquire) == 0) {
-        long ret = syscall(SYS_futex, &w->futex_val, FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
-            0, &ts, NULL, 0);
-
-        if (ret == -1 && errno == ETIMEDOUT)
-            return false;
-    }
-
-    atomic_store_explicit(&w->futex_val, 0, memory_order_relaxed);
-    return true;
-}
-
-/* Acorda a thread */
-void thread_wait_wake(xwait_t* w)
-{
-    atomic_store_explicit(&w->futex_val, 1, memory_order_release);
-    syscall(SYS_futex, &w->futex_val, FUTEX_WAKE | FUTEX_PRIVATE_FLAG,
-        1, NULL, NULL, 0);
-}
-
 #else
 #error "Plataforma nao suportada. Requer Windows ou Linux."
 #endif
 
 
 
+/* Definicao unica (linkage externa) das versoes exportadas -- so encaminham
+ * para a variante _inline. Uso interno da lib deve chamar direto os _inline. */
+
+void thread_wait_destroy(xwait_t* w)
+{
+    thread_wait_destroy_inline(w);
+}
+
+void thread_wait_prepare(xwait_t* w)
+{
+    thread_wait_prepare_inline(w);
+}
+
+void thread_wait_sleep(xwait_t* w)
+{
+    thread_wait_sleep_inline(w);
+}
+
+boolean thread_wait_sleep_for(xwait_t* w, long long timeout_us)
+{
+    return thread_wait_sleep_for_inline(w, timeout_us);
+}
+
+void thread_wait_wake(xwait_t* w)
+{
+    thread_wait_wake_inline(w);
+}
+
+void thread_cond_init(xcond_t* cond)
+{
+    thread_cond_init_inline(cond);
+}
+
+void thread_cond_signal(xcond_t* cond)
+{
+    thread_cond_signal_inline(cond);
+}
+
+void thread_cond_wait(xcond_t* cond, xmutex_t* mutex)
+{
+    thread_cond_wait_inline(cond, mutex);
+}
+
+void thread_cond_destroy(xcond_t* cond)
+{
+    thread_cond_destroy_inline(cond);
+}

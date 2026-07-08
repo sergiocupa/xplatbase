@@ -318,7 +318,7 @@ static void* chunk_acquire(MemHeap* heap)
         return mem;
     }
 
-    thread_mutex_lock(&G.cache_lock);
+    thread_mutex_lock_inline(&G.cache_lock);
     /* 1) chunk liberado (reuso) -> sai do cache global, entra em uso */
     if (G.span_cache)
     {
@@ -326,7 +326,7 @@ static void* chunk_acquire(MemHeap* heap)
         G.span_cache = *(void**)mem;
         G.cache_count--;
         MEMOP_SEG_OF(mem)->live++;
-        thread_mutex_unlock(&G.cache_lock);
+        thread_mutex_unlock_inline(&G.cache_lock);
         return mem;
     }
     /* 2) bump do segmento corrente: dola o proximo chunk SEM toca-lo */
@@ -336,10 +336,10 @@ static void* chunk_acquire(MemHeap* heap)
         mem = (char*)seg + (size_t)seg->next_chunk * MEMOP_SPAN_SIZE;
         seg->next_chunk++;
         seg->live++;
-        thread_mutex_unlock(&G.cache_lock);
+        thread_mutex_unlock_inline(&G.cache_lock);
         return mem;
     }
-    thread_mutex_unlock(&G.cache_lock);
+    thread_mutex_unlock_inline(&G.cache_lock);
 
     /* 3) segmento novo (4MB do SO, alinhado). HEADER no chunk 0; entrega o chunk 1
      *    ao chamador; chunks 2..63 ficam para bump. */
@@ -351,10 +351,10 @@ static void* chunk_acquire(MemHeap* heap)
     seg->doomed = 0;
     mem = (char*)seg + MEMOP_SPAN_SIZE;   /* chunk 1 */
 
-    thread_mutex_lock(&G.cache_lock);
+    thread_mutex_lock_inline(&G.cache_lock);
     seg->next = G.segments;
     G.segments = seg;
-    thread_mutex_unlock(&G.cache_lock);
+    thread_mutex_unlock_inline(&G.cache_lock);
     return mem;
 }
 
@@ -438,7 +438,7 @@ static void chunk_release(MemHeap* heap, void* mem)
         return;
     }
     /* Excedente -> cache global; o chunk volta a estar disponivel. */
-    thread_mutex_lock(&G.cache_lock);
+    thread_mutex_lock_inline(&G.cache_lock);
     *(void**)mem = G.span_cache;
     G.span_cache = mem;
     G.cache_count++;
@@ -450,7 +450,7 @@ static void chunk_release(MemHeap* heap, void* mem)
         seg->idle_since = now;        /* inicia o relogio de ociosidade */
         memop_purge_locked(now);
     }
-    thread_mutex_unlock(&G.cache_lock);
+    thread_mutex_unlock_inline(&G.cache_lock);
 }
 
 /* Move o cache local de um heap (thread que terminou) para o cache global. */
@@ -472,12 +472,12 @@ static void chunk_local_to_global(MemHeap* heap)
 static void segments_free_all(void)
 {
     MemSegment* s;
-    thread_mutex_lock(&G.cache_lock);
+    thread_mutex_lock_inline(&G.cache_lock);
     s = G.segments;
     G.segments = NULL;
     G.span_cache = NULL;   /* ponteiros p/ dentro dos segmentos: descartados */
     G.cache_count = 0;
-    thread_mutex_unlock(&G.cache_lock);
+    thread_mutex_unlock_inline(&G.cache_lock);
     while (s) { MemSegment* nx = s->next; span_os_free(s, MEMOP_SEG_SIZE); s = nx; }  /* seg == base */
 }
 
@@ -516,24 +516,24 @@ static void memop_build_size2class(void)
 /*  Lifecycle (lock global SO aqui)                                        */
 /* ----------------------------------------------------------------------- */
 
-static void memop_lock(void)   { thread_mutex_lock(&G.lock); }
-static void memop_unlock(void) { thread_mutex_unlock(&G.lock); }
+static void memop_lock(void)   { thread_mutex_lock_inline(&G.lock); }
+static void memop_unlock(void) { thread_mutex_unlock_inline(&G.lock); }
 
 void memop_init(void)
 {
     for (;;)
     {
-        int st = atomic_get(&g_init_state);
+        int st = atomic_get_inline(&g_init_state);
         if (st == MEMOP_READY) return;
-        if (st == MEMOP_BUSY) { thread_yield(); continue; }
+        if (st == MEMOP_BUSY) { thread_yield_inline(); continue; }
         {
             int expected = MEMOP_UNINIT;
-            if (atomic_cas(&g_init_state, &expected, MEMOP_BUSY))
+            if (atomic_cas_inline(&g_init_state, &expected, MEMOP_BUSY))
             {
-                thread_mutex_init(&G.lock);
-                thread_mutex_init(&G.cache_lock);
+                thread_mutex_init_inline(&G.lock);
+                thread_mutex_init_inline(&G.cache_lock);
                 memop_build_size2class();
-                atomic_set(&g_init_state, MEMOP_READY);
+                atomic_set_inline(&g_init_state, MEMOP_READY);
                 return;
             }
         }
@@ -565,7 +565,7 @@ static MemSpan* span_create(MemHeap* heap, uint32 class_id)
     span->next = NULL;
     span->prev = NULL;
     span->local_free = NULL;                 /* nada pre-carved */
-    atomic_set_ptr(&span->remote_free, NULL);
+    atomic_set_ptr_inline(&span->remote_free, NULL);
     span->class_id = class_id;
     span->stride = stride;
     span->used = 0;
@@ -580,11 +580,11 @@ static MemSpan* span_create(MemHeap* heap, uint32 class_id)
 /* Drena a lista remota para a local; devolve quantos blocos vieram. */
 static uint32 span_drain_remote(MemSpan* span)
 {
-    void* head = atomic_get_ptr(&span->remote_free);
+    void* head = atomic_get_ptr_inline(&span->remote_free);
     MemFreeBlock* b;
     uint32 n = 0;
     if (!head) return 0;
-    while (!atomic_cas_ptr(&span->remote_free, &head, NULL)) { /* retry */ }
+    while (!atomic_cas_ptr_inline(&span->remote_free, &head, NULL)) { /* retry */ }
 
     b = (MemFreeBlock*)head;
     while (b)
@@ -906,10 +906,10 @@ void memop_free_raw(void* ptr)
     {
         /* free remoto: push atomico na lista do span dono (Treiber).
          * NAO toca 'used' (o dono ajusta ao drenar) -> dono fica nao-atomico. */
-        void* head = atomic_get_ptr(&span->remote_free);
+        void* head = atomic_get_ptr_inline(&span->remote_free);
         do {
             block->next = (MemFreeBlock*)head;
-        } while (!atomic_cas_ptr(&span->remote_free, &head, block));
+        } while (!atomic_cas_ptr_inline(&span->remote_free, &head, block));
 
         MEMOP_STAT(if (g_heap) { g_heap->s_free++; g_heap->s_remote_frees++; });
     }
@@ -935,8 +935,8 @@ void memop_shutdown(void)
     MemHeap* h;
     int expected = MEMOP_READY;
 
-    if (atomic_get(&g_init_state) != MEMOP_READY) return;
-    if (!atomic_cas(&g_init_state, &expected, MEMOP_BUSY)) return;
+    if (atomic_get_inline(&g_init_state) != MEMOP_READY) return;
+    if (!atomic_cas_inline(&g_init_state, &expected, MEMOP_BUSY)) return;
 
     memop_lock();
     h = G.heaps;
@@ -946,8 +946,8 @@ void memop_shutdown(void)
     while (h) { MemHeap* nx = h->hnext; heap_destroy(h); h = nx; }
 
     segments_free_all();
-    thread_mutex_destroy(&G.cache_lock);
-    thread_mutex_destroy(&G.lock);
+    thread_mutex_destroy_inline(&G.cache_lock);
+    thread_mutex_destroy_inline(&G.lock);
 
     memset(&G, 0, sizeof(G));
     /* Zera a TLS da thread chamadora: a proxima alloc dela pega um heap novo.
@@ -955,17 +955,17 @@ void memop_shutdown(void)
      *  esta alocando -- caso contrario seria uso incorreto.) */
     g_heap = NULL;
 
-    atomic_set(&g_init_state, MEMOP_UNINIT);
+    atomic_set_inline(&g_init_state, MEMOP_UNINIT);
 }
 
 /* Trim explicito (app-driven): devolve AGORA ao SO todos os segmentos ociosos,
  * sem esperar o atraso/histerese. Util em pontos de ociosidade conhecidos. */
 void memop_purge(void)
 {
-    if (atomic_get(&g_init_state) != MEMOP_READY) return;
-    thread_mutex_lock(&G.cache_lock);
+    if (atomic_get_inline(&g_init_state) != MEMOP_READY) return;
+    thread_mutex_lock_inline(&G.cache_lock);
     purge_apply_locked(memop_now_ms(), 1, 0);
-    thread_mutex_unlock(&G.cache_lock);
+    thread_mutex_unlock_inline(&G.cache_lock);
 }
 
 void memop_get_stats(MemPoolStats* out_stats)
@@ -990,12 +990,12 @@ void memop_get_stats(MemPoolStats* out_stats)
     /* async_* nao existem mais no v2 (mantidos 0 por compatibilidade de ABI) */
     memop_unlock();
 
-    thread_mutex_lock(&G.cache_lock);
+    thread_mutex_lock_inline(&G.cache_lock);
     for (s = G.segments; s; s = s->next) segs++;
     out_stats->os_reserved_bytes = segs * (uint64)MEMOP_SEG_SIZE;
     out_stats->cached_chunks     = (uint64)G.cache_count;
     out_stats->purge_count       = G.purge_count;
-    thread_mutex_unlock(&G.cache_lock);
+    thread_mutex_unlock_inline(&G.cache_lock);
 }
 
 void memop_test_reset(void)

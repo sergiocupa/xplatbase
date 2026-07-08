@@ -177,3 +177,58 @@ void thread_init(CreatedThread created_thread, CreatedThread ended_thread)
     OnEndedThread   = ended_thread;
     thread_unlock();
 }
+
+
+
+/* Definicao unica (linkage externa) das versoes exportadas -- so encaminham
+ * para a variante _inline. Uso interno da lib deve chamar direto os _inline. */
+
+void thread_mutex_init(xmutex_t* mutex)
+{
+    thread_mutex_init_inline(mutex);
+}
+
+void thread_mutex_lock(xmutex_t* mutex)
+{
+    thread_mutex_lock_inline(mutex);
+}
+
+void thread_mutex_unlock(xmutex_t* mutex)
+{
+    thread_mutex_unlock_inline(mutex);
+}
+
+void thread_mutex_destroy(xmutex_t* mutex)
+{
+    thread_mutex_destroy_inline(mutex);
+}
+
+void thread_yield(void)
+{
+    thread_yield_inline();
+}
+
+void thread_sleep0(void)
+{
+    thread_sleep0_inline();
+}
+
+long long thread_atomic64_load(xthread_atomic64* p)
+{
+    return thread_atomic64_load_inline(p);
+}
+
+void thread_atomic64_store(xthread_atomic64* p, long long v)
+{
+    thread_atomic64_store_inline(p, v);
+}
+
+void thread_fence(void)
+{
+    thread_fence_inline();
+}
+
+int thread_atomic64_cas(xthread_atomic64* p, long long expected, long long desired)
+{
+    return thread_atomic64_cas_inline(p, expected, desired);
+}

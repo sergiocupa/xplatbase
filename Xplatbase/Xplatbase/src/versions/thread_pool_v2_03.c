@@ -187,7 +187,7 @@ V203_INLINE void v203_run(WSPoolV203* pool, V203Worker* self, V203Task* t){
     t->fn(t->arg);
     self->in_task=0;
     self->done_count++;            /* progresso */
-    atomic_sub(&pool->ctrs[t->ctr],1);
+    atomic_sub_inline(&pool->ctrs[t->ctr],1);
 }
 
 V203_INLINE bool v203_try_get(WSPoolV203* pool, V203Worker* self, V203Task* out){
@@ -207,9 +207,9 @@ V203_INLINE bool v203_try_get(WSPoolV203* pool, V203Worker* self, V203Task* out)
 }
 
 static bool v203_spin(WSPoolV203* pool, V203Worker* self, V203Task* out){
-    for (int i=0;i<V203_SPIN_PAUSE;i++){ if(v203_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; xcpu_pause(); }
-    for (int i=0;i<V203_SPIN_YIELD;i++){ if(v203_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; v203_yield(); }
-    for (int i=0;i<V203_SPIN_SLEEP0;i++){ if(v203_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; v203_sleep0(); }
+    for (int i=0;i<V203_SPIN_PAUSE;i++){ if(v203_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; xcpu_pause(); }
+    for (int i=0;i<V203_SPIN_YIELD;i++){ if(v203_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; v203_yield(); }
+    for (int i=0;i<V203_SPIN_SLEEP0;i++){ if(v203_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; v203_sleep0(); }
     return false;
 }
 
@@ -218,14 +218,14 @@ static V203_FN v203_worker_fn(void* raw){
     g_v203_self=self;
 
     if (self->is_elastic){
-        while (!atomic_get(&pool->stop)){
-            atomic_set(&self->parked,1);
-            thread_wait_prepare(&self->wait);
-            if (atomic_get(&self->parked)) thread_wait_sleep_for(&self->wait, V203_ELASTIC_PARK_US);
-            if (atomic_get(&pool->stop)) break;
-            if (atomic_get(&self->parked)) continue;     /* timeout, nao ativado */
+        while (!atomic_get_inline(&pool->stop)){
+            atomic_set_inline(&self->parked,1);
+            thread_wait_prepare_inline(&self->wait);
+            if (atomic_get_inline(&self->parked)) thread_wait_sleep_for_inline(&self->wait, V203_ELASTIC_PARK_US);
+            if (atomic_get_inline(&pool->stop)) break;
+            if (atomic_get_inline(&self->parked)) continue;     /* timeout, nao ativado */
             int idle=0;                                  /* ativado: drena ate ociar */
-            while (!atomic_get(&pool->stop)){
+            while (!atomic_get_inline(&pool->stop)){
                 if (v203_try_get(pool,self,&t)){ v203_run(pool,self,&t); idle=0; continue; }
                 if (++idle > V203_ELASTIC_RETIRE_SPINS) break;
                 xcpu_pause();
@@ -235,25 +235,25 @@ static V203_FN v203_worker_fn(void* raw){
     }
 
     int is_core=self->is_core;
-    while (!atomic_get(&pool->stop)){
+    while (!atomic_get_inline(&pool->stop)){
         if (v203_try_get(pool,self,&t)){ v203_run(pool,self,&t); continue; }
-        thread_wait_prepare(&self->wait);
+        thread_wait_prepare_inline(&self->wait);
         if (v203_try_get(pool,self,&t)){ v203_run(pool,self,&t); continue; }
         if (is_core){ if (v203_spin(pool,self,&t)){ v203_run(pool,self,&t); continue; } }
-        if (atomic_get(&pool->stop)) break;
-        if (is_core) atomic_add(&pool->n_parked_core,1);
-        thread_wait_sleep_for(&self->wait, V203_PARK_TIMEOUT_US);
-        if (is_core) atomic_sub(&pool->n_parked_core,1);
+        if (atomic_get_inline(&pool->stop)) break;
+        if (is_core) atomic_add_inline(&pool->n_parked_core,1);
+        thread_wait_sleep_for_inline(&self->wait, V203_PARK_TIMEOUT_US);
+        if (is_core) atomic_sub_inline(&pool->n_parked_core,1);
     }
     V203_RET;
 }
 
 static V203_FN v203_monitor_fn(void* raw){
     WSPoolV203* pool=(WSPoolV203*)raw;
-    thread_wait_prepare(&pool->mon_wait);
-    while (!atomic_get(&pool->stop)){
-        thread_wait_sleep_for(&pool->mon_wait, V203_MON_MS*1000);
-        if (atomic_get(&pool->stop)) break;
+    thread_wait_prepare_inline(&pool->mon_wait);
+    while (!atomic_get_inline(&pool->stop)){
+        thread_wait_sleep_for_inline(&pool->mon_wait, V203_MON_MS*1000);
+        if (atomic_get_inline(&pool->stop)) break;
         /* presos: in_task e sem progresso desde o ultimo tick */
         int stuck=0;
         for (int i=0;i<pool->n_workers;i++){
@@ -269,7 +269,7 @@ static V203_FN v203_monitor_fn(void* raw){
         for (int e=pool->n_workers;e<pool->n_total;e++){   /* acorda 1 elastico parqueado */
             V203Worker* w=&pool->workers[e];
             int exp=1;
-            if (atomic_cas(&w->parked,&exp,0)){ thread_wait_wake(&w->wait); break; }
+            if (atomic_cas_inline(&w->parked,&exp,0)){ thread_wait_wake_inline(&w->wait); break; }
         }
     }
     V203_RET;
@@ -300,21 +300,21 @@ WSPoolV203* v203_pool_create(int cores_override){
         V203Worker* w=&pool->workers[i];
         w->pool=pool; w->index=i; w->is_core=(i<nc)?1:0; w->is_elastic=(i>=nw)?1:0;
         w->shard_cursor=(uint32_t)(i%G); w->steal_cursor=(uint32_t)i;
-        thread_wait_prepare(&w->wait);
-        atomic_set(&w->parked, w->is_elastic?1:0);
+        thread_wait_prepare_inline(&w->wait);
+        atomic_set_inline(&w->parked, w->is_elastic?1:0);
         if (!v203_deque_init(&w->deque, V203_DEQUE_CAP)){ v203_pool_destroy(pool); return NULL; }
     }
     for (int i=0;i<nt;i++){
         if (!v203_thread_start(&pool->workers[i].handle, v203_worker_fn, &pool->workers[i])){
-            atomic_set(&pool->stop,1);
-            for (int j=0;j<i;j++){ thread_wait_wake(&pool->workers[j].wait); v203_thread_join(pool->workers[j].handle); }
+            atomic_set_inline(&pool->stop,1);
+            for (int j=0;j<i;j++){ thread_wait_wake_inline(&pool->workers[j].wait); v203_thread_join(pool->workers[j].handle); }
             v203_pool_destroy(pool); return NULL;
         }
     }
-    thread_wait_prepare(&pool->mon_wait);
+    thread_wait_prepare_inline(&pool->mon_wait);
     if (!v203_thread_start(&pool->mon_handle, v203_monitor_fn, pool)){
-        atomic_set(&pool->stop,1);
-        for (int i=0;i<nt;i++){ thread_wait_wake(&pool->workers[i].wait); v203_thread_join(pool->workers[i].handle); }
+        atomic_set_inline(&pool->stop,1);
+        for (int i=0;i<nt;i++){ thread_wait_wake_inline(&pool->workers[i].wait); v203_thread_join(pool->workers[i].handle); }
         v203_pool_destroy(pool); return NULL;
     }
     return pool;
@@ -322,30 +322,30 @@ WSPoolV203* v203_pool_create(int cores_override){
 
 bool v203_pool_submit(WSPoolV203* pool, v203_task_fn fn, void* arg){
     if (!pool || !fn) return false;
-    if (atomic_get(&pool->stop)) return false;
+    if (atomic_get_inline(&pool->stop)) return false;
 
     V203Worker* me=g_v203_self;
     if (me && me->pool==pool){       /* reentrante: deque local */
         V203Task t = { fn, arg, pool->n_shards + me->index };
-        atomic_add(&pool->ctrs[t.ctr],1);
+        atomic_add_inline(&pool->ctrs[t.ctr],1);
         if (v203_deque_push(&me->deque,&t)) return true;
         v203_run(pool,me,&t);
         return true;
     }
     int G=pool->n_shards; int spins=0;
     for (;;){
-        int s=(int)(atomic_u32_add(&pool->submit_rr,1u)%(uint32_t)G);
+        int s=(int)(atomic_u32_add_inline(&pool->submit_rr,1u)%(uint32_t)G);
         V203Task t = { fn, arg, s };
-        atomic_add(&pool->ctrs[s],1);
+        atomic_add_inline(&pool->ctrs[s],1);
         if (xring_push_mp(&pool->shards[s].ring, pool->shards[s].buf, &t)){
-            if (atomic_get(&pool->n_parked_core) > 0){
-                uint32_t k=atomic_u32_add(&pool->wake_rr,1u)%(uint32_t)pool->n_core;
-                thread_wait_wake(&pool->workers[k].wait);
+            if (atomic_get_inline(&pool->n_parked_core) > 0){
+                uint32_t k=atomic_u32_add_inline(&pool->wake_rr,1u)%(uint32_t)pool->n_core;
+                thread_wait_wake_inline(&pool->workers[k].wait);
             }
             return true;
         }
-        atomic_sub(&pool->ctrs[s],1);
-        if (atomic_get(&pool->stop)) return false;
+        atomic_sub_inline(&pool->ctrs[s],1);
+        if (atomic_get_inline(&pool->stop)) return false;
         if      (spins<64)  xcpu_pause();
         else if (spins<256) v203_yield();
         else                v203_sleep0();
@@ -354,21 +354,21 @@ bool v203_pool_submit(WSPoolV203* pool, v203_task_fn fn, void* arg){
 }
 
 static long v203_total_pending(WSPoolV203* pool){
-    long s=0; for (int i=0;i<pool->n_ctrs;i++) s+=atomic_get(&pool->ctrs[i]); return s;
+    long s=0; for (int i=0;i<pool->n_ctrs;i++) s+=atomic_get_inline(&pool->ctrs[i]); return s;
 }
 void v203_pool_wait_idle(WSPoolV203* pool){ if(!pool)return; while (v203_total_pending(pool)>0) v203_sleep0(); }
 void v203_pool_dims(WSPoolV203* pool, int* w, int* c){ if(!pool)return; if(w)*w=pool->n_workers; if(c)*c=pool->n_core; }
 
 void v203_pool_destroy(WSPoolV203* pool){
     if (!pool) return;
-    if (!atomic_get(&pool->stop)){
+    if (!atomic_get_inline(&pool->stop)){
         v203_pool_wait_idle(pool);
-        atomic_set(&pool->stop,1);
-        thread_wait_wake(&pool->mon_wait);
+        atomic_set_inline(&pool->stop,1);
+        thread_wait_wake_inline(&pool->mon_wait);
         if (pool->mon_handle) v203_thread_join(pool->mon_handle);
         if (pool->workers)
             for (int i=0;i<pool->n_total;i++){
-                thread_wait_wake(&pool->workers[i].wait);
+                thread_wait_wake_inline(&pool->workers[i].wait);
                 if (pool->workers[i].handle) v203_thread_join(pool->workers[i].handle);
             }
     }

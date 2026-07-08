@@ -14,9 +14,9 @@
 
 #include "../include/xplatbase.h"
 #include "event_handler.h"
-//#include "memory_handler.h"
+#include "memory_pool.h"
 #include <stdio.h>
-#include <stdlib.h>
+#include <string.h>
 
 
 
@@ -26,10 +26,8 @@ void xpb_list_init_ext(ListXPB* list, int32 initial_count, uint64 type_size, con
     list->Max      = initial_count >= 0 ? initial_count : INITIAL_LIST_COUNT;
     list->Count    = 0;
 
-    /* Items e o VETOR de ponteiros em si; allocate() devolvia o header
-     * BufferXPB (40B) aqui, e cada Items[i] escrevia dentro/alem do header
-     * -> corrupcao de heap a cada add (crashes intermitentes 0xC0000005). */
-    list->Items = (void**)malloc((size_t)list->Max * sizeof(void*));
+    /* Items e o VETOR de ponteiros em si (sem header por item). */
+    list->Items = (void**)memop_alloc_raw((uint64)list->Max * sizeof(void*));
     if (!list->Items)
     {
         CallContextGlobalEvent ctx = { func, file, line };
@@ -39,10 +37,8 @@ void xpb_list_init_ext(ListXPB* list, int32 initial_count, uint64 type_size, con
 
 ListXPB* xpb_list_new_ext(int initial_count, uint64 type_size, const char* func, const char* file, int line)
 {
-    ListXPB* list = { 0 };
-
-    int rs = allocate_type(sizeof(ListXPB), type_size, &list);
-    if (rs < 0)
+    ListXPB* list = (ListXPB*)memop_alloc_raw(sizeof(ListXPB));
+    if (!list)
     {
         CallContextGlobalEvent ctx = { func, file, line };
         xpb_event_trigger_error(&ctx, "Falha ao alocar a lista.");
@@ -53,8 +49,8 @@ ListXPB* xpb_list_new_ext(int initial_count, uint64 type_size, const char* func,
     list->Max      = initial_count >= 0 ? initial_count : INITIAL_LIST_COUNT;
     list->Count    = 0;
 
-    rs = allocate(list->Max * sizeof(void*), &list->Items);
-    if (rs < 0)
+    list->Items = (void**)memop_alloc_raw((uint64)list->Max * sizeof(void*));
+    if (!list->Items)
     {
         CallContextGlobalEvent ctx = { func, file, line };
         xpb_event_trigger_error(&ctx, "Falha ao alocar %zu itens para a lista.", list->Max);
@@ -76,16 +72,19 @@ void xpb_list_add_ext(ListXPB* list, void* instance, uint64 type_size, const cha
     int sz = list->Count + 1;
     if (sz >= list->Max)
     {
-        list->Max  *= 2;
-
-        /* tamanho em BYTES (faltava * sizeof(void*): realloc encolhia o vetor) */
-        int rz = reallocate_pointer(list->Max * sizeof(void*), (void**)&list->Items);
-        if (rz < 0)
+        uint64 new_max   = (uint64)list->Max * 2;
+        void** new_items = (void**)memop_alloc_raw(new_max * sizeof(void*));
+        if (!new_items)
         {
             CallContextGlobalEvent ctx = { func, file, line };
             xpb_event_trigger_error(&ctx, "N�o foi poss�vel realocar novo tamanho dos itens. Informado: %zu | Esperado: %zu", type_size, list->TypeSize);
             return;
         }
+
+        memcpy(new_items, list->Items, (size_t)list->Count * sizeof(void*));
+        memop_free_raw(list->Items);
+        list->Items = new_items;
+        list->Max   = (uint64)new_max;
     }
 
     list->Items[list->Count] = instance;

@@ -140,14 +140,14 @@ typedef xthread_atomic64 pool_a64;
 
 #define pool_thread_start(o,fn,a) (((*(o)) = thread_create((fn), (a), NULL)) != NULL)
 #define pool_thread_join(h)      thread_join(&(h))
-#define pool_yield()             thread_yield()
-#define pool_sleep0()            thread_sleep0()
+#define pool_yield()             thread_yield_inline()
+#define pool_sleep0()            thread_sleep0_inline()
 #define POOL_FN                  xthread_result_t
 #define POOL_RET                 return (xthread_result_t)0
-#define pool_ld(p)               thread_atomic64_load((p))
-#define pool_st(p,v)             thread_atomic64_store((p), (long long)(v))
-#define pool_fence()             thread_fence()
-#define pool_cas64(p,e,d)        thread_atomic64_cas((p), (long long)(e), (long long)(d))
+#define pool_ld(p)               thread_atomic64_load_inline((p))
+#define pool_st(p,v)             thread_atomic64_store_inline((p), (long long)(v))
+#define pool_fence()             thread_fence_inline()
+#define pool_cas64(p,e,d)        thread_atomic64_cas_inline((p), (long long)(e), (long long)(d))
 
 /* Perf K: fence de release para o push do deque.
  * x86: stores nao reordenam entre si -> basta impedir o compilador.
@@ -418,9 +418,9 @@ POOL_INLINE bool pool_try_get(ThreadPool* pool, PoolWorker* self, PoolTask* out)
 }
 
 static bool pool_spin(ThreadPool* pool, PoolWorker* self, PoolTask* out){
-    for (int i=0;i<POOL_SPIN_PAUSE;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; xcpu_pause(); }
-    for (int i=0;i<POOL_SPIN_YIELD;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; pool_yield(); }
-    for (int i=0;i<POOL_SPIN_SLEEP0;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; pool_sleep0(); }
+    for (int i=0;i<POOL_SPIN_PAUSE;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; xcpu_pause(); }
+    for (int i=0;i<POOL_SPIN_YIELD;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; pool_yield(); }
+    for (int i=0;i<POOL_SPIN_SLEEP0;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; pool_sleep0(); }
     return false;
 }
 
@@ -429,14 +429,14 @@ static POOL_FN pool_worker_fn(void* raw){
     g_pool_self=self;
 
     if (self->is_elastic){
-        while (!atomic_get(&pool->stop)){
-            atomic_set(&self->parked,1);
-            thread_wait_prepare(&self->wait);
-            if (atomic_get(&self->parked)) thread_wait_sleep_for(&self->wait, POOL_ELASTIC_PARK_US);
-            if (atomic_get(&pool->stop)) break;
-            if (atomic_get(&self->parked)) continue;     /* timeout, nao ativado */
+        while (!atomic_get_inline(&pool->stop)){
+            atomic_set_inline(&self->parked,1);
+            thread_wait_prepare_inline(&self->wait);
+            if (atomic_get_inline(&self->parked)) thread_wait_sleep_for_inline(&self->wait, POOL_ELASTIC_PARK_US);
+            if (atomic_get_inline(&pool->stop)) break;
+            if (atomic_get_inline(&self->parked)) continue;     /* timeout, nao ativado */
             int idle=0;
-            while (!atomic_get(&pool->stop)){
+            while (!atomic_get_inline(&pool->stop)){
                 if (pool_try_get(pool,self,&t)){ pool_run(pool,self,&t); idle=0; continue; }
                 if (++idle > POOL_ELASTIC_RETIRE_SPINS) break;
                 xcpu_pause();
@@ -446,26 +446,26 @@ static POOL_FN pool_worker_fn(void* raw){
     }
 
     int is_core=self->is_core;
-    while (!atomic_get(&pool->stop)){
+    while (!atomic_get_inline(&pool->stop)){
         if (pool_try_get(pool,self,&t)){ pool_run(pool,self,&t); continue; }
-        thread_wait_prepare(&self->wait);
+        thread_wait_prepare_inline(&self->wait);
         if (pool_try_get(pool,self,&t)){ pool_run(pool,self,&t); continue; }
         if (is_core){ if (pool_spin(pool,self,&t)){ pool_run(pool,self,&t); continue; } }
-        if (atomic_get(&pool->stop)) break;
+        if (atomic_get_inline(&pool->stop)) break;
         /* Perf C: marca este core como parqueado para wakeup direcionado. */
-        if (is_core){ atomic_set(&self->parked,1); atomic_add(&pool->n_parked_core,1); }
-        thread_wait_sleep_for(&self->wait, POOL_PARK_TIMEOUT_US);
-        if (is_core){ atomic_sub(&pool->n_parked_core,1); atomic_set(&self->parked,0); }
+        if (is_core){ atomic_set_inline(&self->parked,1); atomic_add_inline(&pool->n_parked_core,1); }
+        thread_wait_sleep_for_inline(&self->wait, POOL_PARK_TIMEOUT_US);
+        if (is_core){ atomic_sub_inline(&pool->n_parked_core,1); atomic_set_inline(&self->parked,0); }
     }
     POOL_RET;
 }
 
 static POOL_FN pool_monitor_fn(void* raw){
     ThreadPool* pool=(ThreadPool*)raw;
-    thread_wait_prepare(&pool->mon_wait);
-    while (!atomic_get(&pool->stop)){
-        thread_wait_sleep_for(&pool->mon_wait, POOL_MON_MS*1000);
-        if (atomic_get(&pool->stop)) break;
+    thread_wait_prepare_inline(&pool->mon_wait);
+    while (!atomic_get_inline(&pool->stop)){
+        thread_wait_sleep_for_inline(&pool->mon_wait, POOL_MON_MS*1000);
+        if (atomic_get_inline(&pool->stop)) break;
         int stuck=0;
         for (int i=0;i<pool->n_workers;i++){
             PoolWorker* w=&pool->workers[i];
@@ -481,9 +481,9 @@ static POOL_FN pool_monitor_fn(void* raw){
         int to_wake=stuck;
         for (int e=pool->n_workers;e<pool->n_total && to_wake>0;e++){
             PoolWorker* w=&pool->workers[e];
-            if (!atomic_get(&w->parked)) continue;          /* Perf I: load antes do CAS */
+            if (!atomic_get_inline(&w->parked)) continue;          /* Perf I: load antes do CAS */
             int exp=1;
-            if (atomic_cas(&w->parked,&exp,0)){ thread_wait_wake(&w->wait); to_wake--; }
+            if (atomic_cas_inline(&w->parked,&exp,0)){ thread_wait_wake_inline(&w->wait); to_wake--; }
         }
     }
     POOL_RET;
@@ -517,22 +517,22 @@ ThreadPool* pool_create_relative(int cores_override)
         w->pool=pool; w->index=i; w->is_core=(i<nc)?1:0; w->is_elastic=(i>=nw)?1:0;
         w->shard_cursor=(uint32_t)(i%G); w->steal_cursor=(uint32_t)i;
         w->lifo_full=0; w->lifo_streak=0; w->pend_i=0; w->pend_n=0;
-        thread_wait_prepare(&w->wait);
-        atomic_set(&w->parked, w->is_elastic?1:0);
+        thread_wait_prepare_inline(&w->wait);
+        atomic_set_inline(&w->parked, w->is_elastic?1:0);
         if (!pool_deque_init(&w->deque, POOL_DEQUE_CAP)){ pool_destroy_relative(pool); return NULL; }
     }
     for (int i=0;i<nt;i++)
     {
         if (!pool_thread_start(&pool->workers[i].handle, pool_worker_fn, &pool->workers[i])){
-            atomic_set(&pool->stop,1);
-            for (int j=0;j<i;j++){ thread_wait_wake(&pool->workers[j].wait); pool_thread_join(pool->workers[j].handle); }
+            atomic_set_inline(&pool->stop,1);
+            for (int j=0;j<i;j++){ thread_wait_wake_inline(&pool->workers[j].wait); pool_thread_join(pool->workers[j].handle); }
             pool_destroy_relative(pool); return NULL;
         }
     }
-    thread_wait_prepare(&pool->mon_wait);
+    thread_wait_prepare_inline(&pool->mon_wait);
     if (!pool_thread_start(&pool->mon_handle, pool_monitor_fn, pool)){
-        atomic_set(&pool->stop,1);
-        for (int i=0;i<nt;i++){ thread_wait_wake(&pool->workers[i].wait); pool_thread_join(pool->workers[i].handle); }
+        atomic_set_inline(&pool->stop,1);
+        for (int i=0;i<nt;i++){ thread_wait_wake_inline(&pool->workers[i].wait); pool_thread_join(pool->workers[i].handle); }
         pool_destroy_relative(pool); return NULL;
     }
     return pool;
@@ -542,12 +542,12 @@ ThreadPool* pool_create_relative(int cores_override)
 boolean pool_submit_relative(ThreadPool* pool, pool_task_fn fn, void* arg)
 {
     if (!pool || !fn) return false;
-    if (atomic_get(&pool->stop)) return false;
+    if (atomic_get_inline(&pool->stop)) return false;
 
     PoolWorker* me=g_pool_self;
     if (me && me->pool==pool){       /* reentrante: LIFO slot + deque local */
         PoolTask t = { fn, arg };
-        atomic_add64(&pool->ctrs[pool->n_shards + me->index].v,1);
+        atomic_add64_inline(&pool->ctrs[pool->n_shards + me->index].v,1);
         /* Perf J: task nova vai para o LIFO slot; a anterior desce ao deque */
         if (!me->lifo_full){ me->lifo_task=t; me->lifo_full=1; return true; }
         PoolTask old=me->lifo_task; me->lifo_task=t;
@@ -557,27 +557,27 @@ boolean pool_submit_relative(ThreadPool* pool, pool_task_fn fn, void* arg)
     }
     int G=pool->n_shards; int spins=0;
     for (;;){
-        int s=(int)(atomic_u32_add(&pool->submit_rr,1u)%(uint32_t)G);
+        int s=(int)(atomic_u32_add_inline(&pool->submit_rr,1u)%(uint32_t)G);
         PoolTask t = { fn, arg };
-        atomic_add64(&pool->ctrs[s].v,1);
+        atomic_add64_inline(&pool->ctrs[s].v,1);
         if (pool_ring_push(&pool->shards[s].ring, &t)){
-            if (atomic_get(&pool->n_parked_core) > 0){
+            if (atomic_get_inline(&pool->n_parked_core) > 0){
                 /* Perf C: acorda exatamente UM core que esteja de fato parqueado. */
                 int nc=pool->n_core;
-                uint32_t start=atomic_u32_add(&pool->wake_rr,1u);
+                uint32_t start=atomic_u32_add_inline(&pool->wake_rr,1u);
                 for (int j=0;j<nc;j++){
                     int idx=(int)((start+(uint32_t)j)%(uint32_t)nc);
-                    if (!atomic_get(&pool->workers[idx].parked)) continue;   /* Perf I */
+                    if (!atomic_get_inline(&pool->workers[idx].parked)) continue;   /* Perf I */
                     int exp=1;
-                    if (atomic_cas(&pool->workers[idx].parked,&exp,0)){
-                        thread_wait_wake(&pool->workers[idx].wait); break;
+                    if (atomic_cas_inline(&pool->workers[idx].parked,&exp,0)){
+                        thread_wait_wake_inline(&pool->workers[idx].wait); break;
                     }
                 }
             }
             return true;
         }
-        atomic_sub64(&pool->ctrs[s].v,1);
-        if (atomic_get(&pool->stop)) return false;
+        atomic_sub64_inline(&pool->ctrs[s].v,1);
+        if (atomic_get_inline(&pool->stop)) return false;
         if      (spins<64)  xcpu_pause();
         else if (spins<256) pool_yield();
         else                pool_sleep0();
@@ -588,7 +588,7 @@ boolean pool_submit_relative(ThreadPool* pool, pool_task_fn fn, void* arg)
 
 static long long pool_total_pending(ThreadPool* pool)
 {
-    long long s=0; for (int i=0;i<pool->n_ctrs;i++) s+=atomic_get64(&pool->ctrs[i].v); return s;
+    long long s=0; for (int i=0;i<pool->n_ctrs;i++) s+=atomic_get64_inline(&pool->ctrs[i].v); return s;
 }
 
 void pool_wait_idle_relative(ThreadPool* pool){ if(!pool)return; while (pool_total_pending(pool)>0) pool_sleep0(); }
@@ -597,14 +597,14 @@ void pool_dims_relative(ThreadPool* pool, int* w, int* c){ if(!pool)return; if(w
 void pool_destroy_relative(ThreadPool* pool)
 {
     if (!pool) return;
-    if (!atomic_get(&pool->stop)){
+    if (!atomic_get_inline(&pool->stop)){
         pool_wait_idle_relative(pool);
-        atomic_set(&pool->stop,1);
-        thread_wait_wake(&pool->mon_wait);
+        atomic_set_inline(&pool->stop,1);
+        thread_wait_wake_inline(&pool->mon_wait);
         if (pool->mon_handle) pool_thread_join(pool->mon_handle);
         if (pool->workers)
             for (int i=0;i<pool->n_total;i++){
-                thread_wait_wake(&pool->workers[i].wait);
+                thread_wait_wake_inline(&pool->workers[i].wait);
                 if (pool->workers[i].handle) pool_thread_join(pool->workers[i].handle);
             }
     }

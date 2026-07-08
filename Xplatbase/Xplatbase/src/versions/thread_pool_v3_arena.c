@@ -178,7 +178,7 @@ static __declspec(thread) V3Worker* g_v3_self;
 static __thread V3Worker* g_v3_self;
 #endif
 
-V3_INLINE void v3_run(WSPoolV3* pool, V3Task* t){ t->fn(t->arg); atomic_sub(&pool->ctrs[t->ctr],1); }
+V3_INLINE void v3_run(WSPoolV3* pool, V3Task* t){ t->fn(t->arg); atomic_sub_inline(&pool->ctrs[t->ctr],1); }
 
 V3_INLINE bool v3_try_get(WSPoolV3* pool, V3Worker* self, V3Task* out){
     if (v3_deque_take(&self->deque, out)) return true;
@@ -199,9 +199,9 @@ V3_INLINE bool v3_try_get(WSPoolV3* pool, V3Worker* self, V3Task* out){
 }
 
 static bool v3_spin(WSPoolV3* pool, V3Worker* self, V3Task* out){
-    for (int i=0;i<V3_SPIN_PAUSE;i++){ if(v3_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; xcpu_pause(); }
-    for (int i=0;i<V3_SPIN_YIELD;i++){ if(v3_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; v3_yield(); }
-    for (int i=0;i<V3_SPIN_SLEEP0;i++){ if(v3_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; v3_sleep0(); }
+    for (int i=0;i<V3_SPIN_PAUSE;i++){ if(v3_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; xcpu_pause(); }
+    for (int i=0;i<V3_SPIN_YIELD;i++){ if(v3_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; v3_yield(); }
+    for (int i=0;i<V3_SPIN_SLEEP0;i++){ if(v3_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; v3_sleep0(); }
     return false;
 }
 
@@ -209,18 +209,18 @@ static V3_FN v3_worker_fn(void* raw){
     V3Worker* self=(V3Worker*)raw; WSPoolV3* pool=self->pool; V3Task t;
     g_v3_self=self;
     int is_core=self->is_core;
-    while (!atomic_get(&pool->stop)){
+    while (!atomic_get_inline(&pool->stop)){
         if (v3_try_get(pool,self,&t)){ v3_run(pool,&t); continue; }
-        thread_wait_prepare(&self->wait);
+        thread_wait_prepare_inline(&self->wait);
         if (v3_try_get(pool,self,&t)){ v3_run(pool,&t); continue; }
 
         if (is_core){
             if (v3_spin(pool,self,&t)){ v3_run(pool,&t); continue; }
         }
-        if (atomic_get(&pool->stop)) break;
-        if (is_core) atomic_add(&pool->n_parked_core,1);   /* gate do wake do submit */
-        thread_wait_sleep_for(&self->wait, V3_PARK_TIMEOUT_US);
-        if (is_core) atomic_sub(&pool->n_parked_core,1);
+        if (atomic_get_inline(&pool->stop)) break;
+        if (is_core) atomic_add_inline(&pool->n_parked_core,1);   /* gate do wake do submit */
+        thread_wait_sleep_for_inline(&self->wait, V3_PARK_TIMEOUT_US);
+        if (is_core) atomic_sub_inline(&pool->n_parked_core,1);
     }
     V3_RET;
 }
@@ -252,13 +252,13 @@ WSPoolV3* v3_pool_create(int cores_override){
         V3Worker* w=&pool->workers[i];
         w->pool=pool; w->index=i; w->is_core=(i<nc)?1:0;
         w->shard_cursor=(uint32_t)(i%G); w->steal_cursor=(uint32_t)i;
-        thread_wait_prepare(&w->wait);
+        thread_wait_prepare_inline(&w->wait);
         if (!v3_deque_init(&w->deque, V3_DEQUE_CAP)){ v3_pool_destroy(pool); return NULL; }
     }
     for (int i=0;i<nw;i++){
         if (!v3_thread_start(&pool->workers[i].handle, v3_worker_fn, &pool->workers[i])){
-            atomic_set(&pool->stop,1);
-            for (int j=0;j<i;j++){ thread_wait_wake(&pool->workers[j].wait); v3_thread_join(pool->workers[j].handle); }
+            atomic_set_inline(&pool->stop,1);
+            for (int j=0;j<i;j++){ thread_wait_wake_inline(&pool->workers[j].wait); v3_thread_join(pool->workers[j].handle); }
             v3_pool_destroy(pool); return NULL;
         }
     }
@@ -267,13 +267,13 @@ WSPoolV3* v3_pool_create(int cores_override){
 
 bool v3_pool_submit(WSPoolV3* pool, v3_task_fn fn, void* arg){
     if (!pool || !fn) return false;
-    if (atomic_get(&pool->stop)) return false;
+    if (atomic_get_inline(&pool->stop)) return false;
 
     /* reentrante (spawn): deque LOCAL; contador local = n_shards + index. */
     V3Worker* me=g_v3_self;
     if (me && me->pool==pool){
         V3Task t = { fn, arg, pool->n_shards + me->index };
-        atomic_add(&pool->ctrs[t.ctr],1);
+        atomic_add_inline(&pool->ctrs[t.ctr],1);
         if (v3_deque_push(&me->deque,&t)) return true;
         v3_run(pool,&t);                       /* deque cheio: inline (sem self-deadlock) */
         return true;
@@ -282,19 +282,19 @@ bool v3_pool_submit(WSPoolV3* pool, v3_task_fn fn, void* arg){
     /* externo: round-robin nas shards COMPARTILHADAS; contador = shard. */
     int G=pool->n_shards; int spins=0;
     for (;;){
-        int s=(int)(atomic_u32_add(&pool->submit_rr,1u)%(uint32_t)G);
+        int s=(int)(atomic_u32_add_inline(&pool->submit_rr,1u)%(uint32_t)G);
         V3Task t = { fn, arg, s };
-        atomic_add(&pool->ctrs[s],1);
+        atomic_add_inline(&pool->ctrs[s],1);
         if (xring_push_mp(&pool->shards[s].ring, pool->shards[s].buf, &t)){
             /* so acorda se houver CORE parqueado (em regime quente: nao acorda). */
-            if (atomic_get(&pool->n_parked_core) > 0){
-                uint32_t k=atomic_u32_add(&pool->wake_rr,1u)%(uint32_t)pool->n_core;
-                thread_wait_wake(&pool->workers[k].wait);
+            if (atomic_get_inline(&pool->n_parked_core) > 0){
+                uint32_t k=atomic_u32_add_inline(&pool->wake_rr,1u)%(uint32_t)pool->n_core;
+                thread_wait_wake_inline(&pool->workers[k].wait);
             }
             return true;
         }
-        atomic_sub(&pool->ctrs[s],1);          /* shard cheia: desfaz e re-tenta */
-        if (atomic_get(&pool->stop)) return false;
+        atomic_sub_inline(&pool->ctrs[s],1);          /* shard cheia: desfaz e re-tenta */
+        if (atomic_get_inline(&pool->stop)) return false;
         if      (spins<64)  xcpu_pause();
         else if (spins<256) v3_yield();
         else                v3_sleep0();
@@ -303,19 +303,19 @@ bool v3_pool_submit(WSPoolV3* pool, v3_task_fn fn, void* arg){
 }
 
 static long v3_total_pending(WSPoolV3* pool){
-    long s=0; for (int i=0;i<pool->n_ctrs;i++) s+=atomic_get(&pool->ctrs[i]); return s;
+    long s=0; for (int i=0;i<pool->n_ctrs;i++) s+=atomic_get_inline(&pool->ctrs[i]); return s;
 }
 void v3_pool_wait_idle(WSPoolV3* pool){ if(!pool)return; while (v3_total_pending(pool)>0) v3_sleep0(); }
 void v3_pool_dims(WSPoolV3* pool, int* w, int* c){ if(!pool)return; if(w)*w=pool->n_workers; if(c)*c=pool->n_core; }
 
 void v3_pool_destroy(WSPoolV3* pool){
     if (!pool) return;
-    if (!atomic_get(&pool->stop)){
+    if (!atomic_get_inline(&pool->stop)){
         v3_pool_wait_idle(pool);
-        atomic_set(&pool->stop,1);
+        atomic_set_inline(&pool->stop,1);
         if (pool->workers)
             for (int i=0;i<pool->n_workers;i++){
-                thread_wait_wake(&pool->workers[i].wait);
+                thread_wait_wake_inline(&pool->workers[i].wait);
                 if (pool->workers[i].handle) v3_thread_join(pool->workers[i].handle);
             }
     }

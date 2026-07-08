@@ -34,6 +34,12 @@ extern "C" {
 	    #define XPLATBASE_API
 	#endif 
 
+	#ifdef _MSC_VER
+	    #define STATIC_INLINE static __forceinline
+	#else
+	    #define STATIC_INLINE static inline __attribute__((always_inline))
+	#endif
+
 
 #ifndef __cplusplus
     #define false 0

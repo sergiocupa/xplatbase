@@ -160,7 +160,7 @@ static __declspec(thread) V4Worker* g_v4_self;
 static __thread V4Worker* g_v4_self;
 #endif
 
-V4_INLINE void v4_run(V4Worker* self, V4Task* t){ t->fn(t->arg); atomic_sub(&self->pending,1); }
+V4_INLINE void v4_run(V4Worker* self, V4Task* t){ t->fn(t->arg); atomic_sub_inline(&self->pending,1); }
 
 V4_INLINE int v4_drain_inbox(V4Worker* self){
     int moved=0; V4Task tmp;
@@ -191,22 +191,22 @@ V4_INLINE bool v4_try_get(WSPoolV4* pool, V4Worker* self, V4Task* out){
 }
 
 static bool v4_spin(WSPoolV4* pool, V4Worker* self, V4Task* out){
-    for (int i=0;i<V4_SPIN_PAUSE;i++){ if(v4_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; xcpu_pause(); }
-    for (int i=0;i<V4_SPIN_YIELD;i++){ if(v4_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; v4_yield(); }
-    for (int i=0;i<V4_SPIN_SLEEP0;i++){ if(v4_try_get(pool,self,out))return true; if(atomic_get(&pool->stop))return false; v4_sleep0(); }
+    for (int i=0;i<V4_SPIN_PAUSE;i++){ if(v4_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; xcpu_pause(); }
+    for (int i=0;i<V4_SPIN_YIELD;i++){ if(v4_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; v4_yield(); }
+    for (int i=0;i<V4_SPIN_SLEEP0;i++){ if(v4_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; v4_sleep0(); }
     return false;
 }
 
 static V4_FN v4_worker_fn(void* raw){
     V4Worker* self=(V4Worker*)raw; WSPoolV4* pool=self->pool; V4Task t;
     g_v4_self=self;
-    while (!atomic_get(&pool->stop)){
+    while (!atomic_get_inline(&pool->stop)){
         if (v4_try_get(pool,self,&t)){ v4_run(self,&t); continue; }
-        thread_wait_prepare(&self->wait);
+        thread_wait_prepare_inline(&self->wait);
         if (v4_try_get(pool,self,&t)){ v4_run(self,&t); continue; }
         if (v4_spin(pool,self,&t))   { v4_run(self,&t); continue; }
-        if (atomic_get(&pool->stop)) break;
-        thread_wait_sleep_for(&self->wait, V4_PARK_TIMEOUT_US);
+        if (atomic_get_inline(&pool->stop)) break;
+        thread_wait_sleep_for_inline(&self->wait, V4_PARK_TIMEOUT_US);
     }
     V4_RET;
 }
@@ -225,7 +225,7 @@ WSPoolV4* v4_pool_create(int cores_override){
     for (int i=0;i<nw;i++){
         V4Worker* w=&pool->workers[i];
         w->pool=pool; w->index=i; w->steal_cursor=(uint32_t)i;
-        thread_wait_prepare(&w->wait);
+        thread_wait_prepare_inline(&w->wait);
         if (!v4_deque_init(&w->deque, V4_DEQUE_CAP)){ v4_pool_destroy(pool); return NULL; }
         ring_queue_init(&w->inbox, V4_INBOX_CAP);
         w->inbox_buf=malloc((size_t)V4_INBOX_CAP*sizeof(V4Task));
@@ -233,8 +233,8 @@ WSPoolV4* v4_pool_create(int cores_override){
     }
     for (int i=0;i<nw;i++){
         if (!v4_thread_start(&pool->workers[i].handle, v4_worker_fn, &pool->workers[i])){
-            atomic_set(&pool->stop,1);
-            for (int j=0;j<i;j++){ thread_wait_wake(&pool->workers[j].wait); v4_thread_join(pool->workers[j].handle); }
+            atomic_set_inline(&pool->stop,1);
+            for (int j=0;j<i;j++){ thread_wait_wake_inline(&pool->workers[j].wait); v4_thread_join(pool->workers[j].handle); }
             v4_pool_destroy(pool); return NULL;
         }
     }
@@ -243,13 +243,13 @@ WSPoolV4* v4_pool_create(int cores_override){
 
 bool v4_pool_submit(WSPoolV4* pool, v4_task_fn fn, void* arg){
     if (!pool || !fn) return false;
-    if (atomic_get(&pool->stop)) return false;
+    if (atomic_get_inline(&pool->stop)) return false;
     V4Task t = { fn, arg };                 /* sem rdtscp */
 
     /* reentrante: deque local (Chase-Lev). inline se cheio (evita self-deadlock). */
     V4Worker* me=g_v4_self;
     if (me && me->pool==pool){
-        atomic_add(&me->pending,1);
+        atomic_add_inline(&me->pending,1);
         if (v4_deque_push(&me->deque,&t)) return true;
         v4_run(me,&t);                      /* inline: roda agora e decrementa */
         return true;
@@ -257,15 +257,15 @@ bool v4_pool_submit(WSPoolV4* pool, v4_task_fn fn, void* arg){
 
     int nw=pool->n_workers; int spins=0;
     for (;;){
-        uint32_t start=atomic_u32_add(&pool->submit_rr,1u);
+        uint32_t start=atomic_u32_add_inline(&pool->submit_rr,1u);
         for (int probe=0;probe<nw;probe++){
             int idx=(int)((start+(uint32_t)probe)%(uint32_t)nw);
             V4Worker* w=&pool->workers[idx];
-            atomic_add(&w->pending,1);
-            if (xring_push_mp(&w->inbox,w->inbox_buf,&t)){ thread_wait_wake(&w->wait); return true; }
-            atomic_sub(&w->pending,1);       /* desfaz se nao coube */
+            atomic_add_inline(&w->pending,1);
+            if (xring_push_mp(&w->inbox,w->inbox_buf,&t)){ thread_wait_wake_inline(&w->wait); return true; }
+            atomic_sub_inline(&w->pending,1);       /* desfaz se nao coube */
         }
-        if (atomic_get(&pool->stop)) return false;
+        if (atomic_get_inline(&pool->stop)) return false;
         if      (spins<64)  xcpu_pause();
         else if (spins<256) v4_yield();
         else                v4_sleep0();
@@ -274,19 +274,19 @@ bool v4_pool_submit(WSPoolV4* pool, v4_task_fn fn, void* arg){
 }
 
 static long v4_total_pending(WSPoolV4* pool){
-    long s=0; for (int i=0;i<pool->n_workers;i++) s+=atomic_get(&pool->workers[i].pending); return s;
+    long s=0; for (int i=0;i<pool->n_workers;i++) s+=atomic_get_inline(&pool->workers[i].pending); return s;
 }
 void v4_pool_wait_idle(WSPoolV4* pool){ if(!pool)return; while (v4_total_pending(pool)>0) v4_sleep0(); }
 void v4_pool_dims(WSPoolV4* pool, int* w, int* l){ if(!pool)return; if(w)*w=pool->n_workers; if(l)*l=pool->n_workers; }
 
 void v4_pool_destroy(WSPoolV4* pool){
     if (!pool) return;
-    if (!atomic_get(&pool->stop)){
+    if (!atomic_get_inline(&pool->stop)){
         v4_pool_wait_idle(pool);
-        atomic_set(&pool->stop,1);
+        atomic_set_inline(&pool->stop,1);
         if (pool->workers)
             for (int i=0;i<pool->n_workers;i++){
-                thread_wait_wake(&pool->workers[i].wait);
+                thread_wait_wake_inline(&pool->workers[i].wait);
                 if (pool->workers[i].handle) v4_thread_join(pool->workers[i].handle);
             }
     }

@@ -27,9 +27,6 @@
     <ClInclude Include="src\thread_handler.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="src\memory_handler.h">
-      <Filter>src</Filter>
-    </ClInclude>
     <ClInclude Include="src\memory_pool.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -63,9 +60,6 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="src\string_handler.c">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="src\memory_handler.c">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="src\memory_pool.c">

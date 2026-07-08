@@ -1,4 +1,4 @@
-//  MIT License – Modified for Mandatory Attribution
+//  MIT License ï¿½ Modified for Mandatory Attribution
 //  
 //  Copyright(c) 2025 Sergio Paludo
 //
@@ -7,8 +7,8 @@
 //  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, 
 //  to use, copy, modify, merge, publish, distribute, and sublicense the software, including for commercial purposes, provided that:
 //  
-//     01. The original author’s credit is retained in all copies of the source code;
-//     02. The original author’s credit is included in any code generated, derived, or distributed from this software, including templates, libraries, or code - generating scripts.
+//     01. The original authorï¿½s credit is retained in all copies of the source code;
+//     02. The original authorï¿½s credit is included in any code generated, derived, or distributed from this software, including templates, libraries, or code - generating scripts.
 //  
 //  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 
@@ -69,15 +69,11 @@ extern "C" {
 
 
 
-#ifdef _MSC_VER
-    #define XTHREAD_INLINE static __forceinline
-#else
-    #define XTHREAD_INLINE static inline __attribute__((always_inline))
-#endif
 
 
 
-    XTHREAD_INLINE void thread_mutex_init(xmutex_t* mutex)
+
+    STATIC_INLINE void thread_mutex_init_inline(xmutex_t* mutex)
     {
 #ifdef XPLATBASE_WIN
         InitializeCriticalSection(mutex);
@@ -88,7 +84,7 @@ extern "C" {
 
 
 
-    XTHREAD_INLINE void thread_mutex_lock(xmutex_t* mutex)
+    STATIC_INLINE void thread_mutex_lock_inline(xmutex_t* mutex)
     {
 #ifdef XPLATBASE_WIN
         EnterCriticalSection(mutex);
@@ -99,7 +95,7 @@ extern "C" {
 
 
 
-    XTHREAD_INLINE void thread_mutex_unlock(xmutex_t* mutex)
+    STATIC_INLINE void thread_mutex_unlock_inline(xmutex_t* mutex)
     {
 #ifdef XPLATBASE_WIN
         LeaveCriticalSection(mutex);
@@ -110,7 +106,7 @@ extern "C" {
 
 
 
-    XTHREAD_INLINE void thread_mutex_destroy(xmutex_t* mutex)
+    STATIC_INLINE void thread_mutex_destroy_inline(xmutex_t* mutex)
     {
 #ifdef XPLATBASE_WIN
         DeleteCriticalSection(mutex);
@@ -121,7 +117,7 @@ extern "C" {
 
 
 
-    XTHREAD_INLINE void thread_yield(void)
+    STATIC_INLINE void thread_yield_inline(void)
     {
 #ifdef XPLATBASE_WIN
         SwitchToThread();
@@ -132,7 +128,7 @@ extern "C" {
 
 
 
-    XTHREAD_INLINE void thread_sleep0(void)
+    STATIC_INLINE void thread_sleep0_inline(void)
     {
 #ifdef XPLATBASE_WIN
         Sleep(0);
@@ -144,7 +140,7 @@ extern "C" {
 
 
 
-    XTHREAD_INLINE long long thread_atomic64_load(xthread_atomic64* p)
+    STATIC_INLINE long long thread_atomic64_load_inline(xthread_atomic64* p)
     {
 #ifdef XPLATBASE_WIN
         return (long long)(*p);
@@ -155,7 +151,7 @@ extern "C" {
 
 
 
-    XTHREAD_INLINE void thread_atomic64_store(xthread_atomic64* p, long long v)
+    STATIC_INLINE void thread_atomic64_store_inline(xthread_atomic64* p, long long v)
     {
 #ifdef XPLATBASE_WIN
         *p = (LONG64)v;
@@ -166,7 +162,7 @@ extern "C" {
 
 
 
-    XTHREAD_INLINE void thread_fence(void)
+    STATIC_INLINE void thread_fence_inline(void)
     {
 #ifdef XPLATBASE_WIN
         MemoryBarrier();
@@ -177,7 +173,7 @@ extern "C" {
 
 
 
-    XTHREAD_INLINE int thread_atomic64_cas(xthread_atomic64* p, long long expected, long long desired)
+    STATIC_INLINE int thread_atomic64_cas_inline(xthread_atomic64* p, long long expected, long long desired)
     {
 #ifdef XPLATBASE_WIN
         return InterlockedCompareExchange64(p, (LONG64)desired, (LONG64)expected) == (LONG64)expected;
@@ -187,6 +183,21 @@ extern "C" {
 #endif
     }
 
+
+
+    /* Versoes com linkage externa (extern + dllexport em Release), para consumo
+     * fora da lib (DLL). Apenas encaminham para a variante _inline (definicao
+     * unica em thread_handler.c) -- uso interno da lib deve preferir os _inline. */
+    XPLATBASE_API void      thread_mutex_init(xmutex_t* mutex);
+    XPLATBASE_API void      thread_mutex_lock(xmutex_t* mutex);
+    XPLATBASE_API void      thread_mutex_unlock(xmutex_t* mutex);
+    XPLATBASE_API void      thread_mutex_destroy(xmutex_t* mutex);
+    XPLATBASE_API void      thread_yield(void);
+    XPLATBASE_API void      thread_sleep0(void);
+    XPLATBASE_API long long thread_atomic64_load(xthread_atomic64* p);
+    XPLATBASE_API void      thread_atomic64_store(xthread_atomic64* p, long long v);
+    XPLATBASE_API void      thread_fence(void);
+    XPLATBASE_API int       thread_atomic64_cas(xthread_atomic64* p, long long expected, long long desired);
 
 
 #ifdef __cplusplus

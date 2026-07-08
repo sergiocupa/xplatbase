@@ -60,30 +60,30 @@ static void ring_writer_lock(RingQueue* r, int pos)
 {
     for (;;) {
         int expected = 0;
-        if (atomic_cas(&r->peek_guard[pos], &expected, -1))
+        if (atomic_cas_inline(&r->peek_guard[pos], &expected, -1))
             return;
     }
 }
 
 static void ring_writer_unlock(RingQueue* r, int pos)
 {
-    atomic_set(&r->peek_guard[pos], 0);
+    atomic_set_inline(&r->peek_guard[pos], 0);
 }
 
 static boolean ring_reader_lock(RingQueue* r, int pos)
 {
-    int readers = atomic_get(&r->peek_guard[pos]);
+    int readers = atomic_get_inline(&r->peek_guard[pos]);
     for (;;) {
         if (readers < 0 || readers == INT32_MAX)
             return false;
-        if (atomic_cas(&r->peek_guard[pos], &readers, readers + 1))
+        if (atomic_cas_inline(&r->peek_guard[pos], &readers, readers + 1))
             return true;
     }
 }
 
 static void ring_reader_unlock(RingQueue* r, int pos)
 {
-    atomic_sub(&r->peek_guard[pos], 1);
+    atomic_sub_inline(&r->peek_guard[pos], 1);
 }
 
 void ring_queue_init(RingQueue* r, int capacity)
@@ -94,8 +94,8 @@ void ring_queue_init(RingQueue* r, int capacity)
     r->mask = 0;
     r->seqno = NULL;
     r->peek_guard = NULL;
-    atomic_u32_set(&r->head, 0);
-    atomic_u32_set(&r->tail, 0);
+    atomic_u32_set_inline(&r->head, 0);
+    atomic_u32_set_inline(&r->tail, 0);
 
     if (capacity <= 0 || capacity > (1 << 30) ||
         (capacity & (capacity - 1)) != 0)
@@ -116,8 +116,8 @@ void ring_queue_init(RingQueue* r, int capacity)
     }
 
     for (int i = 0; i < capacity; i++) {
-        atomic_u32_set(&r->seqno[i], (uint32_t)i);
-        atomic_set(&r->peek_guard[i], 0);
+        atomic_u32_set_inline(&r->seqno[i], (uint32_t)i);
+        atomic_set_inline(&r->peek_guard[i], 0);
     }
 }
 
@@ -137,17 +137,17 @@ int ring_queue_count(RingQueue* r)
     if (!r || r->capacity <= 0) return 0;
 
     for (int retry = 0; retry < 4; retry++) {
-        uint32_t h1 = atomic_u32_get(&r->head);
-        uint32_t t = atomic_u32_get(&r->tail);
-        uint32_t h2 = atomic_u32_get(&r->head);
+        uint32_t h1 = atomic_u32_get_inline(&r->head);
+        uint32_t t = atomic_u32_get_inline(&r->tail);
+        uint32_t h2 = atomic_u32_get_inline(&r->head);
         if (h1 == h2) {
             uint32_t count = t - h1;
             return count > (uint32_t)r->capacity ? r->capacity : (int)count;
         }
     }
 
-    uint32_t h = atomic_u32_get(&r->head);
-    uint32_t t = atomic_u32_get(&r->tail);
+    uint32_t h = atomic_u32_get_inline(&r->head);
+    uint32_t t = atomic_u32_get_inline(&r->tail);
     uint32_t count = t - h;
     return count > (uint32_t)r->capacity ? r->capacity : (int)count;
 }
@@ -179,13 +179,13 @@ boolean ring_queue_push_(RingQueue* r, void* buffer, const void* item, int item_
         item_size <= 0 || ring_queue_full(r))
         return false;
 
-    uint32_t t = atomic_u32_get(&r->tail);
+    uint32_t t = atomic_u32_get_inline(&r->tail);
     int pos = (int)(t & (uint32_t)r->mask);
     ring_writer_lock(r, pos);
     memcpy((char*)buffer + (size_t)pos * (size_t)item_size, item, (size_t)item_size);
     ring_writer_unlock(r, pos);
-    atomic_u32_set(&r->seqno[pos], t + 1u);
-    atomic_u32_add(&r->tail, 1u);
+    atomic_u32_set_inline(&r->seqno[pos], t + 1u);
+    atomic_u32_add_inline(&r->tail, 1u);
     return true;
 }
 
@@ -195,11 +195,11 @@ boolean ring_queue_pop_(RingQueue* r, void* buffer, void* item, int item_size)
         ring_queue_empty(r))
         return false;
 
-    uint32_t h = atomic_u32_get(&r->head);
+    uint32_t h = atomic_u32_get_inline(&r->head);
     int pos = (int)(h & (uint32_t)r->mask);
     memcpy(item, (char*)buffer + (size_t)pos * (size_t)item_size, (size_t)item_size);
-    atomic_u32_set(&r->seqno[pos], h + (uint32_t)r->capacity);
-    atomic_u32_add(&r->head, 1u);
+    atomic_u32_set_inline(&r->seqno[pos], h + (uint32_t)r->capacity);
+    atomic_u32_add_inline(&r->head, 1u);
     return true;
 }
 
@@ -209,14 +209,14 @@ boolean ring_queue_peek_(RingQueue* r, void* buffer, void* item, int item_size)
         return false;
 
     for (int retry = 0; retry < 4; retry++) {
-        uint32_t h = atomic_u32_get(&r->head);
+        uint32_t h = atomic_u32_get_inline(&r->head);
         int pos = (int)(h & (uint32_t)r->mask);
-        if (atomic_u32_get(&r->seqno[pos]) != h + 1u)
+        if (atomic_u32_get_inline(&r->seqno[pos]) != h + 1u)
             return false;
         if (!ring_reader_lock(r, pos))
             continue;
-        if (atomic_u32_get(&r->head) == h &&
-            atomic_u32_get(&r->seqno[pos]) == h + 1u) {
+        if (atomic_u32_get_inline(&r->head) == h &&
+            atomic_u32_get_inline(&r->seqno[pos]) == h + 1u) {
             memcpy(item, (char*)buffer + (size_t)pos * (size_t)item_size,
                    (size_t)item_size);
             ring_reader_unlock(r, pos);
@@ -238,13 +238,13 @@ boolean ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item, int it
 
     uint32_t t;
     for (;;) {
-        t = atomic_u32_get(&r->tail);
+        t = atomic_u32_get_inline(&r->tail);
         int pos = (int)(t & (uint32_t)r->mask);
-        uint32_t seq = atomic_u32_get(&r->seqno[pos]);
+        uint32_t seq = atomic_u32_get_inline(&r->seqno[pos]);
         uint32_t diff = seq - t;
 
         if (diff == 0) {
-            if (atomic_u32_cas(&r->tail, &t, t + 1u))
+            if (atomic_u32_cas_inline(&r->tail, &t, t + 1u))
                 break;
         } else if (diff & UINT32_C(0x80000000)) {
             return false;
@@ -255,7 +255,7 @@ boolean ring_queue_push_mp_(RingQueue* r, void* buffer, const void* item, int it
     ring_writer_lock(r, pos);
     memcpy((char*)buffer + (size_t)pos * (size_t)item_size, item, (size_t)item_size);
     ring_writer_unlock(r, pos);
-    atomic_u32_set(&r->seqno[pos], t + 1u);
+    atomic_u32_set_inline(&r->seqno[pos], t + 1u);
     return true;
 }
 
@@ -266,13 +266,13 @@ boolean ring_queue_pop_mc_(RingQueue* r, void* buffer, void* item, int item_size
 
     uint32_t h;
     for (;;) {
-        h = atomic_u32_get(&r->head);
+        h = atomic_u32_get_inline(&r->head);
         int pos = (int)(h & (uint32_t)r->mask);
-        uint32_t seq = atomic_u32_get(&r->seqno[pos]);
+        uint32_t seq = atomic_u32_get_inline(&r->seqno[pos]);
         uint32_t diff = seq - (h + 1u);
 
         if (diff == 0) {
-            if (atomic_u32_cas(&r->head, &h, h + 1u))
+            if (atomic_u32_cas_inline(&r->head, &h, h + 1u))
                 break;
         } else if (diff & UINT32_C(0x80000000)) {
             return false;
@@ -281,6 +281,6 @@ boolean ring_queue_pop_mc_(RingQueue* r, void* buffer, void* item, int item_size
 
     int pos = (int)(h & (uint32_t)r->mask);
     memcpy(item, (char*)buffer + (size_t)pos * (size_t)item_size, (size_t)item_size);
-    atomic_u32_set(&r->seqno[pos], h + (uint32_t)r->capacity);
+    atomic_u32_set_inline(&r->seqno[pos], h + (uint32_t)r->capacity);
     return true;
 }
