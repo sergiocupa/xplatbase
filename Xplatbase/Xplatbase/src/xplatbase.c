@@ -15,6 +15,7 @@
 #include "thread_pool.h"
 #include "thread_handler.h"
 #include "memory_pool.h"
+#include "mem_leak_watch.h"
 #include "../include/xplatbase.h"
 #include "event_handler.h"
 #include <stdio.h>
@@ -55,6 +56,8 @@ void platform_init()
 	thread_init(memop_on_created_thread, memop_on_ended_thread);
 
 	pool_create();
+
+	mem_leak_watch_start(NULL);
 
 	platform_initialized = true;
 }

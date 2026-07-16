@@ -9,6 +9,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "thread_pool_bench", "..\Tes
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "memory_pool_test", "..\Tester\memory_pool\memory_pool_test.vcxproj", "{9A15B8D7-6D1D-4E48-A905-311427CF4C17}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "bench", "..\bench\bench.vcxproj", "{F4EBDF11-9679-43FB-8EF8-7D5CDEDDC80B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -41,6 +43,14 @@ Global
 		{9A15B8D7-6D1D-4E48-A905-311427CF4C17}.Release|x64.Build.0 = Release|x64
 		{9A15B8D7-6D1D-4E48-A905-311427CF4C17}.Release|x86.ActiveCfg = Release|x64
 		{9A15B8D7-6D1D-4E48-A905-311427CF4C17}.Release|x86.Build.0 = Release|x64
+		{F4EBDF11-9679-43FB-8EF8-7D5CDEDDC80B}.Debug|x64.ActiveCfg = Debug|x64
+		{F4EBDF11-9679-43FB-8EF8-7D5CDEDDC80B}.Debug|x64.Build.0 = Debug|x64
+		{F4EBDF11-9679-43FB-8EF8-7D5CDEDDC80B}.Debug|x86.ActiveCfg = Debug|x64
+		{F4EBDF11-9679-43FB-8EF8-7D5CDEDDC80B}.Debug|x86.Build.0 = Debug|x64
+		{F4EBDF11-9679-43FB-8EF8-7D5CDEDDC80B}.Release|x64.ActiveCfg = Release|x64
+		{F4EBDF11-9679-43FB-8EF8-7D5CDEDDC80B}.Release|x64.Build.0 = Release|x64
+		{F4EBDF11-9679-43FB-8EF8-7D5CDEDDC80B}.Release|x86.ActiveCfg = Release|x64
+		{F4EBDF11-9679-43FB-8EF8-7D5CDEDDC80B}.Release|x86.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

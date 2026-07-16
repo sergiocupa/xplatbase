@@ -21,6 +21,7 @@
 #include <windows.h>
 
 #include "../Xplatbase/Xplatbase/src/memory_pool.h"
+#include "../Xplatbase/Xplatbase/src/mem_leak_watch.h"
 #include "rpmalloc/rpmalloc/rpmalloc.h"
 #include "mimalloc/include/mimalloc.h"
 
@@ -69,6 +70,50 @@ static void memop_g_fini(void) { memop_shutdown(); }
 static void* memop_a(size_t n) { return memop_alloc_raw(n); }     /* void* em registrador */
 static void  memop_f(void* p, size_t n) { (void)n; memop_free_raw(p); }
 
+/* --- memop + mem_leak_watch --- *
+ * Mesmo alocador (memop_a/memop_f), com o monitor de vazamento ligado por
+ * cima -- mede o custo real de ter o site (CaptureStackBackTrace por
+ * span_create) e o timer barato (memop_get_stats() sob G.lock/G.cache_lock)
+ * ativos durante o benchmark, em duas configuracoes de intervalo:
+ *   - "dbg":  intervalo curto (200ms) -- varredura de raizes frequente,
+ *     pior caso de contencao pelo timer durante o benchmark.
+ *   - "prod": intervalo longo (60s) -- o timer praticamente nao dispara
+ *     durante a corrida (cenarios duram segundos), custo esperado ~= memop puro.
+ * default_config() usa _DEBUG p/ escolher o intervalo, mas este bench
+ * compila com /DNDEBUG -- por isso o interval_ms e sobrescrito explicitamente
+ * abaixo em vez de confiar no default. */
+static void memop_lw_dbg_g_init(void)
+{
+    MemLeakWatchConfig cfg;
+    thread_init(NULL, NULL);
+    memop_init();
+    mem_leak_watch_default_config(&cfg);   /* log_path fica no default: absoluto, ao lado do .exe */
+    cfg.interval_ms = 200;
+    mem_leak_watch_start(&cfg);
+}
+static void memop_lw_dbg_g_fini(void)
+{
+    mem_leak_watch_scan_now();   /* forca 1 varredura real (limiar de RAM nunca e cruzado aqui) */
+    mem_leak_watch_stop();
+    memop_shutdown();
+}
+
+static void memop_lw_prod_g_init(void)
+{
+    MemLeakWatchConfig cfg;
+    thread_init(NULL, NULL);
+    memop_init();
+    mem_leak_watch_default_config(&cfg);   /* log_path fica no default: absoluto, ao lado do .exe */
+    cfg.interval_ms = 60000;
+    mem_leak_watch_start(&cfg);
+}
+static void memop_lw_prod_g_fini(void)
+{
+    mem_leak_watch_scan_now();
+    mem_leak_watch_stop();
+    memop_shutdown();
+}
+
 /* --- rpmalloc --- */
 static void rp_g_init(void) { rpmalloc_initialize(0); }
 static void rp_g_fini(void) { rpmalloc_finalize(); }
@@ -82,10 +127,12 @@ static void* mi_a(size_t n) { return mi_malloc(n); }
 static void  mi_f(void* p, size_t n) { (void)n; mi_free(p); }
 
 static Alloc ALLOCS[] = {
-    { "sys-malloc", noop,         noop,         noop,      noop,      sys_alloc, sys_free },
-    { "memop-pool", memop_g_init, memop_g_fini, noop,      noop,      memop_a,   memop_f  },
-    { "rpmalloc",   rp_g_init,    rp_g_fini,    rp_t_init, rp_t_fini, rp_a,      rp_f     },
-    { "mimalloc",   noop,         noop,         noop,      noop,      mi_a,      mi_f     },
+    { "sys-malloc",     noop,             noop,              noop,      noop,      sys_alloc, sys_free },
+    { "memop-pool",     memop_g_init,     memop_g_fini,      noop,      noop,      memop_a,   memop_f  },
+    { "memop-lw-dbg",   memop_lw_dbg_g_init,  memop_lw_dbg_g_fini,  noop,  noop,  memop_a,   memop_f  },
+    { "memop-lw-prod",  memop_lw_prod_g_init, memop_lw_prod_g_fini, noop,  noop,  memop_a,   memop_f  },
+    { "rpmalloc",       rp_g_init,        rp_g_fini,         rp_t_init, rp_t_fini, rp_a,      rp_f     },
+    { "mimalloc",       noop,             noop,              noop,      noop,      mi_a,      mi_f     },
 };
 #define NALLOC (int)(sizeof(ALLOCS)/sizeof(ALLOCS[0]))
 

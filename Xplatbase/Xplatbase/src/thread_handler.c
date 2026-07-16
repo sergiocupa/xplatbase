@@ -178,6 +178,19 @@ void thread_init(CreatedThread created_thread, CreatedThread ended_thread)
     thread_unlock();
 }
 
+void thread_enum(ThreadEnumCb cb, void* ctx)
+{
+    int i;
+    if (!cb) return;
+
+    thread_handler_init_once();
+
+    thread_lock();
+    for (i = 0; i < (int)Threads.Count; i++)
+        cb((const Thread*)Threads.Items[i], ctx);
+    thread_unlock();
+}
+
 
 
 /* Definicao unica (linkage externa) das versoes exportadas -- so encaminham

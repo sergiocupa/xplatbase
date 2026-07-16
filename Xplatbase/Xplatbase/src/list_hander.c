@@ -14,9 +14,22 @@
 
 #include "../include/xplatbase.h"
 #include "event_handler.h"
-#include "memory_pool.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* NAO usar memop_alloc_raw/memop_free_raw aqui, de proposito.
+ *
+ * list_hander.c e infraestrutura de vida do PROCESSO (ex.: a lista `Threads`
+ * de thread_handler.c e global, nunca resetada). memory_pool.c e projetado
+ * pra ser RESETAVEL (memop_shutdown()/memop_test_reset() dao VirtualFree em
+ * todos os segmentos do pool). Se o Items de uma ListXPB de vida longa fosse
+ * alocado do pool, um memop_shutdown() no meio do programa (comum em testes/
+ * benchmarks que trocam de alocador) libera a memoria por baixo do ponteiro
+ * -- Threads.Items fica dangling, e o proximo thread_create() escreve em
+ * memoria ja devolvida ao SO (confirmado: SEGV reproduzido no bench.c ao
+ * criar a primeira thread real depois de um memop_shutdown() anterior).
+ * malloc/realloc puro nao tem esse acoplamento de ciclo de vida. */
 
 
 
@@ -27,7 +40,7 @@ void xpb_list_init_ext(ListXPB* list, int32 initial_count, uint64 type_size, con
     list->Count    = 0;
 
     /* Items e o VETOR de ponteiros em si (sem header por item). */
-    list->Items = (void**)memop_alloc_raw((uint64)list->Max * sizeof(void*));
+    list->Items = (void**)malloc((size_t)list->Max * sizeof(void*));
     if (!list->Items)
     {
         CallContextGlobalEvent ctx = { func, file, line };
@@ -37,7 +50,7 @@ void xpb_list_init_ext(ListXPB* list, int32 initial_count, uint64 type_size, con
 
 ListXPB* xpb_list_new_ext(int initial_count, uint64 type_size, const char* func, const char* file, int line)
 {
-    ListXPB* list = (ListXPB*)memop_alloc_raw(sizeof(ListXPB));
+    ListXPB* list = (ListXPB*)malloc(sizeof(ListXPB));
     if (!list)
     {
         CallContextGlobalEvent ctx = { func, file, line };
@@ -49,7 +62,7 @@ ListXPB* xpb_list_new_ext(int initial_count, uint64 type_size, const char* func,
     list->Max      = initial_count >= 0 ? initial_count : INITIAL_LIST_COUNT;
     list->Count    = 0;
 
-    list->Items = (void**)memop_alloc_raw((uint64)list->Max * sizeof(void*));
+    list->Items = (void**)malloc((size_t)list->Max * sizeof(void*));
     if (!list->Items)
     {
         CallContextGlobalEvent ctx = { func, file, line };
@@ -73,7 +86,7 @@ void xpb_list_add_ext(ListXPB* list, void* instance, uint64 type_size, const cha
     if (sz >= list->Max)
     {
         uint64 new_max   = (uint64)list->Max * 2;
-        void** new_items = (void**)memop_alloc_raw(new_max * sizeof(void*));
+        void** new_items = (void**)realloc(list->Items, (size_t)(new_max * sizeof(void*)));
         if (!new_items)
         {
             CallContextGlobalEvent ctx = { func, file, line };
@@ -81,8 +94,6 @@ void xpb_list_add_ext(ListXPB* list, void* instance, uint64 type_size, const cha
             return;
         }
 
-        memcpy(new_items, list->Items, (size_t)list->Count * sizeof(void*));
-        memop_free_raw(list->Items);
         list->Items = new_items;
         list->Max   = (uint64)new_max;
     }

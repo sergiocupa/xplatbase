@@ -42,11 +42,11 @@ set "SRC=..\Xplatbase\Xplatbase\src"
 set "INC=..\Xplatbase\Xplatbase\include"
 
 cl /nologo /O2 /MT /std:c11 /experimental:c11atomics ^
-   /DNDEBUG /DXPLATBASE_NO_AUTO_INIT /DMEMOP_NO_STATS ^
+   /DNDEBUG /DXPLATBASE_NO_AUTO_INIT /DMEMOP_NO_STATS /D_CRT_SECURE_NO_WARNINGS ^
    /I "%INC%" /I mimalloc\include ^
    bench.c ^
-   "%SRC%\memory_pool.c" "%SRC%\atomics.c" "%SRC%\thread_wait.c" ^
-   "%SRC%\thread_handler.c" "%SRC%\list_hander.c" "%SRC%\memory_handler.c" ^
+   "%SRC%\memory_pool.c" "%SRC%\mem_leak_watch.c" "%SRC%\atomics.c" "%SRC%\thread_wait.c" ^
+   "%SRC%\thread_handler.c" "%SRC%\list_hander.c" ^
    "%SRC%\event_handler.c" ^
    rpmalloc\rpmalloc\rpmalloc.c mimalloc\src\static.c ^
    /Fe:bench.exe /link advapi32.lib

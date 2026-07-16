@@ -60,6 +60,49 @@ extern "C" {
     void memop_on_created_thread(const Thread* thr);
     void memop_on_ended_thread(const Thread* thr);
 
+
+    /* ----------------------------------------------------------------------
+     * Introspeccao para mem_leak_watch (opt-in, so grava/copia se habilitado).
+     * mem_leak_watch NUNCA toca em MemHeap/MemSpan diretamente -- so consome
+     * este snapshot, que ja vem desacoplado do layout interno do alocador.
+     * ---------------------------------------------------------------------- */
+
+    /* Liga/desliga a captura do site de origem por span em span_create.
+     * Desligado (default) = custo zero, nem a captura roda.
+     *
+     * NOTA DE DESIGN: nao da p/ propagar __FILE__/__LINE__ do chamador ate
+     * aqui sem virar macro e mudar a assinatura publica de memop_alloc_raw
+     * (usada em toda a lib e por consumidores externos). Em vez disso o site
+     * e um mini-backtrace (enderecos crus, CaptureStackBackTrace) capturado
+     * DENTRO de span_create -- pega o caminho de chamada real sem tocar em
+     * nenhuma assinatura existente. Simbolizacao (endereco -> nome) e feita
+     * sob demanda, so no relatorio (mem_leak_watch), nunca no hot path. */
+    #define MEMOP_SITE_MAX_FRAMES 6
+
+    void memop_leak_watch_enable(boolean on);
+
+    typedef struct MemSpanInfo
+    {
+        void*  base;         /* endereco do span (64KB-alinhado) */
+        uint32 class_id;     /* MEMOP_CLASS_LARGE p/ blocos grandes (nao rastreados ainda) */
+        uint32 stride;       /* tamanho usavel por bloco */
+        uint32 block_count;  /* blocos no span */
+        uint32 used;         /* blocos em uso agora (nao-atomico, snapshot aproximado) */
+        void*  site_frames[MEMOP_SITE_MAX_FRAMES]; /* 0 = vazio/nao capturado */
+        int    site_frame_count;
+        uint64 created_ms;   /* memop_now_ms() no momento do span_create */
+    }
+    MemSpanInfo;
+
+    /* Numero de spans vivos AGORA (heaps->spans[] + full lists), para
+     * dimensionar o array antes do snapshot. Aproximado sob concorrencia. */
+    uint64 memop_span_count(void);
+
+    /* Copia metadado de todos os spans vivos para 'out' (capacidade 'max').
+     * Toma o lock global so durante a copia; NAO segura nada depois de
+     * retornar -- seguro chamar antes de suspender qualquer thread. */
+    uint64 memop_snapshot_spans(MemSpanInfo* out, uint64 max);
+
 #ifdef __cplusplus
 }
 #endif

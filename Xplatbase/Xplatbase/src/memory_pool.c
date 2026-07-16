@@ -205,6 +205,109 @@ static uint8_t g_size2class[MEMOP_MAX_SMALL / 8];
 static uint32 g_class_stride[MEMOP_CLASS_COUNT];
 
 
+/* ----------------------------------------------------------------------- */
+/*  mem_leak_watch: tabela de site de origem por span (opt-in)             */
+/*                                                                         */
+/*  Desligado por default -- custo zero (nem a captura roda). Ligado, so   */
+/*  entra no caminho de span_create (span novo), NUNCA no alloc/free de    */
+/*  bloco -- span serve dezenas/centenas de blocos, entao o custo e        */
+/*  amortizado. Tabela de tamanho fixo (open addressing); se lotar, apenas */
+/*  para de gravar novas entradas (degradacao graciosa, feature so         */
+/*  diagnostica, nao pode competir por memoria com a propria aplicacao).   */
+/* ----------------------------------------------------------------------- */
+static xatomic_int g_leak_watch_enabled;
+static uint64 memop_now_ms(void);   /* definida mais abaixo (relogio monotonico) */
+
+#ifndef MEMOP_SITE_TABLE_BITS
+#define MEMOP_SITE_TABLE_BITS 12
+#endif
+#define MEMOP_SITE_TABLE_SIZE (1u << MEMOP_SITE_TABLE_BITS)
+#define MEMOP_SITE_TABLE_MASK (MEMOP_SITE_TABLE_SIZE - 1u)
+
+typedef struct MemSiteEntry
+{
+    void*  span_base;   /* NULL = slot livre */
+    void*  frames[MEMOP_SITE_MAX_FRAMES];
+    int    frame_count;
+    uint64 created_ms;
+}
+MemSiteEntry;
+
+static MemSiteEntry g_site_table[MEMOP_SITE_TABLE_SIZE];
+static xmutex_t     g_site_lock;
+
+static uint32 memop_site_hash(void* span_base)
+{
+    /* span e 64KB-alinhado: descarta os bits de alinhamento antes de misturar. */
+    uint64 v = (uint64)(uintptr_t)span_base >> 16;
+    v ^= v >> 33; v *= 0xff51afd7ed558ccdULL;
+    v ^= v >> 33; v *= 0xc4ceb9fe1a85ec53ULL;
+    v ^= v >> 33;
+    return (uint32)v & MEMOP_SITE_TABLE_MASK;
+}
+
+void memop_leak_watch_enable(boolean on)
+{
+    atomic_set_inline(&g_leak_watch_enabled, on ? 1 : 0);
+}
+
+/* Chamado so de span_create (caminho frio). Sob g_site_lock: baixa
+ * contencao esperada (frequencia = criacao de span, nao de bloco). */
+static void memop_site_record(void* span_base)
+{
+    uint32 idx, start;
+
+    if (!atomic_get_inline(&g_leak_watch_enabled)) return;
+
+    thread_mutex_lock_inline(&g_site_lock);
+    idx = start = memop_site_hash(span_base);
+    for (;;)
+    {
+        MemSiteEntry* e = &g_site_table[idx];
+        if (e->span_base == NULL || e->span_base == span_base)
+        {
+            e->span_base = span_base;
+#ifdef XPLATBASE_WIN
+            e->frame_count = (int)CaptureStackBackTrace(1, MEMOP_SITE_MAX_FRAMES, e->frames, NULL);
+#else
+            e->frame_count = 0;
+#endif
+            e->created_ms = memop_now_ms();
+            break;
+        }
+        idx = (idx + 1u) & MEMOP_SITE_TABLE_MASK;
+        if (idx == start) break;   /* tabela cheia: descarta silenciosamente */
+    }
+    thread_mutex_unlock_inline(&g_site_lock);
+}
+
+/* Chamado so por memop_snapshot_spans (caminho frio/diagnostico). */
+static void memop_site_lookup(void* span_base, MemSpanInfo* out)
+{
+    uint32 idx, start;
+    out->site_frame_count = 0;
+    out->created_ms = 0;
+    memset(out->site_frames, 0, sizeof(out->site_frames));
+
+    thread_mutex_lock_inline(&g_site_lock);
+    idx = start = memop_site_hash(span_base);
+    for (;;)
+    {
+        MemSiteEntry* e = &g_site_table[idx];
+        if (e->span_base == NULL) break;
+        if (e->span_base == span_base)
+        {
+            memcpy(out->site_frames, e->frames, sizeof(out->site_frames));
+            out->site_frame_count = e->frame_count;
+            out->created_ms = e->created_ms;
+            break;
+        }
+        idx = (idx + 1u) & MEMOP_SITE_TABLE_MASK;
+        if (idx == start) break;
+    }
+    thread_mutex_unlock_inline(&g_site_lock);
+}
+
 
 
 /* ----------------------------------------------------------------------- */
@@ -532,6 +635,7 @@ void memop_init(void)
             {
                 thread_mutex_init_inline(&G.lock);
                 thread_mutex_init_inline(&G.cache_lock);
+                thread_mutex_init_inline(&g_site_lock);
                 memop_build_size2class();
                 atomic_set_inline(&g_init_state, MEMOP_READY);
                 return;
@@ -559,6 +663,8 @@ static MemSpan* span_create(MemHeap* heap, uint32 class_id)
     uint32   stride = g_class_stride[class_id];
     void*    mem = chunk_acquire(heap);      /* cache local -> global -> SO */
     if (!mem) return NULL;
+
+    memop_site_record(mem);   /* no-op se leak_watch desligado (checa antes de tudo) */
 
     span = (MemSpan*)mem;
     span->owner = heap;
@@ -948,6 +1054,8 @@ void memop_shutdown(void)
     segments_free_all();
     thread_mutex_destroy_inline(&G.cache_lock);
     thread_mutex_destroy_inline(&G.lock);
+    thread_mutex_destroy_inline(&g_site_lock);
+    memset(g_site_table, 0, sizeof(g_site_table));
 
     memset(&G, 0, sizeof(G));
     /* Zera a TLS da thread chamadora: a proxima alloc dela pega um heap novo.
@@ -1002,6 +1110,70 @@ void memop_test_reset(void)
 {
     memop_shutdown();
     memop_init();
+}
+
+/* ----------------------------------------------------------------------- */
+/*  Introspeccao p/ mem_leak_watch (ver comentario em memory_pool.h)        */
+/* ----------------------------------------------------------------------- */
+
+uint64 memop_span_count(void)
+{
+    MemHeap* h;
+    uint64 n = 0;
+    uint32 c;
+
+    memop_init();
+    memop_lock();
+    for (h = G.heaps; h; h = h->hnext)
+    {
+        MemSpan* s;
+        for (c = 0; c < MEMOP_CLASS_COUNT; c++)
+            for (s = h->spans[c]; s; s = s->next) n++;
+        for (s = h->full_head; s; s = s->next) n++;
+    }
+    memop_unlock();
+    return n;
+}
+
+static void memop_fill_span_info(MemSpanInfo* out, MemSpan* s)
+{
+    out->base        = (void*)s;
+    out->class_id    = s->class_id;
+    out->stride      = s->stride;
+    out->block_count = s->block_count;
+    out->used        = s->used;
+    memop_site_lookup((void*)s, out);
+}
+
+uint64 memop_snapshot_spans(MemSpanInfo* out, uint64 max)
+{
+    MemHeap* h;
+    uint32 c;
+    uint64 n = 0;
+    if (!out || max == 0) return 0;
+
+    memop_init();
+    /* memop_lock() serializa contra criacao/destruicao de heap (G.heaps).
+     * NAO protege as listas spans[]/full_* de cada heap -- essas so o dono
+     * toca, sem lock (e o design do hot path). Ler aqui SEM o dono pausado e
+     * best-effort: em teoria pode competir com uma mutacao concorrente do
+     * dono (span mudando de AVAILABLE p/ FULL, sendo religado, etc.) bem no
+     * meio da varredura. Diagnostico, nao caminho onde correcao absoluta e
+     * exigida -- fixar isso direito precisaria de safepoint cooperativo
+     * (o dono checar um "pause, por favor" periodicamente), fora do escopo
+     * desta primeira versao. */
+    memop_lock();
+    for (h = G.heaps; h && n < max; h = h->hnext)
+    {
+        MemSpan* s;
+        for (c = 0; c < MEMOP_CLASS_COUNT && n < max; c++)
+            for (s = h->spans[c]; s && n < max; s = s->next)
+                memop_fill_span_info(&out[n++], s);
+        for (s = h->full_head; s && n < max; s = s->next)
+            memop_fill_span_info(&out[n++], s);
+    }
+    memop_unlock();
+    return n;
 }
 
 void memop_on_created_thread(const Thread* thr)

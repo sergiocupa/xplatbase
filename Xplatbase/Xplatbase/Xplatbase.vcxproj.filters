@@ -30,6 +30,9 @@
     <ClInclude Include="src\memory_pool.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="src\mem_leak_watch.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="src\thread_activity.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -63,6 +66,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="src\memory_pool.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mem_leak_watch.c">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="src\thread_activity_win.c">

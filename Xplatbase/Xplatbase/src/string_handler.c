@@ -13,9 +13,15 @@
 //  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 
 #include "../include/xplatbase.h"
-#include "memory_pool.h"
 #include "event_handler.h"
+#include <stdlib.h>
 #include <string.h>
+
+/* NAO usar memop_alloc_raw/memop_free_raw aqui -- mesmo motivo de
+ * list_hander.c: string_handler.c e utilitario generico que pode viver mais
+ * que qualquer ciclo de memop_shutdown()/memop_test_reset() (o pool e
+ * resetavel de proposito; StringX de vida longa nao pode depender disso).
+ * Ver comentario completo em list_hander.c. */
 
 
 static const char BASE64_TABLE[]     = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -31,7 +37,7 @@ void string_init_ext(StringX* ni, const char* func, const char* file, int line)
 	ni->Length = 0;
 	ni->Max    = INITIAL_STRING_LENGTH;
 
-	ni->Content = (char*)memop_alloc_raw((ni->Max + 1) * sizeof(char));
+	ni->Content = (char*)malloc((ni->Max + 1) * sizeof(char));
 	if (!ni->Content)
 	{
 		CallContextGlobalEvent ctx = { func, file, line };
@@ -47,7 +53,7 @@ void string_init_leng_ext(StringX* ni, int initial_length, const char* func, con
 	ni->Length = 0;
 	ni->Max    = initial_length >= 0 ? initial_length : INITIAL_STRING_LENGTH;
 
-	ni->Content = (char*)memop_alloc_raw((ni->Max + 1) * sizeof(char));
+	ni->Content = (char*)malloc((ni->Max + 1) * sizeof(char));
 	if (!ni->Content)
 	{
 		CallContextGlobalEvent ctx = { func, file, line };
@@ -60,7 +66,7 @@ void string_init_leng_ext(StringX* ni, int initial_length, const char* func, con
 
 StringX* string_new(const char* func, const char* file, int line)
 {
-	StringX* str = (StringX*)memop_alloc_raw(sizeof(StringX));
+	StringX* str = (StringX*)malloc(sizeof(StringX));
 	if (!str)
 	{
 		CallContextGlobalEvent ctx = { func, file, line };
@@ -71,7 +77,7 @@ StringX* string_new(const char* func, const char* file, int line)
 	str->Length = 0;
 	str->Max    = INITIAL_STRING_LENGTH;
 
-	str->Content = (char*)memop_alloc_raw((str->Max + 1) * sizeof(char));
+	str->Content = (char*)malloc((str->Max + 1) * sizeof(char));
 	if (!str->Content)
 	{
 		CallContextGlobalEvent ctx = { func, file, line };
@@ -84,7 +90,7 @@ StringX* string_new(const char* func, const char* file, int line)
 
 StringX* string_new_leng(int initial_length, const char* func, const char* file, int line)
 {
-	StringX* str = (StringX*)memop_alloc_raw(sizeof(StringX));
+	StringX* str = (StringX*)malloc(sizeof(StringX));
 	if (!str)
 	{
 		CallContextGlobalEvent ctx = { func, file, line };
@@ -95,7 +101,7 @@ StringX* string_new_leng(int initial_length, const char* func, const char* file,
 	str->Length = 0;
 	str->Max    = initial_length >= 0 ? initial_length : INITIAL_STRING_LENGTH;
 
-	str->Content = (char*)memop_alloc_raw((str->Max + 1) * sizeof(char));
+	str->Content = (char*)malloc((str->Max + 1) * sizeof(char));
 	if (!str->Content)
 	{
 		CallContextGlobalEvent ctx = { func, file, line };
@@ -117,7 +123,7 @@ void string_append(StringX* _this, const char* content, const char* func, const 
 		if ((_this->Length + leng + 1) >= _this->Max)
 		{
 			uint64 new_max     = ((_this->Length + leng + 1) + _this->Max) * 2;
-			char*  new_content = (char*)memop_alloc_raw(new_max * sizeof(char));
+			char*  new_content = (char*)realloc(_this->Content, (size_t)(new_max * sizeof(char)));
 			if (!new_content)
 			{
 				CallContextGlobalEvent ctx = { func, file, line };
@@ -125,8 +131,6 @@ void string_append(StringX* _this, const char* content, const char* func, const 
 				return;
 			}
 
-			memcpy(new_content, _this->Content, (size_t)(_this->Length + 1) * sizeof(char));
-			memop_free_raw(_this->Content);
 			_this->Content = new_content;
 			_this->Max     = new_max;
 		}

@@ -60,12 +60,18 @@ extern "C" {
 
 
 	typedef void (*CreatedThread)(const Thread* thr);
+	typedef void (*ThreadEnumCb)(const Thread* thr, void* ctx);
 
 
 
 	Thread* thread_create(xthread_func_t* func, void* arg, int* status);
 	void thread_join(Thread** t);
 	void thread_init(CreatedThread created_thread, CreatedThread ended_thread);
+
+	/* Enumera (sob lock) todas as threads vivas criadas via thread_create.
+	 * Uso: varredura de raizes (mem_leak_watch) -- NAO crie/destrua threads
+	 * dentro do callback (deadlock: mesmo lock usado por thread_create/join). */
+	void thread_enum(ThreadEnumCb cb, void* ctx);
 
 
 

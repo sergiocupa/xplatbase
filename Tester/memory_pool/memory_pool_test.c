@@ -1,8 +1,13 @@
 #include "../../Xplatbase/Xplatbase/src/memory_pool.h"
+#include "../../Xplatbase/Xplatbase/src/mem_leak_watch.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
+#ifdef XPLATBASE_WIN
+#include <share.h>
+#endif
 
 static int g_failed = 0;
 
@@ -15,6 +20,49 @@ static void reset_pool(void)
 {
     memop_test_reset();
     thread_init(memop_on_created_thread, memop_on_ended_thread);
+}
+
+/* ------------------------------------------------------------------ */
+/* Helpers do TESTE 6 (mem_leak_watch)                                  */
+/* ------------------------------------------------------------------ */
+#define TEST_SPAN_SIZE ((uintptr_t)65536)   /* == MEMOP_SPAN_SIZE em memory_pool.c */
+#define TEST_SPAN_MASK (~(TEST_SPAN_SIZE - 1))
+
+static void span_hex_of(void* ptr, char* out, size_t out_sz)
+{
+    void* span = (void*)((uintptr_t)ptr & TEST_SPAN_MASK);
+    snprintf(out, out_sz, "%p", span);
+}
+
+/* Conta linhas do log cujo campo 'span' bate com o span (64KB) de 'ptr'
+ * (qualquer linha, se ptr==NULL) e que contenham 'filter' (qualquer uma,
+ * se filter==NULL). Comparacao por endereco exato evita ter que resetar o
+ * pool entre cenarios -- cada um so procura pelo proprio ponteiro. */
+static int count_log_matches(const char* path, void* ptr, const char* filter)
+{
+    /* mem_leak_watch mantem o log aberto (modo append) durante toda a sessao
+     * start/stop -- abrir aqui com fopen() puro pode esbarrar em violacao de
+     * compartilhamento nesse meio-tempo. _fsopen com _SH_DENYNO pede acesso
+     * explicitamente compartilhado (so leitura), sem essa disputa. */
+#ifdef XPLATBASE_WIN
+    FILE* f = _fsopen(path, "r", _SH_DENYNO);
+#else
+    FILE* f = fopen(path, "r");
+#endif
+    char line[1024];
+    char span_hex[32] = "";
+    int n = 0;
+    if (!f) return 0;
+    if (ptr) span_hex_of(ptr, span_hex, sizeof(span_hex));
+    fgets(line, sizeof(line), f);   /* cabecalho */
+    while (fgets(line, sizeof(line), f))
+    {
+        int span_ok = !ptr || strstr(line, span_hex) != NULL;
+        int filt_ok = !filter || strstr(line, filter) != NULL;
+        if (span_ok && filt_ok) n++;
+    }
+    fclose(f);
+    return n;
 }
 
 static void test_basic_alloc_free(void)
@@ -222,6 +270,174 @@ static void test_remote_free_reactivation(void)
     free(ctx.bufs);
 }
 
+/* ------------------------------------------------------------------ */
+/* TESTE 6: mem_leak_watch -- deteccao de vazamento sem colecao         */
+/* ------------------------------------------------------------------ */
+
+#ifdef XPLATBASE_WIN
+static DWORD WINAPI lw_leak_simple_fn(void* arg)
+#else
+static void* lw_leak_simple_fn(void* arg)
+#endif
+{
+    void** out = (void**)arg;
+    *out = memop_alloc_raw(96);
+    /* nao guarda em lugar alcancavel; thread termina agora -- vazamento de verdade */
+    return (xthread_result_t)0;
+}
+
+typedef struct { void* kept; volatile int* stop; } LwAliveCtx;
+
+#ifdef XPLATBASE_WIN
+static DWORD WINAPI lw_alive_ref_fn(void* arg)
+#else
+static void* lw_alive_ref_fn(void* arg)
+#endif
+{
+    LwAliveCtx* ctx = (LwAliveCtx*)arg;
+    void* kept = memop_alloc_raw(160);
+    ctx->kept = kept;
+    while (!*ctx->stop)
+    {
+        Sleep(20);
+        { volatile void* keep_alive = kept; (void)keep_alive; }   /* mantem 'kept' vivo na pilha */
+    }
+    return (xthread_result_t)0;
+}
+
+typedef struct { void* ptrs[5]; } LwMultiCtx;
+
+#ifdef XPLATBASE_WIN
+static DWORD WINAPI lw_leak_multi_fn(void* arg)
+#else
+static void* lw_leak_multi_fn(void* arg)
+#endif
+{
+    LwMultiCtx* ctx = (LwMultiCtx*)arg;
+    int i;
+    for (i = 0; i < 5; i++) ctx->ptrs[i] = memop_alloc_raw(48);   /* mesma classe -> mesmo span */
+    return (xthread_result_t)0;
+}
+
+#ifdef XPLATBASE_WIN
+static DWORD WINAPI lw_leak_large_fn(void* arg)
+#else
+static void* lw_leak_large_fn(void* arg)
+#endif
+{
+    void** out = (void**)arg;
+    *out = memop_alloc_raw(32768);   /* >16KB: caminho LARGE, fora do rastreio hoje (limite documentado) */
+    return (xthread_result_t)0;
+}
+
+static void* g_lw_static_ref = NULL;   /* global: NUNCA e' varrido como raiz (limite documentado) */
+
+#ifdef XPLATBASE_WIN
+static DWORD WINAPI lw_leak_static_ref_fn(void* arg)
+#else
+static void* lw_leak_static_ref_fn(void* arg)
+#endif
+{
+    (void)arg;
+    g_lw_static_ref = memop_alloc_raw(72);
+    return (xthread_result_t)0;
+}
+
+static void test_leak_watch(void)
+{
+    MemLeakWatchConfig cfg;
+    const char* path = "memory_pool_test_leak.log";
+    Thread* t;
+    int status;
+    void* leaked_simple = NULL;
+    void* leaked_large  = NULL;
+    LwAliveCtx alive_ctx;
+    LwMultiCtx multi_ctx;
+    volatile int stop_flag = 0;
+
+    printf("\nTESTE 6: mem_leak_watch - deteccao sem colecao\n");
+    reset_pool();
+    remove(path);
+
+    mem_leak_watch_default_config(&cfg);
+    cfg.interval_ms = 60000;   /* nao deixa o timer interferir; controlamos via scan_now() */
+    cfg.log_path = path;
+    CHECK("mem_leak_watch iniciou", mem_leak_watch_start(&cfg) == true);
+
+    /* 6.1: vazamento simples -- thread termina sem guardar o ponteiro em lugar nenhum. */
+    t = thread_create(lw_leak_simple_fn, &leaked_simple, &status);
+    thread_join(&t);
+    mem_leak_watch_scan_now();
+    CHECK("6.1 vazamento simples aparece como leak_candidate",
+        count_log_matches(path, leaked_simple, "leak_candidate") >= 1);
+
+    /* 6.2: referencia mantida viva na pilha de uma thread AINDA RODANDO -- nao deve aparecer. */
+    memset(&alive_ctx, 0, sizeof(alive_ctx));
+    alive_ctx.stop = &stop_flag;
+    t = thread_create(lw_alive_ref_fn, &alive_ctx, &status);
+    while (!alive_ctx.kept) Sleep(5);   /* espera a thread alocar e publicar o ponteiro */
+    Sleep(50);                          /* garante que ja entrou no loop de espera */
+    mem_leak_watch_scan_now();
+    CHECK("6.2 referencia viva (pilha de thread_create) NAO aparece",
+        count_log_matches(path, alive_ctx.kept, "leak_candidate") == 0);
+    stop_flag = 1;
+    thread_join(&t);
+
+    /* 6.3: 5 blocos vazados na MESMA classe -- granularidade e por SPAN inteiro
+     * (64KB), entao devem virar 1 unica linha de report, nao 5. */
+    t = thread_create(lw_leak_multi_fn, &multi_ctx, &status);
+    thread_join(&t);
+    mem_leak_watch_scan_now();
+    {
+        int same_span = 1, i;
+        char h0[32], hi[32];
+        span_hex_of(multi_ctx.ptrs[0], h0, sizeof(h0));
+        for (i = 1; i < 5; i++)
+        {
+            span_hex_of(multi_ctx.ptrs[i], hi, sizeof(hi));
+            if (strcmp(h0, hi) != 0) same_span = 0;
+        }
+        CHECK("6.3 os 5 blocos ficaram no mesmo span (pre-condicao do teste)", same_span);
+        CHECK("6.3 5 blocos vazados no mesmo span viram 1 unica linha de report",
+            count_log_matches(path, multi_ctx.ptrs[0], "leak_candidate") == 1);
+    }
+
+    /* 6.4: alocacao LARGE (>16KB) vazada -- limite documentado: hoje nao fica
+     * em heap->spans[]/full, entao nao entra na varredura. Confirma o gap. */
+    t = thread_create(lw_leak_large_fn, &leaked_large, &status);
+    thread_join(&t);
+    mem_leak_watch_scan_now();
+    CHECK("6.4 vazamento LARGE nao e detectado (limite documentado)",
+        count_log_matches(path, leaked_large, "leak_candidate") == 0);
+
+    /* 6.5: referencia mantida SO numa variavel global/estatica -- o scan so
+     * varre pilha/registrador de thread viva, nunca secao de dados global.
+     * Falso positivo ESPERADO e documentado: deve aparecer mesmo "em uso". */
+    t = thread_create(lw_leak_static_ref_fn, NULL, &status);
+    thread_join(&t);
+    mem_leak_watch_scan_now();
+    CHECK("6.5 referencia so em global conta como falso positivo (limite documentado)",
+        count_log_matches(path, g_lw_static_ref, "leak_candidate") >= 1);
+
+    mem_leak_watch_stop();
+
+    /* 6.6: escalonamento automatico pra CRITICAL via limiares baixos --
+     * desta vez quem decide o nivel e' o TIMER, nao o scan_now() manual. */
+    mem_leak_watch_default_config(&cfg);
+    cfg.interval_ms = 100;
+    cfg.warn_threshold_bytes = 1;
+    cfg.crit_threshold_bytes = 1;
+    cfg.log_path = path;
+    remove(path);
+    CHECK("mem_leak_watch reiniciou p/ teste de CRITICAL", mem_leak_watch_start(&cfg) == true);
+    Sleep(400);   /* deixa o timer (100ms) disparar e escalonar pra CRITICAL */
+    mem_leak_watch_stop();
+    CHECK("6.6 limiar baixo escalona automaticamente pra CRITICAL",
+        count_log_matches(path, NULL, "CRITICAL") >= 1);
+
+    remove(path);
+}
+
 int main(void)
 {
     printf("memory_pool_test\n");
@@ -231,6 +447,7 @@ int main(void)
     test_thread_lane_lifecycle();
     test_span_growth();
     test_remote_free_reactivation();
+    test_leak_watch();
 
     memop_shutdown();
 
