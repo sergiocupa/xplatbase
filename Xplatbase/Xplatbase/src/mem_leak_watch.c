@@ -11,6 +11,7 @@
 #include "thread_handler.h"
 #include "thread_wait.h"
 #include "atomics.h"
+#include "event_handler.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -208,6 +209,20 @@ static void mlw_log(MlwLevel lvl, const char* kind, void* span_base, uint64 size
             mlw_level_name(lvl), kind, span_base, (unsigned long long)size, used,
             (unsigned long long)age_ms, site ? site : "");
     }
+
+    /* CRITICAL e' erro de verdade, nao so aviso -- alem do log, entrega pro
+     * handler de erro que a aplicacao ja registrou (xpb_set_error_handler),
+     * pra virar feedback direto no app, nao so uma linha de arquivo que
+     * ninguem le. WARN (leak_candidate isolado) continua so log/console --
+     * so escala pra erro quando o proprio mem_leak_watch decidiu que a
+     * situacao e critica (perto do limite de memoria configurado). */
+    if (lvl == MLW_CRITICAL)
+    {
+        CallContextGlobalEvent ctx = { __func__, __FILE__, __LINE__ };
+        xpb_event_trigger_error(&ctx, "[mem_leak_watch/%s] %s span=%p size=%llu used=%u age=%llums site=%s",
+            mlw_level_name(lvl), kind, span_base, (unsigned long long)size, used,
+            (unsigned long long)age_ms, site ? site : "");
+    }
 }
 
 #ifdef XPLATBASE_WIN
@@ -242,8 +257,24 @@ static void mlw_format_frames(char* out, size_t out_cap, void* const* frames, in
         sym->MaxNameLen = 256;
 
         if (frames[i] && SymFromAddr(GetCurrentProcess(), (DWORD64)(uintptr_t)frames[i], &disp, sym))
-            n = snprintf(out + used, out_cap - used, "%s%s+0x%llx",
-                (i ? " <- " : ""), sym->Name, (unsigned long long)disp);
+        {
+            /* SymGetLineFromAddr64: mesmo PDB que ja carregamos p/ SymFromAddr,
+             * so mais um lookup -- resolve endereco -> arquivo.c:linha exata.
+             * Nao disponivel (build sem PDB, ou funcao inline sem info de
+             * linha) -> cai pro func+offset sozinho, sem quebrar o log. */
+            IMAGEHLP_LINE64 line;
+            DWORD line_disp = 0;
+            memset(&line, 0, sizeof(line));
+            line.SizeOfStruct = sizeof(line);
+
+            if (SymGetLineFromAddr64(GetCurrentProcess(), (DWORD64)(uintptr_t)frames[i], &line_disp, &line))
+                n = snprintf(out + used, out_cap - used, "%s%s+0x%llx (%s:%lu)",
+                    (i ? " <- " : ""), sym->Name, (unsigned long long)disp,
+                    line.FileName, line.LineNumber);
+            else
+                n = snprintf(out + used, out_cap - used, "%s%s+0x%llx",
+                    (i ? " <- " : ""), sym->Name, (unsigned long long)disp);
+        }
         else
             n = snprintf(out + used, out_cap - used, "%s0x%p", (i ? " <- " : ""), frames[i]);
 
