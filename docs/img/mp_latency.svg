@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 466" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<rect x="2" y="2" width="816" height="462" rx="14" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="54" y="30" font-size="19" font-weight="700" fill="#0f172a">Memory Pool — latencia por chamada, working-set quente (ns, menor = melhor)</text>
+<text x="54" y="50" font-size="12.5" fill="#64748b">1 thread, 2M blocos 16–256B, mediana de 9 execucoes</text>
+<line x1="62" y1="374.0" x2="800" y2="374.0" stroke="#e2e8f0"/>
+<text x="54" y="378.0" font-size="11" text-anchor="end" fill="#64748b">0</text>
+<line x1="62" y1="314.0" x2="800" y2="314.0" stroke="#e2e8f0"/>
+<text x="54" y="318.0" font-size="11" text-anchor="end" fill="#64748b">4.646</text>
+<line x1="62" y1="254.0" x2="800" y2="254.0" stroke="#e2e8f0"/>
+<text x="54" y="258.0" font-size="11" text-anchor="end" fill="#64748b">9.292</text>
+<line x1="62" y1="194.0" x2="800" y2="194.0" stroke="#e2e8f0"/>
+<text x="54" y="198.0" font-size="11" text-anchor="end" fill="#64748b">13.938</text>
+<line x1="62" y1="134.0" x2="800" y2="134.0" stroke="#e2e8f0"/>
+<text x="54" y="138.0" font-size="11" text-anchor="end" fill="#64748b">18.584</text>
+<line x1="62" y1="74.0" x2="800" y2="74.0" stroke="#e2e8f0"/>
+<text x="54" y="78.0" font-size="11" text-anchor="end" fill="#64748b">23.23</text>
+<rect x="73.1" y="303.0" width="43.4" height="71.0" rx="2.5" fill="#2563eb"/>
+<text x="94.8" y="299.0" font-size="9.5" text-anchor="middle" fill="#0f172a">5.5</text>
+<rect x="123.5" y="113.1" width="43.4" height="260.9" rx="2.5" fill="#f97316"/>
+<text x="145.2" y="109.1" font-size="9.5" text-anchor="middle" fill="#0f172a">20.2</text>
+<text x="123.5" y="392.0" font-size="11.5" text-anchor="middle" fill="#0f172a" font-weight="600">sys-malloc</text>
+<rect x="196.1" y="278.4" width="43.4" height="95.6" rx="2.5" fill="#2563eb"/>
+<text x="217.8" y="274.4" font-size="9.5" text-anchor="middle" fill="#0f172a">7.4</text>
+<rect x="246.5" y="163.5" width="43.4" height="210.5" rx="2.5" fill="#f97316"/>
+<text x="268.2" y="159.5" font-size="9.5" text-anchor="middle" fill="#0f172a">16.3</text>
+<text x="246.5" y="392.0" font-size="11.5" text-anchor="middle" fill="#0f172a" font-weight="600">memop-pool</text>
+<rect x="319.1" y="287.5" width="43.4" height="86.5" rx="2.5" fill="#2563eb"/>
+<text x="340.8" y="283.5" font-size="9.5" text-anchor="middle" fill="#0f172a">6.7</text>
+<rect x="369.5" y="171.2" width="43.4" height="202.8" rx="2.5" fill="#f97316"/>
+<text x="391.2" y="167.2" font-size="9.5" text-anchor="middle" fill="#0f172a">15.7</text>
+<text x="369.5" y="392.0" font-size="11.5" text-anchor="middle" fill="#0f172a" font-weight="600">memop-lw-dbg</text>
+<rect x="442.1" y="284.9" width="43.4" height="89.1" rx="2.5" fill="#2563eb"/>
+<text x="463.8" y="280.9" font-size="9.5" text-anchor="middle" fill="#0f172a">6.9</text>
+<rect x="492.5" y="175.1" width="43.4" height="198.9" rx="2.5" fill="#f97316"/>
+<text x="514.2" y="171.1" font-size="9.5" text-anchor="middle" fill="#0f172a">15.4</text>
+<text x="492.5" y="392.0" font-size="11.5" text-anchor="middle" fill="#0f172a" font-weight="600">memop-lw-prod</text>
+<rect x="565.1" y="304.3" width="43.4" height="69.7" rx="2.5" fill="#2563eb"/>
+<text x="586.8" y="300.3" font-size="9.5" text-anchor="middle" fill="#0f172a">5.4</text>
+<rect x="615.5" y="118.3" width="43.4" height="255.7" rx="2.5" fill="#f97316"/>
+<text x="637.2" y="114.3" font-size="9.5" text-anchor="middle" fill="#0f172a">19.8</text>
+<text x="615.5" y="392.0" font-size="11.5" text-anchor="middle" fill="#0f172a" font-weight="600">rpmalloc</text>
+<rect x="688.1" y="226.8" width="43.4" height="147.2" rx="2.5" fill="#2563eb"/>
+<text x="709.8" y="222.8" font-size="9.5" text-anchor="middle" fill="#0f172a">11.4</text>
+<rect x="738.5" y="127.3" width="43.4" height="246.7" rx="2.5" fill="#f97316"/>
+<text x="760.2" y="123.3" font-size="9.5" text-anchor="middle" fill="#0f172a">19.1</text>
+<text x="738.5" y="392.0" font-size="11.5" text-anchor="middle" fill="#0f172a" font-weight="600">mimalloc</text>
+<line x1="62" y1="374" x2="800" y2="374" stroke="#64748b" stroke-width="1.2"/>
+<rect x="62" y="420" width="13" height="13" rx="3" fill="#2563eb"/>
+<text x="80" y="431" font-size="12" fill="#0f172a">alloc quente</text>
+<rect x="195.2" y="420" width="13" height="13" rx="3" fill="#f97316"/>
+<text x="213.2" y="431" font-size="12" fill="#0f172a">free quente</text>
+<text x="62" y="450" font-size="10.5" fill="#64748b">Fonte: bench/mempool_bench_latest.log (Cenario C, mediana N=9)</text>
+</svg>

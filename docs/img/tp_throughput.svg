@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 466" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<rect x="2" y="2" width="816" height="462" rx="14" fill="#ffffff" stroke="#e2e8f0"/>
+<text x="54" y="30" font-size="19" font-weight="700" fill="#0f172a">Thread Pool — vazao (Mtask/s, maior = melhor)</text>
+<text x="54" y="50" font-size="12.5" fill="#64748b">16 CPUs, 1M tarefas/cenario, mediana de 10 reps — xplatbase vs Intel TBB vs Windows Thread Pool</text>
+<line x1="62" y1="374.0" x2="800" y2="374.0" stroke="#e2e8f0"/>
+<text x="54" y="378.0" font-size="11" text-anchor="end" fill="#64748b">0</text>
+<line x1="62" y1="314.0" x2="800" y2="314.0" stroke="#e2e8f0"/>
+<text x="54" y="318.0" font-size="11" text-anchor="end" fill="#64748b">2.9992</text>
+<line x1="62" y1="254.0" x2="800" y2="254.0" stroke="#e2e8f0"/>
+<text x="54" y="258.0" font-size="11" text-anchor="end" fill="#64748b">5.9984</text>
+<line x1="62" y1="194.0" x2="800" y2="194.0" stroke="#e2e8f0"/>
+<text x="54" y="198.0" font-size="11" text-anchor="end" fill="#64748b">8.9976</text>
+<line x1="62" y1="134.0" x2="800" y2="134.0" stroke="#e2e8f0"/>
+<text x="54" y="138.0" font-size="11" text-anchor="end" fill="#64748b">11.9968</text>
+<line x1="62" y1="74.0" x2="800" y2="74.0" stroke="#e2e8f0"/>
+<text x="54" y="78.0" font-size="11" text-anchor="end" fill="#64748b">14.996</text>
+<rect x="73.1" y="267.4" width="28.9" height="106.6" rx="2.5" fill="#2563eb"/>
+<text x="87.5" y="263.4" font-size="9.5" text-anchor="middle" fill="#0f172a">5.3</text>
+<rect x="106.7" y="323.4" width="28.9" height="50.6" rx="2.5" fill="#f59e0b"/>
+<text x="121.1" y="319.4" font-size="9.5" text-anchor="middle" fill="#0f172a">2.5</text>
+<rect x="140.3" y="345.2" width="28.9" height="28.8" rx="2.5" fill="#10b981"/>
+<text x="154.8" y="341.2" font-size="9.5" text-anchor="middle" fill="#0f172a">1.4</text>
+<text x="123.5" y="392.0" font-size="11.5" text-anchor="middle" fill="#0f172a" font-weight="600">flat-externo</text>
+<rect x="196.1" y="113.1" width="28.9" height="260.9" rx="2.5" fill="#2563eb"/>
+<text x="210.5" y="109.1" font-size="9.5" text-anchor="middle" fill="#0f172a">13.0</text>
+<rect x="229.7" y="122.1" width="28.9" height="251.9" rx="2.5" fill="#f59e0b"/>
+<text x="244.1" y="118.1" font-size="9.5" text-anchor="middle" fill="#0f172a">12.6</text>
+<rect x="263.3" y="346.8" width="28.9" height="27.2" rx="2.5" fill="#10b981"/>
+<text x="277.8" y="342.8" font-size="9.5" text-anchor="middle" fill="#0f172a">1.4</text>
+<text x="246.5" y="392.0" font-size="11.5" text-anchor="middle" fill="#0f172a" font-weight="600">spawn-arvore</text>
+<rect x="319.1" y="260.0" width="28.9" height="114.0" rx="2.5" fill="#2563eb"/>
+<text x="333.5" y="256.0" font-size="9.5" text-anchor="middle" fill="#0f172a">5.7</text>
+<rect x="352.7" y="323.8" width="28.9" height="50.2" rx="2.5" fill="#f59e0b"/>
+<text x="367.1" y="319.8" font-size="9.5" text-anchor="middle" fill="#0f172a">2.5</text>
+<rect x="386.3" y="344.4" width="28.9" height="29.6" rx="2.5" fill="#10b981"/>
+<text x="400.8" y="340.4" font-size="9.5" text-anchor="middle" fill="#0f172a">1.5</text>
+<text x="369.5" y="392.0" font-size="11.5" text-anchor="middle" fill="#0f172a" font-weight="600">rapida/media</text>
+<rect x="442.1" y="263.0" width="28.9" height="111.0" rx="2.5" fill="#2563eb"/>
+<text x="456.5" y="259.0" font-size="9.5" text-anchor="middle" fill="#0f172a">5.5</text>
+<rect x="475.7" y="331.6" width="28.9" height="42.4" rx="2.5" fill="#f59e0b"/>
+<text x="490.1" y="327.6" font-size="9.5" text-anchor="middle" fill="#0f172a">2.1</text>
+<rect x="509.3" y="344.0" width="28.9" height="30.0" rx="2.5" fill="#10b981"/>
+<text x="523.8" y="340.0" font-size="9.5" text-anchor="middle" fill="#0f172a">1.5</text>
+<text x="492.5" y="392.0" font-size="11.5" text-anchor="middle" fill="#0f172a" font-weight="600">satur/alta</text>
+<rect x="565.1" y="255.6" width="28.9" height="118.4" rx="2.5" fill="#2563eb"/>
+<text x="579.5" y="251.6" font-size="9.5" text-anchor="middle" fill="#0f172a">5.9</text>
+<rect x="598.7" y="330.8" width="28.9" height="43.2" rx="2.5" fill="#f59e0b"/>
+<text x="613.1" y="326.8" font-size="9.5" text-anchor="middle" fill="#0f172a">2.2</text>
+<rect x="632.3" y="347.0" width="28.9" height="27.0" rx="2.5" fill="#10b981"/>
+<text x="646.8" y="343.0" font-size="9.5" text-anchor="middle" fill="#0f172a">1.4</text>
+<text x="615.5" y="392.0" font-size="11.5" text-anchor="middle" fill="#0f172a" font-weight="600">mempool/media</text>
+<rect x="688.1" y="260.6" width="28.9" height="113.4" rx="2.5" fill="#2563eb"/>
+<text x="702.5" y="256.6" font-size="9.5" text-anchor="middle" fill="#0f172a">5.7</text>
+<rect x="721.7" y="331.8" width="28.9" height="42.2" rx="2.5" fill="#f59e0b"/>
+<text x="736.1" y="327.8" font-size="9.5" text-anchor="middle" fill="#0f172a">2.1</text>
+<rect x="755.3" y="345.0" width="28.9" height="29.0" rx="2.5" fill="#10b981"/>
+<text x="769.8" y="341.0" font-size="9.5" text-anchor="middle" fill="#0f172a">1.4</text>
+<text x="738.5" y="392.0" font-size="11.5" text-anchor="middle" fill="#0f172a" font-weight="600">rajada-curta</text>
+<line x1="62" y1="374" x2="800" y2="374" stroke="#64748b" stroke-width="1.2"/>
+<rect x="62" y="420" width="13" height="13" rx="3" fill="#2563eb"/>
+<text x="80" y="431" font-size="12" fill="#0f172a">xplatbase</text>
+<rect x="172.39999999999998" y="420" width="13" height="13" rx="3" fill="#f59e0b"/>
+<text x="190.39999999999998" y="431" font-size="12" fill="#0f172a">Intel TBB</text>
+<rect x="282.79999999999995" y="420" width="13" height="13" rx="3" fill="#10b981"/>
+<text x="300.79999999999995" y="431" font-size="12" fill="#0f172a">Windows TP</text>
+<text x="62" y="450" font-size="10.5" fill="#64748b">Fonte: Tester/thread_pool/bench_run_latest.log (reps=10, medianas)</text>
+</svg>
