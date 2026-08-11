@@ -24,7 +24,7 @@ extern "C" {
 
 
     void xpb_event_init(void);
-    void xpb_event_trigger_error(const CallContextGlobalEvent* ctx, const char* fmt, ...);
+    XPLATBASE_API void xpb_event_trigger_error(const CallContextGlobalEvent* ctx, const char* fmt, ...);
 
 
 #ifdef __cplusplus

@@ -42,20 +42,51 @@ extern "C" {
     void memop_init(void);
     void memop_shutdown(void);
 
-    MemBuffer memop_alloc(uint64 size);
-    void memop_free(MemBuffer* buffer);
+    XPLATBASE_API MemBuffer memop_alloc(uint64 size);
+    XPLATBASE_API void memop_free(MemBuffer* buffer);
 
     /* Fast path de ponteiro cru: void* em registrador, sem o struct MemBuffer.
      * Mesma semantica de memop_alloc/free, mas sem carregar o tamanho de volta. */
-    void* memop_alloc_raw(uint64 size);
-    void  memop_free_raw(void* ptr);
+    XPLATBASE_API void* memop_alloc_raw(uint64 size);
+    XPLATBASE_API void  memop_free_raw(void* ptr);
 
-    void memop_get_stats(MemPoolStats* out_stats);
-    void memop_test_reset(void);
+    /* Redimensiona um bloco preservando o conteudo (igual realloc), porem usando
+     * SEMPRE o memory_pool -- nunca o realloc do CRT. Regras:
+     *   - ptr == NULL   -> equivale a memop_alloc_raw(size);
+     *   - size == 0     -> libera ptr e devolve NULL;
+     *   - cabe no bloco -> devolve o MESMO ptr, sem copia (in-place: o novo
+     *                      tamanho mapeia para a classe atual ou menor / large
+     *                      que ainda comporta o pedido);
+     *   - caso contrario-> aloca um bloco novo no pool, copia
+     *                      min(usavel_antigo, size) bytes e libera o antigo.
+     * Em falha de alocacao devolve NULL e o bloco antigo PERMANECE valido
+     * (contrato do realloc). A variante MemBuffer espelha o resultado em
+     * *buffer (Ptr/Size) quando houve mudanca efetiva. */
+    XPLATBASE_API void*     memop_realloc_raw(void* ptr, uint64 size);
+    XPLATBASE_API MemBuffer memop_realloc(MemBuffer* buffer, uint64 size);
+
+    /* Transferencia confinada as FAIXAS de um buffer ja existente (MemBuffer): o
+     * limite vem do proprio buffer (buffer->Size), nao de memoria solta fora dele.
+     * Isso permite redirecionar a operacao para outro buffer apenas trocando o
+     * argumento, sempre dentro da faixa valida. 'size' e 'offset' determinam
+     * tamanho e posicao. Ambos devolvem os bytes transferidos (0 em erro, sem
+     * escrita parcial).
+     *
+     *   memop_copy  : copia 'size' bytes de src (a partir de src->Ptr + offset)
+     *                 para dst a partir de dst->Ptr + dst_offset. Valida
+     *                 [offset, offset+size) contra src->Size e
+     *                 [dst_offset, dst_offset+size) contra dst->Size.
+     *   memop_append: escreve 'size' bytes de src no dst a partir de dst->Ptr +
+     *                 offset. Valida contra dst->Size (src = bytes quaisquer). */
+    XPLATBASE_API uint64 memop_copy(MemBuffer* dst, uint64 dst_offset, const MemBuffer* src, uint64 size, uint64 offset);
+    XPLATBASE_API uint64 memop_append(MemBuffer* dst, const void* src, uint64 size, uint64 offset);
+
+    XPLATBASE_API void memop_get_stats(MemPoolStats* out_stats);
+    XPLATBASE_API void memop_test_reset(void);
 
     /* Trim explicito: devolve ao SO os segmentos ociosos agora (app-driven).
      * A purga automatica (com atraso/histerese) roda sozinha; isto e opcional. */
-    void memop_purge(void);
+    XPLATBASE_API void memop_purge(void);
 
     void memop_on_created_thread(const Thread* thr);
     void memop_on_ended_thread(const Thread* thr);

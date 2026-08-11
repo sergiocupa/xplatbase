@@ -12,49 +12,36 @@
 //  
 //  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
 
-#include "../include/xplatbase.h"
-#include "event_handler.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "list_hander.h"
+#include "memory_pool.h"
 
-/* NAO usar memop_alloc_raw/memop_free_raw aqui, de proposito.
- *
- * list_hander.c e infraestrutura de vida do PROCESSO (ex.: a lista `Threads`
- * de thread_handler.c e global, nunca resetada). memory_pool.c e projetado
- * pra ser RESETAVEL (memop_shutdown()/memop_test_reset() dao VirtualFree em
- * todos os segmentos do pool). Se o Items de uma ListXPB de vida longa fosse
- * alocado do pool, um memop_shutdown() no meio do programa (comum em testes/
- * benchmarks que trocam de alocador) libera a memoria por baixo do ponteiro
- * -- Threads.Items fica dangling, e o proximo thread_create() escreve em
- * memoria ja devolvida ao SO (confirmado: SEGV reproduzido no bench.c ao
- * criar a primeira thread real depois de um memop_shutdown() anterior).
- * malloc/realloc puro nao tem esse acoplamento de ciclo de vida. */
+/* Alocacao SEMPRE via memory_pool (memop_*), nunca malloc/realloc do CRT.
+ * Apenas a struct ListX e o vetor Items saem do pool; os itens apontados sao
+ * externos e nunca sao tocados aqui. Ciente: o pool e resetavel
+ * (memop_test_reset/memop_shutdown) -- nao segure uma ListX viva atraves de um
+ * reset do pool. */
 
 
-
-void xpb_list_init_ext(ListXPB* list, int32 initial_count, uint64 type_size, const char* func, const char* file, int line)
+void list_init(ListX* list, int32 initial_count, uint64 type_size)
 {
     list->TypeSize = type_size;
     list->Max      = initial_count >= 0 ? initial_count : INITIAL_LIST_COUNT;
     list->Count    = 0;
 
     /* Items e o VETOR de ponteiros em si (sem header por item). */
-    list->Items = (void**)malloc((size_t)list->Max * sizeof(void*));
+    list->Items = (void**)memop_alloc_raw((uint64)list->Max * sizeof(void*));
     if (!list->Items)
     {
-        CallContextGlobalEvent ctx = { func, file, line };
-        xpb_event_trigger_error(&ctx, "Falha ao alocar %zu itens para a lista.", list->Max);
+        xpb_event_trigger_error(0, "Falha ao alocar %zu itens para a lista.", list->Max);
     }
 }
 
-ListXPB* xpb_list_new_ext(int initial_count, uint64 type_size, const char* func, const char* file, int line)
+ListX* list_create(int initial_count, uint64 type_size)
 {
-    ListXPB* list = (ListXPB*)malloc(sizeof(ListXPB));
+    ListX* list = (ListX*)memop_alloc_raw(sizeof(ListX));
     if (!list)
     {
-        CallContextGlobalEvent ctx = { func, file, line };
-        xpb_event_trigger_error(&ctx, "Falha ao alocar a lista.");
+        xpb_event_trigger_error(0, "Falha ao alocar a lista.");
         return NULL;
     }
 
@@ -62,36 +49,33 @@ ListXPB* xpb_list_new_ext(int initial_count, uint64 type_size, const char* func,
     list->Max      = initial_count >= 0 ? initial_count : INITIAL_LIST_COUNT;
     list->Count    = 0;
 
-    list->Items = (void**)malloc((size_t)list->Max * sizeof(void*));
+    list->Items = (void**)memop_alloc_raw((uint64)list->Max * sizeof(void*));
     if (!list->Items)
     {
-        CallContextGlobalEvent ctx = { func, file, line };
-        xpb_event_trigger_error(&ctx, "Falha ao alocar %zu itens para a lista.", list->Max);
+        xpb_event_trigger_error(0, "Falha ao alocar %zu itens para a lista.", list->Max);
     }
 
     return list;
 }
 
 
-void xpb_list_add_ext(ListXPB* list, void* instance, uint64 type_size, const char* func, const char* file, int line)
+boolean list_add(ListX* list, void* instance, uint64 type_size)
 {
     if (type_size != list->TypeSize)
     {
-        CallContextGlobalEvent ctx = { func, file, line };
-        xpb_event_trigger_error(&ctx, "Item a ser adicionado na lista com tamanho inv�lido. Informado: %zu | Esperado: %zu", type_size, list->TypeSize);
-        return;
+        xpb_event_trigger_error(0, "Item a ser adicionado na lista com tamanho inválido. Informado: %zu | Esperado: %zu", type_size, list->TypeSize);
+        return false;
     }
 
     int sz = list->Count + 1;
     if (sz >= list->Max)
     {
         uint64 new_max   = (uint64)list->Max * 2;
-        void** new_items = (void**)realloc(list->Items, (size_t)(new_max * sizeof(void*)));
+        void** new_items = (void**)memop_realloc_raw(list->Items, new_max * sizeof(void*));
         if (!new_items)
         {
-            CallContextGlobalEvent ctx = { func, file, line };
-            xpb_event_trigger_error(&ctx, "N�o foi poss�vel realocar novo tamanho dos itens. Informado: %zu | Esperado: %zu", type_size, list->TypeSize);
-            return;
+            xpb_event_trigger_error(0, "Não foi possível realocar novo tamanho dos itens. Informado: %zu | Esperado: %zu", type_size, list->TypeSize);
+            return false;
         }
 
         list->Items = new_items;
@@ -100,10 +84,11 @@ void xpb_list_add_ext(ListXPB* list, void* instance, uint64 type_size, const cha
 
     list->Items[list->Count] = instance;
     list->Count++;
+    return true;
 }
 
 
-void xpb_list_remove_ext(ListXPB* list, void* obj)
+void list_remove(ListX* list, void* obj)
 {
     if (list && list->Active)
     {
@@ -128,7 +113,7 @@ void xpb_list_remove_ext(ListXPB* list, void* obj)
 }
 
 
-void xpb_list_remove_index(ListXPB* list, int index)
+void list_remove_index(ListX* list, int index)
 {
     if (list && list->Active && index < list->Count)
     {
@@ -143,9 +128,23 @@ void xpb_list_remove_index(ListXPB* list, int index)
 }
 
 
-void xpb_list_release(ListXPB** list)
+void list_release(ListX** list)
 {
-    //free((*list)->Items);
+    if (!list || !*list)
+    {
+        return;
+    }
+
+    /* Libera apenas o vetor Items (os itens apontados sao externos). A propria
+     * struct ListX NAO e liberada aqui: list_init pode ter sido usado com uma
+     * ListX embutida/na pilha, e um memop_free_raw dela corromperia memoria.
+     * Listas criadas por list_create (struct no pool) devem ser liberadas pelo
+     * dono apos este release. */
+    if ((*list)->Items)
+    {
+        memop_free_raw((*list)->Items);
+        (*list)->Items = NULL;
+    }
     (*list)->Active = false;
     (*list) = 0;
 }

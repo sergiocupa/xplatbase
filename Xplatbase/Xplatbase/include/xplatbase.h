@@ -46,8 +46,8 @@ extern "C" {
     #define true  1
 #endif
 
-    #define INITIAL_LIST_COUNT    100;
-	#define INITIAL_STRING_LENGTH 50;
+    #define INITIAL_LIST_COUNT    100
+	#define INITIAL_STRING_LENGTH 50
 
 
 	typedef uint_fast8_t boolean;
@@ -112,41 +112,6 @@ extern "C" {
         static inline void xsleep_ms(int ms) { struct timespec ts = { ms/1000, (long)(ms%1000)*1000000L }; nanosleep(&ts, NULL); }
     #endif
 
-    //#include "../src/thread_handler.h"
-    //#include "../src/atomics.h"
-
-
-    typedef struct 
-	{
-		boolean Active;
-		uint64 TypeSize;
-		uint64 Max;
-		uint64 Size;
-		void*  Data;
-	}
-	BufferXPB;
-
-
-	typedef struct
-	{
-		boolean Active;
-		uint64  TypeSize;
-		uint64  Max;
-		uint64  Count;
-		void**  Items;
-	}
-	ListXPB;
-
-
-	typedef struct
-	{
-		boolean Active;
-		uint64  Max;
-		uint64  Length;
-		char*   Content;
-	}
-	StringX;
-
 
 	typedef struct
 	{
@@ -158,20 +123,12 @@ extern "C" {
 
 	typedef void (*ErrorHandler)(const CallContextGlobalEvent* ctx, const char* msg);
 
+    #include "../src/list_hander.h"
+    #include "../src/memory_pool.h"
+    #include "../src/string_handler.h"
+    #include "../src/thread_handler.h"
+    #include "../src/thread_pool.h"
 
-
-	#define xpb_allocate(size)                      allocate_ext(size, __func__, __FILE__, __LINE__)
-    #define xpb_reallocate(buffer,new_size)         reallocate_ext(buffer,new_size, __func__, __FILE__, __LINE__)
-	#define xpb_allocate_type(size,type)            allocate_type_ext(size,sizeof(type), __func__, __FILE__, __LINE__)
-
-    #define xpb_list_init(_this,initial_count,type) xpb_list_init_ext(_this, initial_count, sizeof(type), __func__, __FILE__, __LINE__)
-    #define xpb_list_new(initial_count,type)        xpb_list_new_ext(initial_count, sizeof(type), __func__, __FILE__, __LINE__)
-    #define xpb_list_add(_this,instance,type)       xpb_list_add_ext(_this,  instance, sizeof(type), __func__, __FILE__, __LINE__)
-    #define xpb_list_remove(_this,instance)         xpb_list_remove_ext(_this, instance)
-
-
-
-	//void xpb_event_trigger_error(const CallContextGlobalEvent* ctx, const char* fmt, ...);
 
 #ifdef __cplusplus
 }

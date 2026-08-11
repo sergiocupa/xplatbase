@@ -1,0 +1,310 @@
+CPUs=16  reps=1  N_flat=1000000
+
+## flat-externo
+    [flat-externo/oficial] rep 1/1  wall=183.5ms  5.450 Mtask/s  cpu=74%
+    [flat-externo/TBB] rep 1/1  wall=402.2ms  2.487 Mtask/s  cpu=66%
+    [flat-externo/WinTP] rep 1/1  wall=727.4ms  1.375 Mtask/s  cpu=21%
+
+## spawn-arvore
+    [spawn/oficial] rep 1/1  wall=85.5ms  11.699 Mtask/s
+    [spawn/TBB] rep 1/1  wall=89.3ms  11.194 Mtask/s
+    [spawn/WinTP] rep 1/1  wall=732.6ms  1.365 Mtask/s
+
+## rapida/baixa
+    [rapida/baixa/oficial] rep 1/1  wall=2.3ms  8.623 Mtask/s  cpu=0%
+    [rapida/baixa/TBB] rep 1/1  wall=15.2ms  1.315 Mtask/s  cpu=77%
+    [rapida/baixa/WinTP] rep 1/1  wall=17.0ms  1.174 Mtask/s  cpu=69%
+
+## rapida/media
+    [rapida/media/oficial] rep 1/1  wall=12.5ms  4.783 Mtask/s  cpu=93%
+    [rapida/media/TBB] rep 1/1  wall=28.8ms  2.087 Mtask/s  cpu=48%
+    [rapida/media/WinTP] rep 1/1  wall=43.6ms  1.376 Mtask/s  cpu=20%
+
+## rapida/alta
+    [rapida/alta/oficial] rep 1/1  wall=20.4ms  5.879 Mtask/s  cpu=57%
+    [rapida/alta/TBB] rep 1/1  wall=59.2ms  2.027 Mtask/s  cpu=73%
+    [rapida/alta/WinTP] rep 1/1  wall=80.9ms  1.484 Mtask/s  cpu=31%
+
+## rapida/ultra
+    [rapida/ultra/oficial] rep 1/1  wall=35.2ms  5.120 Mtask/s  cpu=67%
+    [rapida/ultra/TBB] rep 1/1  wall=76.7ms  2.347 Mtask/s  cpu=81%
+    [rapida/ultra/WinTP] rep 1/1  wall=128.1ms  1.405 Mtask/s  cpu=27%
+
+## media/baixa
+    [media/baixa/oficial] rep 1/1  wall=30.7ms  0.652 Mtask/s  cpu=96%
+    [media/baixa/TBB] rep 1/1  wall=28.8ms  0.693 Mtask/s  cpu=105%
+    [media/baixa/WinTP] rep 1/1  wall=30.9ms  0.648 Mtask/s  cpu=89%
+
+=== flat-externo ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16    183.48     0.400     0.700     2.300     3.296     0.742     5.4502      5450185   11.84    74.0    2.19    3.96
+TBB        16    402.16     1.900   534.300  1597.700     7.035     4.693     2.4866      2486600   10.49    65.6    1.00    1.81
+WinTP      16    727.43    13.900   169.400  1636.300     3.192     2.345     1.3747      1374694    3.42    21.3    0.55    1.00
+
+=== spawn-arvore (task dentro de task) ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16     85.48     1.100    84.700  1033.200    59.794    44.991    11.6992     11699177    7.68    48.0    1.05    8.57
+TBB        16     89.33     1.400   110.600  1490.100    75.687    49.373    11.1945     11194498    7.87    49.2    1.00    8.20
+WinTP      16    732.60 251538.900 278939.800 279473.300   294.325   286.626     1.3650      1364993   12.95    80.9    0.12    1.00
+
+=== rapida/baixa ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16      2.32     9.800    93.000   110.700     0.115     0.113     8.6229      8622920    0.00     0.0    6.56    7.35
+TBB        16     15.21     2.700    10.900    34.400     0.273     0.074     1.3146      1314570   12.32    77.0    1.00    1.12
+WinTP      16     17.04    21.300  1244.200  1262.200     1.847     1.321     1.1740      1173964   11.01    68.8    0.89    1.00
+
+=== rapida/media ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16     12.54     0.400     0.900     3.000     0.316     0.070     4.7834      4783354   14.95    93.4    2.29    3.48
+TBB        16     28.76     1.900    18.000    86.600     2.477     1.603     2.0865      2086507    7.61    47.5    1.00    1.52
+WinTP      16     43.60    14.800    61.200    94.700     2.023     0.299     1.3761      1376150    3.23    20.2    0.66    1.00
+
+=== rapida/alta ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16     20.41     0.400     1.100     2.200     0.199     0.051     5.8787      5878664    9.19    57.4    2.90    3.96
+TBB        16     59.21     1.600     7.600   794.000     2.486     1.487     2.0265      2026524   11.61    72.6    1.00    1.37
+WinTP      16     80.85    14.300   140.400   362.200     0.760     0.407     1.4842      1484221    5.02    31.4    0.73    1.00
+
+=== rapida/ultra ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16     35.16     0.400  1109.100  1337.700     1.659     1.429     5.1201      5120138   10.67    66.7    2.18    3.64
+TBB        16     76.71     1.700     9.400    27.600     1.498     0.682     2.3465      2346540   13.04    81.5    1.00    1.67
+WinTP      16    128.13    14.300   221.500   948.200     1.171     1.039     1.4048      1404768    4.39    27.4    0.60    1.00
+
+=== media/baixa
+## media/media
+    [media/media/oficial] rep 1/1  wall=108.1ms  0.555 Mtask/s  cpu=73%
+    [media/media/TBB] rep 1/1  wall=113.2ms  0.530 Mtask/s  cpu=95%
+    [media/media/WinTP] rep 1/1  wall=113.5ms  0.529 Mtask/s  cpu=76%
+
+## media/alta
+    [media/alta/oficial] rep 1/1  wall=281.2ms  0.427 Mtask/s  cpu=86%
+    [media/alta/TBB] rep 1/1  wall=297.0ms  0.404 Mtask/s  cpu=88%
+    [media/alta/WinTP] rep 1/1  wall=271.5ms  0.442 Mtask/s  cpu=86%
+
+## media/ultra
+    [media/ultra/oficial] rep 1/1  wall=469.4ms  0.383 Mtask/s  cpu=89%
+    [media/ultra/TBB] rep 1/1  wall=492.3ms  0.366 Mtask/s  cpu=90%
+    [media/ultra/WinTP] rep 1/1  wall=474.8ms  0.379 Mtask/s  cpu=89%
+
+## mista/baixa
+    [mista/baixa/oficial] rep 1/1  wall=27.1ms  0.739 Mtask/s  cpu=97%
+    [mista/baixa/TBB] rep 1/1  wall=34.5ms  0.580 Mtask/s  cpu=62%
+    [mista/baixa/WinTP] rep 1/1  wall=27.6ms  0.726 Mtask/s  cpu=103%
+
+## mista/media
+    [mista/media/oficial] rep 1/1  wall=89.8ms  0.668 Mtask/s  cpu=100%
+    [mista/media/TBB] rep 1/1  wall=95.4ms  0.629 Mtask/s  cpu=85%
+    [mista/media/WinTP] rep 1/1  wall=103.1ms  0.582 Mtask/s  cpu=84%
+
+## mista/alta
+    [mista/alta/oficial] rep 1/1  wall=207.7ms  0.578 Mtask/s  cpu=89%
+    [mista/alta/TBB] rep 1/1  wall=219.1ms  0.548 Mtask/s  cpu=89%
+    [mista/alta/WinTP] rep 1/1  wall=219.9ms  0.546 Mtask/s  cpu=86%
+ ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16     30.66 14517.900 28031.000 28222.400    28.252    28.245     0.6524       652363   15.29    95.6    0.94    1.01
+TBB        16     28.84  9543.300 19435.700 19595.900    19.703    19.661     0.6934       693428   16.79   105.0    1.00    1.07
+WinTP      16     30.86  6617.400 17194.400 17368.300    17.388    17.381     0.6481       648134   14.18    88.6    0.93    1.00
+
+=== media/media ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16    108.13 27315.200 38105.300 38602.200    52.306    40.107     0.5549       554905   11.71    73.2    1.05    1.05
+TBB        16    113.19 42622.700 82934.200 84170.800    84.872    84.788     0.5301       530074   15.18    94.9    1.00    1.00
+WinTP      16    113.48 40637.000 74296.200 75355.900    75.443    75.434     0.5287       528711   12.12    75.7    1.00    1.00
+
+=== media/alta ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16    281.18 23176.900 66005.200 69951.800    99.324    78.308     0.4268       426771   13.84    86.5    1.06    0.97
+TBB        16    296.99 128358.300 235565.700 239568.000   240.109   240.067     0.4041       404060   14.05    87.8    1.00    0.91
+WinTP      16    271.50 100468.500 195373.600 197078.600   197.282   197.277     0.4420       441993   13.81    86.3    1.09    1.00
+
+=== media/ultra ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16    469.43 31120.900 73793.400 82124.200   119.040    89.835     0.3834       383442   14.18    88.6    1.05    1.01
+TBB        16    492.31 174529.000 338632.400 345029.500   345.284   345.274     0.3656       365626   14.41    90.1    1.00    0.96
+WinTP      16    474.80 181288.800 369003.200 372249.400   372.836   372.824     0.3791       379110   14.32    89.5    1.04    1.00
+
+=== mista/baixa ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16     27.07  2273.300 24796.000 25500.200    25.761    25.663     0.7388       738773   15.58    97.4    1.27    1.02
+TBB        16     34.47  8711.700 18621.000 20217.900    21.579    20.587     0.5802       580208    9.97    62.3    1.00    0.80
+WinTP      16     27.57  5423.700 12426.600 12575.300    12.591    12.587     0.7255       725503   16.44   102.7    1.25    1.00
+
+=== mista/media ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16     89.83  9145.600 55392.700 55405.200    55.410    55.409     0.6679       667933   16.00   100.0    1.06    1.15
+TBB        16     95.39 35919.000 65692.500 66334.200    66.449    66.433     0.6290       629017   13.60    85.0    1.00    1.08
+WinTP      16    103.10 12053.200 33762.700 34446.400    34.497    34.495     0.5820       581981   13.49    84.3    0.93    1.00
+
+=== mista/alta ===
+adapter   wrk   wall_ms     p50
+## mista/ultra
+    [mista/ultra/oficial] rep 1/1  wall=387.9ms  0.464 Mtask/s  cpu=98%
+    [mista/ultra/TBB] rep 1/1  wall=378.0ms  0.476 Mtask/s  cpu=91%
+    [mista/ultra/WinTP] rep 1/1  wall=346.6ms  0.519 Mtask/s  cpu=96%
+
+## satur/alta
+    [satur/alta/oficial] rep 1/1  wall=29.2ms  5.471 Mtask/s  cpu=73%
+    [satur/alta/TBB] rep 1/1  wall=77.9ms  2.054 Mtask/s  cpu=94%
+    [satur/alta/WinTP] rep 1/1  wall=108.5ms  1.475 Mtask/s  cpu=20%
+
+## satur/ultra
+    [satur/ultra/oficial] rep 1/1  wall=48.1ms  4.988 Mtask/s  cpu=65%
+    [satur/ultra/TBB] rep 1/1  wall=119.7ms  2.006 Mtask/s  cpu=104%
+    [satur/ultra/WinTP] rep 1/1  wall=169.1ms  1.419 Mtask/s  cpu=23%
+
+## rajada-curta/media
+    [rajada-curta/media/oficial] rep 1/1  wall=10.5ms  5.709 Mtask/s  cpu=112%
+    [rajada-curta/media/TBB] rep 1/1  wall=28.7ms  2.089 Mtask/s  cpu=102%
+    [rajada-curta/media/WinTP] rep 1/1  wall=41.9ms  1.431 Mtask/s  cpu=28%
+
+## rajada-mista/media
+    [rajada-mista/media/oficial] rep 1/1  wall=121.2ms  0.495 Mtask/s  cpu=89%
+    [rajada-mista/media/TBB] rep 1/1  wall=114.7ms  0.523 Mtask/s  cpu=93%
+    [rajada-mista/media/WinTP] rep 1/1  wall=120.0ms  0.500 Mtask/s  cpu=88%
+
+## mista-massiva/alta
+    [mista-massiva/alta/oficial] rep 1/1  wall=315.8ms  0.570 Mtask/s  cpu=91%
+    [mista-massiva/alta/TBB] rep 1/1  wall=324.5ms  0.555 Mtask/s  cpu=89%
+    [mista-massiva/alta/WinTP] rep 1/1  wall=334.9ms  0.537 Mtask/s  cpu=94%
+us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16    207.67 24554.800 66155.400 74617.600    75.821    75.614     0.5778       577836   14.22    88.9    1.05    1.06
+TBB        16    219.08 82839.200 174105.400 176142.400   176.623   176.602     0.5478       547753   14.19    88.7    1.00    1.00
+WinTP      16    219.93 78418.200 147523.400 148875.100   148.997   148.995     0.5456       545626   13.71    85.7    1.00    1.00
+
+=== mista/ultra ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16    387.87 23062.800 62671.000 69816.400    95.246    84.890     0.4641       464076   15.67    97.9    0.97    0.89
+TBB        16    378.01 156349.200 298949.100 301734.300   301.952   301.947     0.4762       476183   14.59    91.2    1.00    0.92
+WinTP      16    346.60 116556.500 231155.800 233243.400   233.499   233.497     0.5193       519325   15.33    95.8    1.09    1.00
+
+=== satur/alta ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16     29.24     0.400     1.200     2.900     0.151     0.082     5.4715      5471451   11.76    73.5    2.66    3.71
+TBB        16     77.90     1.600     6.300    12.100     0.951     0.241     2.0539      2053944   15.04    94.0    1.00    1.39
+WinTP      16    108.50    15.200    53.600    91.900     0.107     0.106     1.4746      1474629    3.17    19.8    0.72    1.00
+
+=== satur/ultra ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16     48.11     0.400   223.200   496.600     1.079     0.720     4.9885      4988485   10.39    65.0    2.49    3.52
+TBB        16    119.66     1.500     4.800     9.500     0.506     0.145     2.0057      2005748   16.58   103.6    1.00    1.41
+WinTP      16    169.14    15.800   101.700   905.600     0.923     0.919     1.4190      1418972    3.60    22.5    0.71    1.00
+
+=== rajada-curta/media ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16     10.51     0.400     1.200     1.900     0.014     0.007     5.7091      5709120   17.84   111.5    2.73    3.99
+TBB        16     28.72     1.600     5.500    13.400     0.159     0.050     2.0895      2089486   16.32   102.0    1.00    1.46
+WinTP      16     41.94    14.200    51.000    66.900     0.146     0.090     1.4305      1430544    4.47    27.9    0.68    1.00
+
+=== rajada-mista/media ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16    121.21 30279.600 84325.500 89399.000   102.049    91.267     0.4950       495006   14.31    89.4    0.95    0.99
+TBB        16    114.68 45241.500 89708.400 91242.600    92.320    92.305     0.5232       523203   14.85    92.8    1.00    1.05
+WinTP      16    120.04 40901.000 80561.100 81316.500    81.419    81.416     0.4998       499817   14.06    87.9    0.96    1.00
+
+=== mista-massiva/alta ===
+adapter   wrk   wall_ms     p50us     p99us    
+## mista-massiva/ultra
+    [mista-massiva/ultra/oficial] rep 1/1  wall=509.8ms  0.471 Mtask/s  cpu=90%
+    [mista-massiva/ultra/TBB] rep 1/1  wall=582.8ms  0.412 Mtask/s  cpu=80%
+    [mista-massiva/ultra/WinTP] rep 1/1  wall=555.9ms  0.432 Mtask/s  cpu=80%
+
+## malloc-default/media
+    [malloc-default/media/oficial] rep 1/1  wall=39.9ms  1.506 Mtask/s  cpu=76%
+    [malloc-default/media/TBB] rep 1/1  wall=40.3ms  1.490 Mtask/s  cpu=73%
+    [malloc-default/media/WinTP] rep 1/1  wall=51.2ms  1.172 Mtask/s  cpu=53%
+
+## malloc-default/alta
+    [malloc-default/alta/oficial] rep 1/1  wall=75.1ms  1.597 Mtask/s  cpu=95%
+    [malloc-default/alta/TBB] rep 1/1  wall=80.4ms  1.492 Mtask/s  cpu=84%
+    [malloc-default/alta/WinTP] rep 1/1  wall=116.8ms  1.028 Mtask/s  cpu=45%
+
+## mempool/media
+    [mempool/media/oficial] rep 1/1  wall=9.8ms  6.144 Mtask/s  cpu=0%
+    [mempool/media/TBB] rep 1/1  wall=27.6ms  2.174 Mtask/s  cpu=39%
+    [mempool/media/WinTP] rep 1/1  wall=46.0ms  1.303 Mtask/s  cpu=21%
+
+## mempool/alta
+    [mempool/alta/oficial] rep 1/1  wall=22.3ms  5.381 Mtask/s  cpu=48%
+    [mempool/alta/TBB] rep 1/1  wall=67.5ms  1.778 Mtask/s  cpu=49%
+    [mempool/alta/WinTP] rep 1/1  wall=91.9ms  1.306 Mtask/s  cpu=30%
+
+## lento-misto
+    [lento-misto/oficial] rep 1/1  wall=954.0ms  0.004 Mtask/s  cpu=88%
+    [lento-misto/TBB] rep 1/1  wall=1111.2ms  0.004 Mtask/s  cpu=84%
+    [lento-misto/WinTP] rep 1/1  wall=1100.9ms  0.004 Mtask/s  cpu=82%
+p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16    315.76 18333.500 74311.600 89229.700    91.282    91.025     0.5701       570050   14.60    91.2    1.03    1.06
+TBB        16    324.49 123154.400 239398.500 242298.400   242.628   242.619     0.5547       554710   14.30    89.4    1.00    1.03
+WinTP      16    334.90 73650.500 179416.200 181302.700   181.507   181.504     0.5375       537469   15.12    94.5    0.97    1.00
+
+=== mista-massiva/ultra ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16    509.79 24944.900 139745.000 175966.400   178.513   178.251     0.4708       470782   14.41    90.0    1.14    1.09
+TBB        16    582.82 250656.600 473841.900 479160.700   480.991   480.909     0.4118       411792   12.87    80.4    1.00    0.95
+WinTP      16    555.86 168896.500 359917.000 363672.600   364.073   364.067     0.4318       431763   12.76    79.8    1.05    1.00
+
+=== malloc-default/media ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16     39.85  5544.800 14418.200 14533.200    27.159    15.818     1.5056      1505590   12.15    76.0    1.01    1.28
+TBB        16     40.27  6232.600 14256.700 14799.800    14.844    14.834     1.4900      1490043   11.64    72.8    1.00    1.27
+WinTP      16     51.18    39.700  1451.500  1832.600     3.370     2.058     1.1723      1172301    8.55    53.4    0.79    1.00
+
+=== malloc-default/alta ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16     75.14  7891.000 16927.800 18426.700    26.218    19.785     1.5970      1596985   15.18    94.9    1.07    1.55
+TBB        16     80.42 11264.100 25729.600 26285.000    26.492    26.484     1.4922      1492214   13.41    83.8    1.00    1.45
+WinTP      16    116.76    80.000 13103.200 13341.300    21.965    14.348     1.0277      1027711    7.23    45.2    0.69    1.00
+
+=== mempool/media ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16      9.77     0.400   504.600   549.100     3.199     0.979     6.1441      6144079    0.00     0.0    2.83    4.71
+TBB        16     27.60     2.300    11.100    43.600     3.875     1.420     2.1738      2173826    6.23    38.9    1.00    1.67
+WinTP      16     46.03    16.900   120.000   198.300     0.203     0.202     1.3034      1303438    3.39    21.2    0.60    1.00
+
+=== mempool/alta ===
+adapter   wrk   wall_ms     p50us     p99us    p999us     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16     22.30     0.400   362.500   491.700     0.954     0.558     5.3811      5381069    7.71    48.2    3.03    4.12
+TBB        16     67.50     2.200    53.800   260.400     4.362     2.707     1.7777      1777686    7.87    49.2    1.00    1.36
+WinTP      16     91.90    17.100  3050.700  3100.700     4.372     3.281     1.3057      1305723    4.76    29.8    0.73    1.00
+
+=== lento-misto ===
+adapter   wrk   wall_ms     p50us     p99us    p999u
+>> resultados salvos em: thread_pool_bench_results.tsv  (TSV, ms, 6 casas, ponto decimal)
+s     maxms   max10ms    Mtask/s      tasks/s   cores    cpu%    xTBB  xWinTP
+-------------------------------------------------------------------------------------------------------------------------------------
+oficial    16    953.97 76131.300 918379.500 937011.200   945.189   937.005     0.0042         4193   14.15    88.4    1.16    1.15
+TBB        16   1111.22 547630.800 1087232.400 1098484.400  1101.725  1098.461     0.0036         3600   13.41    83.8    1.00    0.99
+WinTP      16   1100.89 545390.100 1079255.700 1090726.800  1091.200  1090.193     0.0036         3633   13.10    81.9    1.01    1.00
+
+== memory_pool stats ==
+lanes criadas/destruidas : 872 / 825
+alloc/free               : 4320000 / 4320000
+frees remotos            : 0
+refills sync/async       : 1566 / 0 (req async 0)
+reservado do SO / cache  : 176128 KB / 0 chunks (purgas 0)

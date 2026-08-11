@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 466" font-family="Segoe UI, Helvetica, Arial, sans-serif">
 <rect x="2" y="2" width="816" height="462" rx="14" fill="#ffffff" stroke="#e2e8f0"/>
-<text x="54" y="30" font-size="19" font-weight="700" fill="#0f172a">Thread Pool — vazao (Mtask/s, maior = melhor)</text>
-<text x="54" y="50" font-size="12.5" fill="#64748b">16 CPUs, 1M tarefas/cenario, mediana de 10 reps — xplatbase vs Intel TBB vs Windows Thread Pool</text>
+<text x="54" y="30" font-size="19" font-weight="700" fill="#0f172a">Thread Pool — throughput (Mtask/s, higher = better)</text>
+<text x="54" y="50" font-size="12.5" fill="#64748b">16 CPUs, 1M tasks/scenario, median of 10 reps — xplatbase vs Intel TBB vs Windows Thread Pool</text>
 <line x1="62" y1="374.0" x2="800" y2="374.0" stroke="#e2e8f0"/>
 <text x="54" y="378.0" font-size="11" text-anchor="end" fill="#64748b">0</text>
 <line x1="62" y1="314.0" x2="800" y2="314.0" stroke="#e2e8f0"/>
@@ -63,5 +63,5 @@
 <text x="190.39999999999998" y="431" font-size="12" fill="#0f172a">Intel TBB</text>
 <rect x="282.79999999999995" y="420" width="13" height="13" rx="3" fill="#10b981"/>
 <text x="300.79999999999995" y="431" font-size="12" fill="#0f172a">Windows TP</text>
-<text x="62" y="450" font-size="10.5" fill="#64748b">Fonte: Tester/thread_pool/bench_run_latest.log (reps=10, medianas)</text>
+<text x="62" y="450" font-size="10.5" fill="#64748b">Source: Tester/thread_pool/bench_run_latest.log (reps=10, medians)</text>
 </svg>

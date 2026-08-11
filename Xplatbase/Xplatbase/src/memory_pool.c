@@ -18,6 +18,7 @@
 
 #include "memory_pool.h"
 #include "atomics.h"
+#include "event_handler.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1027,6 +1028,122 @@ void memop_free(MemBuffer* buffer)
     memop_free_raw(buffer->Ptr);
     buffer->Ptr = NULL;
     buffer->Size = 0;
+}
+
+/* Tamanho USAVEL do bloco apontado por 'ptr' (stride da classe p/ small, tamanho
+ * total menos header p/ large). Achado pela mesma mascara do free -- sem header
+ * por objeto. 'ptr' precisa ser um ponteiro vivo devolvido pelo pool. */
+static uint64 memop_usable_size(void* ptr, MemSpan** out_span)
+{
+    MemSpan* span = span_of(ptr);
+    if (out_span) *out_span = span;
+    return (span->class_id == MEMOP_CLASS_LARGE) ? span->stride
+                                                 : g_class_stride[span->class_id];
+}
+
+/* realloc pelo proprio pool (ver contrato em memory_pool.h). Fast path in-place
+ * quando o pedido ainda cabe na classe/bloco atual: devolve o mesmo ponteiro sem
+ * copiar. Caso contrario aloca->copia->libera reusando os caminhos do pool. */
+void* memop_realloc_raw(void* ptr, uint64 size)
+{
+    MemSpan* span;
+    uint64   old_usable;
+    int      old_is_large;
+    int      new_class;
+    void*    np;
+    uint64   copy;
+
+    if (ptr == NULL) return memop_alloc_raw(size);   /* realloc(NULL,n) == alloc */
+    if (size == 0) { memop_free_raw(ptr); return NULL; } /* realloc(p,0) == free */
+
+    old_usable   = memop_usable_size(ptr, &span);
+    old_is_large = (span->class_id == MEMOP_CLASS_LARGE);
+    new_class    = memop_class_index(size);   /* <0 => caminho large */
+
+    if (!old_is_large && new_class >= 0)
+    {
+        /* small -> small: classes sao monotonicas, entao classe <= atual cabe no
+         * bloco atual (mesmo tamanho, ou encolhendo) -> in-place, sem copia. */
+        if ((uint32)new_class <= span->class_id) return ptr;
+    }
+    else if (old_is_large && new_class < 0)
+    {
+        /* large -> large: se ainda cabe no espaco reservado, mantem o bloco. */
+        if (size <= old_usable) return ptr;
+    }
+
+    /* caminho geral (cresceu de classe, ou trocou small<->large): novo bloco no
+     * pool, copia o conteudo preservavel e libera o antigo. */
+    np = memop_alloc_raw(size);
+    if (!np) return NULL;                     /* falha: antigo continua valido */
+    copy = (size < old_usable) ? size : old_usable;
+    memcpy(np, ptr, (size_t)copy);
+    memop_free_raw(ptr);
+    return np;
+}
+
+MemBuffer memop_realloc(MemBuffer* buffer, uint64 size)
+{
+    MemBuffer out = { 0, 0 };
+    void* np = memop_realloc_raw(buffer ? buffer->Ptr : NULL, size);
+    if (np)
+    {
+        MemSpan* s = span_of(np);
+        out.Ptr  = np;
+        out.Size = (s->class_id == MEMOP_CLASS_LARGE) ? s->stride
+                                                      : g_class_stride[s->class_id];
+    }
+    /* Espelha no buffer do chamador so quando houve mudanca efetiva: sucesso
+     * (np != NULL) ou liberacao (size == 0). Em falha de crescimento preserva o
+     * buffer antigo intacto -- o bloco original ainda esta vivo. */
+    if (buffer && (np || size == 0))
+    {
+        buffer->Ptr  = out.Ptr;
+        buffer->Size = out.Size;
+    }
+    return out;
+}
+
+/* Copia 'size' bytes de src (a partir de src->Ptr + offset) para dst (a partir
+ * de dst->Ptr + dst_offset). Limites vem das FAIXAS dos proprios buffers
+ * (src->Size / dst->Size), nao do alocador -- confina a operacao ao buffer.
+ * Sem escrita parcial (0 em erro). */
+uint64 memop_copy(MemBuffer* dst, uint64 dst_offset, const MemBuffer* src, uint64 size, uint64 offset)
+{
+    if (!dst || !dst->Ptr || !src || !src->Ptr || size == 0) return 0;
+
+    if (offset > src->Size || size > src->Size - offset)
+    {
+        xpb_event_trigger_error(0, "memop_copy: leitura fora da faixa do src (offset=%llu size=%llu faixa=%llu).",
+                                (unsigned long long)offset, (unsigned long long)size, (unsigned long long)src->Size);
+        return 0;
+    }
+    if (dst_offset > dst->Size || size > dst->Size - dst_offset)
+    {
+        xpb_event_trigger_error(0, "memop_copy: escrita fora da faixa do dst (dst_offset=%llu size=%llu faixa=%llu).",
+                                (unsigned long long)dst_offset, (unsigned long long)size, (unsigned long long)dst->Size);
+        return 0;
+    }
+
+    memcpy((char*)dst->Ptr + dst_offset, (const char*)src->Ptr + offset, (size_t)size);
+    return size;
+}
+
+/* Escreve 'size' bytes de src no buffer dst a partir de dst->Ptr + offset. O
+ * limite vem da faixa dst->Size; src e memoria qualquer. Sem escrita parcial. */
+uint64 memop_append(MemBuffer* dst, const void* src, uint64 size, uint64 offset)
+{
+    if (!dst || !dst->Ptr || !src || size == 0) return 0;
+
+    if (offset > dst->Size || size > dst->Size - offset)
+    {
+        xpb_event_trigger_error(0, "memop_append: escrita fora da faixa do dst (offset=%llu size=%llu faixa=%llu).",
+                                (unsigned long long)offset, (unsigned long long)size, (unsigned long long)dst->Size);
+        return 0;
+    }
+
+    memcpy((char*)dst->Ptr + offset, src, (size_t)size);
+    return size;
 }
 
 

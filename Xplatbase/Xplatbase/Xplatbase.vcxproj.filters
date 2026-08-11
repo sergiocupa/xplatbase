@@ -39,6 +39,12 @@
     <ClInclude Include="src\thread_pool.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="src\list_hander.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="src\string_handler.h">
+      <Filter>src</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\xplatbase.c">

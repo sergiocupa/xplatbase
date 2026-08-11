@@ -1,38 +1,38 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 560" font-family="Segoe UI, Helvetica, Arial, sans-serif">
 <defs><marker id="ah" markerWidth="9" markerHeight="9" refX="7.5" refY="3.2" orient="auto"><path d="M0,0 L7.5,3.2 L0,6.4 Z" fill="#475569"/></marker><marker id="ahd" markerWidth="9" markerHeight="9" refX="7.5" refY="3.2" orient="auto"><path d="M0,0 L7.5,3.2 L0,6.4 Z" fill="#94a3b8"/></marker></defs>
 <rect x="2" y="2" width="916" height="556" rx="14" fill="#ffffff" stroke="#e2e8f0"/>
-<text x="26" y="34" font-size="20" font-weight="700" fill="#0f172a">Memory Pool — alocador por size-class (estilo mimalloc/rpmalloc)</text>
-<text x="26" y="55" font-size="12.5" fill="#64748b">heap por-thread (TLS) · span 64KB achado por mascara · cache de chunks 2 niveis</text>
+<text x="26" y="34" font-size="20" font-weight="700" fill="#0f172a">Memory Pool — size-class allocator (mimalloc/rpmalloc-style)</text>
+<text x="26" y="55" font-size="12.5" fill="#64748b">per-thread heap (TLS) · 64KB span found by mask · two-level chunk cache</text>
 <rect x="330" y="74" width="260" height="48" rx="9" fill="#eff6ff" stroke="#2563eb" stroke-width="1.6"/>
 <text x="460.0" y="95.0" font-size="13" font-weight="600" text-anchor="middle" fill="#0f172a">memop_alloc_raw(size)</text>
-<text x="460.0" y="112.0" font-size="10.5" text-anchor="middle" fill="#64748b">hot path: void* em registrador</text>
+<text x="460.0" y="112.0" font-size="10.5" text-anchor="middle" fill="#64748b">hot path: void* in register</text>
 <rect x="120" y="158" width="300" height="48" rx="9" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="270.0" y="179.0" font-size="12" font-weight="600" text-anchor="middle" fill="#0f172a">size -&gt; classe (tabela O(1))</text>
-<text x="270.0" y="196.0" font-size="10.5" text-anchor="middle" fill="#64748b">36 classes, passo ~25%, &lt;= 16KB</text>
+<text x="270.0" y="179.0" font-size="12" font-weight="600" text-anchor="middle" fill="#0f172a">size -&gt; class (O(1) table)</text>
+<text x="270.0" y="196.0" font-size="10.5" text-anchor="middle" fill="#64748b">36 classes, ~25% step, &lt;= 16KB</text>
 <rect x="540" y="158" width="300" height="48" rx="9" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.6"/>
 <text x="690.0" y="179.0" font-size="12" font-weight="600" text-anchor="middle" fill="#0f172a">LARGE (&gt; 16KB)</text>
-<text x="690.0" y="196.0" font-size="10.5" text-anchor="middle" fill="#64748b">passthrough malloc (pendencia)</text>
+<text x="690.0" y="196.0" font-size="10.5" text-anchor="middle" fill="#64748b">malloc passthrough (pending)</text>
 <line x1="420.0" y1="122.0" x2="300.0" y2="158.0" stroke="#475569" stroke-width="1.8" marker-end="url(#ah)"/>
 <line x1="500.0" y1="122.0" x2="650.0" y2="158.0" stroke="#475569" stroke-width="1.8" marker-end="url(#ah)"/>
 <rect x="120" y="236" width="720" height="60" rx="10" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.6"/>
-<text x="480" y="258" font-size="12.5" text-anchor="middle" fill="#0f172a" font-weight="700">Heap por-thread (TLS) — listas de spans por classe</text>
-<text x="480" y="278" font-size="10.5" text-anchor="middle" fill="#64748b" font-weight="400">spans[classe]: AVAILABLE   |   full list: FULL (nunca varrido no alloc)</text>
+<text x="480" y="258" font-size="12.5" text-anchor="middle" fill="#0f172a" font-weight="700">Per-thread heap (TLS) — per-class span lists</text>
+<text x="480" y="278" font-size="10.5" text-anchor="middle" fill="#64748b" font-weight="400">spans[class]: AVAILABLE   |   full list: FULL (never scanned on alloc)</text>
 <line x1="270.0" y1="206.0" x2="340.0" y2="236.0" stroke="#475569" stroke-width="1.8" marker-end="url(#ah)"/>
 <rect x="120" y="326" width="720" height="66" rx="10" fill="#ecfdf5" stroke="#10b981" stroke-width="1.6"/>
-<text x="480" y="348" font-size="12" text-anchor="middle" fill="#0f172a" font-weight="700">Span 64KB alinhado — metadado por MASCARA do ponteiro (zero header/objeto)</text>
-<text x="300" y="372" font-size="10.5" text-anchor="middle" fill="#64748b" font-weight="400">free-list local: so o dono, sem atomico</text>
-<text x="662" y="372" font-size="10.5" text-anchor="middle" fill="#64748b" font-weight="400">remote_free: push atomico Treiber (cross-thread)</text>
+<text x="480" y="348" font-size="12" text-anchor="middle" fill="#0f172a" font-weight="700">64KB aligned span — metadata by pointer MASK (zero header/object)</text>
+<text x="300" y="372" font-size="10.5" text-anchor="middle" fill="#64748b" font-weight="400">local free-list: owner only, no atomics</text>
+<text x="662" y="372" font-size="10.5" text-anchor="middle" fill="#64748b" font-weight="400">remote_free: atomic Treiber push (cross-thread)</text>
 <line x1="480.0" y1="296.0" x2="480.0" y2="326.0" stroke="#475569" stroke-width="1.8" marker-end="url(#ah)"/>
 <rect x="120" y="424" width="340" height="54" rx="9" fill="#ecfeff" stroke="#06b6d4" stroke-width="1.6"/>
-<text x="290.0" y="448.0" font-size="12" font-weight="600" text-anchor="middle" fill="#0f172a">Cache de chunks 64KB (2 niveis)</text>
-<text x="290.0" y="465.0" font-size="10.5" text-anchor="middle" fill="#64748b">por-thread sem lock + global</text>
+<text x="290.0" y="448.0" font-size="12" font-weight="600" text-anchor="middle" fill="#0f172a">64KB chunk cache (2 levels)</text>
+<text x="290.0" y="465.0" font-size="10.5" text-anchor="middle" fill="#64748b">per-thread lock-free + global</text>
 <rect x="540" y="424" width="300" height="54" rx="9" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.6"/>
-<text x="690.0" y="448.0" font-size="12" font-weight="600" text-anchor="middle" fill="#0f172a">Segmentos 4MB do SO</text>
+<text x="690.0" y="448.0" font-size="12" font-weight="600" text-anchor="middle" fill="#0f172a">4MB OS segments</text>
 <text x="690.0" y="465.0" font-size="10.5" text-anchor="middle" fill="#64748b">VirtualAlloc / mmap</text>
 <rect x="540" y="500" width="300" height="40" rx="9" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.6"/>
-<text x="690.0" y="517.0" font-size="11" font-weight="600" text-anchor="middle" fill="#0f172a">Sistema Operacional</text>
-<text x="690.0" y="534.0" font-size="10.5" text-anchor="middle" fill="#64748b">purge devolve segmentos ociosos</text>
-<text x="470" y="416" font-size="10.5" text-anchor="middle" fill="#64748b" font-weight="400">refill sincrono por span</text>
+<text x="690.0" y="517.0" font-size="11" font-weight="600" text-anchor="middle" fill="#0f172a">Operating System</text>
+<text x="690.0" y="534.0" font-size="10.5" text-anchor="middle" fill="#64748b">purge returns idle segments</text>
+<text x="470" y="416" font-size="10.5" text-anchor="middle" fill="#64748b" font-weight="400">synchronous per-span refill</text>
 <line x1="300.0" y1="392.0" x2="300.0" y2="424.0" stroke="#475569" stroke-width="1.8" marker-end="url(#ah)"/>
 <line x1="460.0" y1="451.0" x2="540.0" y2="451.0" stroke="#475569" stroke-width="1.8" marker-end="url(#ah)"/>
 <line x1="690.0" y1="478.0" x2="690.0" y2="500.0" stroke="#475569" stroke-width="1.8" marker-end="url(#ah)"/>

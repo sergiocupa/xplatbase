@@ -22,9 +22,11 @@
     <ClInclude Include="include\xplatbase.h" />
     <ClInclude Include="src\atomics.h" />
     <ClInclude Include="src\event_handler.h" />
+    <ClInclude Include="src\list_hander.h" />
     <ClInclude Include="src\mem_leak_watch.h" />
     <ClInclude Include="src\memory_pool.h" />
     <ClInclude Include="src\ring_queue.h" />
+    <ClInclude Include="src\string_handler.h" />
     <ClInclude Include="src\thread_activity.h" />
     <ClInclude Include="src\thread_handler.h" />
     <ClInclude Include="src\thread_pool.h" />
