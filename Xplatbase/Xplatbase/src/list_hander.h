@@ -20,7 +20,9 @@
 extern "C" {
 #endif
 
+    #define XPB_SKIP_UMBRELLA
     #include "../include/xplatbase.h"
+    #undef XPB_SKIP_UMBRELLA
     #include "event_handler.h"
 
 

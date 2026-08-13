@@ -123,11 +123,19 @@ extern "C" {
 
 	typedef void (*ErrorHandler)(const CallContextGlobalEvent* ctx, const char* msg);
 
-    #include "../src/list_hander.h"
-    #include "../src/memory_pool.h"
-    #include "../src/string_handler.h"
-    #include "../src/thread_handler.h"
-    #include "../src/thread_pool.h"
+    /* Guarda-chuva da API publica: inclui todos os modulos para quem faz apenas
+     * #include "xplatbase.h". E' PULADO quando um header de modulo esta no meio
+     * da propria inclusao (ele define XPB_SKIP_UMBRELLA em volta do seu
+     * #include deste header), evitando o ciclo em que um modulo-irmao e' puxado
+     * antes de o tipo do modulo atual (Thread/ListX) estar definido. Cada modulo
+     * ja inclui suas dependencias diretas, entao nada se perde. */
+    #ifndef XPB_SKIP_UMBRELLA
+        #include "../src/list_hander.h"
+        #include "../src/memory_pool.h"
+        #include "../src/string_handler.h"
+        #include "../src/thread_handler.h"
+        #include "../src/thread_pool.h"
+    #endif
 
 
 #ifdef __cplusplus

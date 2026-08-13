@@ -16,7 +16,9 @@
 #ifndef THREAD_HAND_H
 #define THREAD_HAND_H
 
+#define XPB_SKIP_UMBRELLA
 #include "../include/xplatbase.h"
+#undef XPB_SKIP_UMBRELLA
 
 #ifndef XPLATBASE_WIN
 #include <pthread.h>
@@ -57,6 +59,14 @@ extern "C" {
 		int Joined;
 	}
 	Thread;
+
+    typedef struct
+    {
+        int Max;
+		int Count;
+        Thread** Items;
+    }
+    ThreadList;
 
 
 	typedef void (*CreatedThread)(const Thread* thr);

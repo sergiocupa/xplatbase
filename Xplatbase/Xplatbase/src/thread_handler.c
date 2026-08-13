@@ -1,14 +1,59 @@
 #include "thread_handler.h"
 #include <stdlib.h>
 
-static ListXPB Threads = { 0 };
+#define THR_LIST_INIT_COUNT 16
+
+static ThreadList Threads = { 0 };
 static CreatedThread OnCreatedThread = 0;
 static CreatedThread OnEndedThread   = 0;
 static int ThreadHandlerInited = 0;
 
-void xpb_list_init_ext(ListXPB* list, int32 initial_count, uint64 type_size, const char* func, const char* file, int line);
-void xpb_list_add_ext(ListXPB* list, void* instance, uint64 type_size, const char* func, const char* file, int line);
-void xpb_list_remove_ext(ListXPB* list, void* obj);
+static void create_list()
+{
+	Threads.Max   = THR_LIST_INIT_COUNT;
+    Threads.Count = 0;
+	Threads.Items = (Thread**)malloc(sizeof(Thread*) * Threads.Max);
+}
+
+static void add_list(Thread* thr)
+{
+    int sz = Threads.Count + 1;
+    if (sz >= Threads.Max)
+    {
+        uint64 new_max = (uint64)Threads.Max * 2;
+        void** new_items = (void**)realloc(Threads.Items, new_max * sizeof(void*));
+        Threads.Items = new_items;
+        Threads.Max = (uint64)new_max;
+    }
+    Threads.Items[Threads.Count] = thr;
+    Threads.Count++;
+}
+
+static void remove_list(Thread* thr)
+{
+    int ix = 0;
+    while (ix < Threads.Count)
+    {
+        void* am = Threads.Items[ix];
+        if (am == thr)
+        {
+            // transfere instancias
+            while (ix < Threads.Count - 1)
+            {
+                Threads.Items[ix] = Threads.Items[ix + 1];
+                ix++;
+            }
+            Threads.Count--;
+            break;
+        }
+        ix++;
+    }
+}
+
+
+void xpb_list_init_ext(ThreadList* list, int32 initial_count, uint64 type_size, const char* func, const char* file, int line);
+void xpb_list_add_ext(ThreadList* list, void* instance, uint64 type_size, const char* func, const char* file, int line);
+void xpb_list_remove_ext(ThreadList* list, void* obj);
 
 #ifdef XPLATBASE_WIN
 static CRITICAL_SECTION ThreadsLock;
@@ -62,8 +107,7 @@ static void thread_handler_init_once(void)
     thread_lock();
     if (!ThreadHandlerInited)
     {
-        xpb_list_init(&Threads, -1, Thread);
-        Threads.Active = true;
+        create_list();
         ThreadHandlerInited = 1;
     }
     thread_unlock();
@@ -82,7 +126,7 @@ static void* tfun(void* arg)
 
     thread_lock();
     on_created = OnCreatedThread;
-    on_ended = OnEndedThread;
+    on_ended   = OnEndedThread;
     thread_unlock();
 
     if (on_created) on_created(ta);
@@ -92,7 +136,7 @@ static void* tfun(void* arg)
     if (on_ended) on_ended(ta);
 
     thread_lock();
-    xpb_list_remove(&Threads, ta);
+    remove_list(ta);
     thread_unlock();
 
 #ifdef XPLATBASE_WIN
@@ -123,7 +167,7 @@ Thread* thread_create(xthread_func_t* func, void* arg, int* status)
     thread_handler_init_once();
 
     thread_lock();
-    xpb_list_add(&Threads, thr, Thread);
+    add_list(thr);
     thread_unlock();
 
 #ifdef XPLATBASE_WIN
@@ -136,7 +180,7 @@ Thread* thread_create(xthread_func_t* func, void* arg, int* status)
     if (!ok)
     {
         thread_lock();
-        xpb_list_remove(&Threads, thr);
+        remove_list(thr);
         thread_unlock();
         free(thr);
         return NULL;
