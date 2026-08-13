@@ -24,6 +24,7 @@ extern "C" {
 
     #include "../include/xplatbase.h"
     #include "list_hander.h"
+    #include <stdarg.h>
 
 
 	typedef struct
@@ -43,6 +44,8 @@ extern "C" {
 	XPLATBASE_API void     string_copys(StringX* src, StringX* dst, const int src_start, const int length, const int dst_start);
 	XPLATBASE_API void     string_append(StringX* src, StringX* dst, const int src_start, const int length);
 	XPLATBASE_API void     string_appends(StringX* src, const char* content, const int con_length, const int src_start, const int src_length);
+	XPLATBASE_API int      string_append_formatv(StringX* dst, const char* format, va_list args);
+	XPLATBASE_API int      string_append_format(StringX* dst, const char* format, ...);
 
 	// Iguals. Tambem compara somente parte da string. Devolve true/false.
 	XPLATBASE_API boolean  string_equal(StringX* s1, const char* s2, const int s2_length);

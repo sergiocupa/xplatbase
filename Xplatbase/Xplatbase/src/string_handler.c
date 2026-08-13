@@ -8,6 +8,7 @@
 
 #include "string_handler.h"
 #include "memory_pool.h"
+#include <stdio.h>
 #include <string.h>
 
 /* Alocacao: SEMPRE via memory_pool (memop_alloc_raw/memop_free_raw/
@@ -189,6 +190,44 @@ void string_appends(StringX* src, const char* content, const int con_length, con
 	string_copy(src, content, con_length, src_start, src_length, (int)src->Length);
 }
 
+int string_append_formatv(StringX* dst, const char* format, va_list args)
+{
+    if (!dst || !dst->Content || !format) return -1;
+
+    va_list count_args;
+    va_copy(count_args, args);
+    int appended = vsnprintf(NULL, 0, format, count_args);
+    va_end(count_args);
+    if (appended < 0) return -1;
+
+    uint64 old_length = dst->Length;
+    uint64 required = old_length + (uint64)appended;
+    if (required < old_length || !sh_ensure_capacity(dst, required)) return -1;
+
+    va_list write_args;
+    va_copy(write_args, args);
+    int written = vsnprintf(dst->Content + old_length,
+        (size_t)(dst->Max - old_length + 1), format, write_args);
+    va_end(write_args);
+    if (written != appended)
+    {
+        dst->Content[old_length] = 0;
+        return -1;
+    }
+
+    dst->Length = required;
+    return written;
+}
+
+
+int string_append_format(StringX* dst, const char* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int written = string_append_formatv(dst, format, args);
+    va_end(args);
+    return written;
+}
 
 /* ------------------------------------------------------------------ */
 /* Igualdade (total e parcial)                                          */

@@ -640,6 +640,21 @@ static void test_split_matrix(void)
     }
 }
 
+static void test_append_format(void)
+{
+    StringX s;
+    string_init(&s);
+
+    CHECK("append_format texto", string_append_format(&s, "codec=%s", "avc1") == 10);
+    CHECKF(sx_eq(&s, "codec=avc1"), "append_format conteudo: %s", s.Content);
+    CHECK("append_format numeros", string_append_format(&s, ".%02X%02X%02X", 0x64, 0, 0x1f) == 7);
+    CHECKF(sx_eq(&s, "codec=avc1.64001F"), "append_format acumulado: %s", s.Content);
+    CHECK("append_format crescimento", string_append_format(&s, "-%080d", 7) == 81);
+    CHECK("append_format length", s.Length == 98);
+    CHECK("append_format argumento invalido", string_append_format(NULL, "%d", 1) == -1);
+
+    string_release(&s);
+}
 
 /* ------------------------------------------------------------------ */
 /* main                                                                 */
@@ -666,6 +681,7 @@ int main(void)
     test_trim();
     test_stop();
     test_split_matrix();
+    test_append_format();
 
     memop_shutdown();
 
