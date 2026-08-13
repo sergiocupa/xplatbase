@@ -45,6 +45,9 @@
     <ClInclude Include="src\string_handler.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="src\numeric.h">
+      <Filter>src</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\xplatbase.c">
@@ -84,6 +87,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="src\thread_pool.c">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\numeric.c">
       <Filter>src</Filter>
     </ClCompile>
   </ItemGroup>

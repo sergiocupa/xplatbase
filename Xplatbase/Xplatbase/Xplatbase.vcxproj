@@ -25,6 +25,7 @@
     <ClInclude Include="src\list_hander.h" />
     <ClInclude Include="src\mem_leak_watch.h" />
     <ClInclude Include="src\memory_pool.h" />
+    <ClInclude Include="src\numeric.h" />
     <ClInclude Include="src\ring_queue.h" />
     <ClInclude Include="src\string_handler.h" />
     <ClInclude Include="src\thread_activity.h" />
@@ -38,6 +39,7 @@
     <ClCompile Include="src\list_hander.c" />
     <ClCompile Include="src\mem_leak_watch.c" />
     <ClCompile Include="src\memory_pool.c" />
+    <ClCompile Include="src\numeric.c" />
     <ClCompile Include="src\ring_queue.c" />
     <ClCompile Include="src\string_handler.c" />
     <ClCompile Include="src\thread_activity_linux.c" />
