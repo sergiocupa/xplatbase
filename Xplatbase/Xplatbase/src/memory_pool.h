@@ -48,7 +48,10 @@ extern "C" {
     /* Fast path de ponteiro cru: void* em registrador, sem o struct MemBuffer.
      * Mesma semantica de memop_alloc/free, mas sem carregar o tamanho de volta. */
     XPLATBASE_API void* memop_alloc_raw(uint64 size);
+    XPLATBASE_API void* memop_calloc_raw(uint64 count, uint64 size);
     XPLATBASE_API void  memop_free_raw(void* ptr);
+    XPLATBASE_API void* memop_copy_raw(void* dst, const void* src, uint64 size);
+    XPLATBASE_API void* memop_zero_raw(void* dst, uint64 size);
 
     /* Redimensiona um bloco preservando o conteudo (igual realloc), porem usando
      * SEMPRE o memory_pool -- nunca o realloc do CRT. Regras:

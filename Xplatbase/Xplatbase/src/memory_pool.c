@@ -1044,6 +1044,25 @@ static uint64 memop_usable_size(void* ptr, MemSpan** out_span)
 /* realloc pelo proprio pool (ver contrato em memory_pool.h). Fast path in-place
  * quando o pedido ainda cabe na classe/bloco atual: devolve o mesmo ponteiro sem
  * copiar. Caso contrario aloca->copia->libera reusando os caminhos do pool. */
+void* memop_calloc_raw(uint64 count, uint64 size)
+{
+    if (size != 0 && count > UINT64_MAX / size) return NULL;
+    uint64 total = count * size;
+    void* ptr = memop_alloc_raw(total);
+    if (ptr) memset(ptr, 0, (size_t)total);
+    return ptr;
+}
+void* memop_copy_raw(void* dst, const void* src, uint64 size)
+{
+    if (!dst || !src) return NULL;
+    return memcpy(dst, src, (size_t)size);
+}
+
+void* memop_zero_raw(void* dst, uint64 size)
+{
+    if (!dst) return NULL;
+    return memset(dst, 0, (size_t)size);
+}
 void* memop_realloc_raw(void* ptr, uint64 size)
 {
     MemSpan* span;

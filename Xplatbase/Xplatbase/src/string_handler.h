@@ -46,6 +46,11 @@ extern "C" {
 	XPLATBASE_API void     string_appends(StringX* src, const char* content, const int con_length, const int src_start, const int src_length);
 	XPLATBASE_API int      string_append_formatv(StringX* dst, const char* format, va_list args);
 	XPLATBASE_API int      string_append_format(StringX* dst, const char* format, ...);
+	XPLATBASE_API uint64   string_length_raw(const char* value);
+	XPLATBASE_API int      string_compare_raw(const char* lhs, const char* rhs);
+	XPLATBASE_API int      string_copy_raw(char* dst, uint64 capacity, const char* src);
+	XPLATBASE_API int      string_append_raw(char* dst, uint64 capacity, const char* src);
+	XPLATBASE_API int      string_format_raw(char* dst, uint64 capacity, const char* format, ...);
 
 	// Iguals. Tambem compara somente parte da string. Devolve true/false.
 	XPLATBASE_API boolean  string_equal(StringX* s1, const char* s2, const int s2_length);

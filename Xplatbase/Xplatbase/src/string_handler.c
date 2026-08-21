@@ -228,6 +228,52 @@ int string_append_format(StringX* dst, const char* format, ...)
     va_end(args);
     return written;
 }
+uint64 string_length_raw(const char* value)
+{
+    return value ? (uint64)strlen(value) : 0;
+}
+
+int string_compare_raw(const char* lhs, const char* rhs)
+{
+    if (lhs == rhs) return 0;
+    if (!lhs) return -1;
+    if (!rhs) return 1;
+    return strcmp(lhs, rhs);
+}
+
+int string_copy_raw(char* dst, uint64 capacity, const char* src)
+{
+    if (!dst || !src || capacity == 0) return -1;
+    size_t length = strlen(src);
+    if ((uint64)length >= capacity) return -1;
+    memcpy(dst, src, length + 1);
+    return (int)length;
+}
+
+int string_append_raw(char* dst, uint64 capacity, const char* src)
+{
+    if (!dst || !src || capacity == 0) return -1;
+    size_t dst_length = strlen(dst);
+    size_t src_length = strlen(src);
+    if ((uint64)dst_length >= capacity || (uint64)src_length >= capacity - (uint64)dst_length) return -1;
+    memcpy(dst + dst_length, src, src_length + 1);
+    return (int)(dst_length + src_length);
+}
+
+int string_format_raw(char* dst, uint64 capacity, const char* format, ...)
+{
+    if (!dst || !format || capacity == 0 || capacity > (uint64)SIZE_MAX) return -1;
+    va_list args;
+    va_start(args, format);
+    int written = vsnprintf(dst, (size_t)capacity, format, args);
+    va_end(args);
+    if (written < 0 || (uint64)written >= capacity)
+    {
+        dst[0] = 0;
+        return -1;
+    }
+    return written;
+}
 
 /* ------------------------------------------------------------------ */
 /* Igualdade (total e parcial)                                          */
