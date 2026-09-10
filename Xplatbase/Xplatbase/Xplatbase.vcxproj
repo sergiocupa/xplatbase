@@ -50,7 +50,7 @@
     <ClCompile Include="src\xplatbase.c" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
-    <VCProjectVersion>17.0</VCProjectVersion>
+    <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{f217b4d5-f6bc-4fce-af5e-beef9fe1f3e8}</ProjectGuid>
     <RootNamespace>Xplatbase</RootNamespace>
@@ -79,11 +79,19 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <!-- Saida deterministica: cada copia do xplatbase escreve na PROPRIA pasta.
+       Duas copias no mesmo build (a da solution e a aninhada no yason) senao
+       colidem no mesmo Xplatbase.lib/.pdb: uma sobrescreve a outra em serie e o
+       compilador falha com C1041 em paralelo. -->
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)$(Platform)\$(Configuration)\obj\</IntDir>
+  </PropertyGroup>
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
   <ImportGroup Label="Shared">
