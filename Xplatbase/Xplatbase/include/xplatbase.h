@@ -28,11 +28,28 @@ extern "C" {
 	#pragma execution_character_set("utf-8")
 	#endif
 
-	#if defined(XPLATBASE_WIN) && !defined(_DEBUG) 
-        #define XPLATBASE_API __declspec ( dllexport )
-	#else 
-	    #define XPLATBASE_API
-	#endif 
+	// Modo de ligacao. O padrao continua ESTATICO: quem ja usa a lib assim nao muda nada.
+	//   XPLATBASE_BUILD_SHARED -> compilando a propria biblioteca compartilhada
+	//   XPLATBASE_USE_SHARED   -> consumindo a biblioteca compartilhada
+	//   (nenhum dos dois)      -> estatico
+	// O que havia antes exportava so em Release e nao tinha o ramo de importacao, entao a
+	// versao compartilhada nao era utilizavel -- e sem ela cada modulo fica com a SUA copia
+	// do pool de memoria e do registro de threads (ver prep-xplatbase/PLANO.md no appserver).
+	#if defined(XPLATBASE_WIN)
+	    #if   defined(XPLATBASE_BUILD_SHARED)
+	        #define XPLATBASE_API __declspec ( dllexport )
+	    #elif defined(XPLATBASE_USE_SHARED)
+	        #define XPLATBASE_API __declspec ( dllimport )
+	    #else
+	        #define XPLATBASE_API
+	    #endif
+	#else
+	    #if defined(XPLATBASE_BUILD_SHARED)
+	        #define XPLATBASE_API __attribute__ ( ( visibility ( "default" ) ) )
+	    #else
+	        #define XPLATBASE_API
+	    #endif
+	#endif
 
 	#ifdef _MSC_VER
 	    #define STATIC_INLINE static __forceinline
@@ -61,6 +78,34 @@ extern "C" {
 
 
 	XPLATBASE_API void platform_init(void);
+
+
+	// ---- instancia unica ---------------------------------------------------
+	// O pool de memoria, o registro de threads e o pool de tarefas sao estado global de
+	// arquivo: cada modulo que linkar o xplatbase ESTATICAMENTE ganha a propria copia, e ai
+	// a contabilidade racha e liberar memoria entre modulos corrompe o heap. Estas funcoes
+	// detectam esse caso em vez de deixa-lo silencioso (ver src/xplat_instance.c).
+	typedef struct
+	{
+	    uint32 AbiVersion;
+	    uint64 Identity;        // endereco marcador da copia -- difere entre instancias
+	    char   Module[260];     // modulo (exe/dll) de onde a instancia veio
+	}
+	XplatInstanceInfo;
+
+	// Registra esta copia no processo. Chamado por memop_init; idempotente.
+	XPLATBASE_API void xplat_instance_register(void);
+	XPLATBASE_API void xplat_instance_release(void);
+
+	// 0 = instancia unica; 1 = JA existe outra (first recebe a que chegou primeiro).
+	XPLATBASE_API int  xplat_instance_check(XplatInstanceInfo* first);
+
+	// Modulo de onde ESTA copia veio.
+	XPLATBASE_API const char* xplat_instance_module(void);
+
+	// Duplicata aborta o processo? Padrao: sim em Debug, nao em Release. O teste que provoca
+	// a duplicata de proposito desliga antes de carregar o modulo duplicado.
+	XPLATBASE_API void xplat_instance_set_fatal(int fatal);
 
 
 	#ifdef XPLATBASE_WIN

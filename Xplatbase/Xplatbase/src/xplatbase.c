@@ -47,6 +47,21 @@ void platform_init()
 {
 	if (platform_initialized) return;
 
+	// Segunda copia do xplatbase neste processo: registra, denuncia e PARA AQUI.
+	// Subir um segundo pool de threads, um segundo rastreador e um segundo conjunto de
+	// callbacks so multiplica o estrago. Pior: se este modulo for descarregado depois,
+	// as threads dele morrem junto com o codigo -- violacao de acesso no FreeLibrary,
+	// medida na pratica ao construir o teste da duplicata.
+	xplat_instance_register();
+	{
+		XplatInstanceInfo first;
+		if (xplat_instance_check(&first))
+		{
+			platform_initialized = true;   // inerte: nao sobe pool nem hooks
+			return;
+		}
+	}
+
 	test_utf8();
 	xpb_event_init();
 

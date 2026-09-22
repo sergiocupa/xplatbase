@@ -39,6 +39,8 @@ extern "C" {
     }
     MemPoolStats;
 
+    /* INTERNAS: chamadas pelo platform_init (disparado pelo inicializador de CRT).
+       Nao sao exportadas de proposito -- o que sai da biblioteca vira compromisso de ABI. */
     void memop_init(void);
     void memop_shutdown(void);
 

@@ -639,6 +639,9 @@ void memop_init(void)
                 thread_mutex_init_inline(&g_site_lock);
                 memop_build_size2class();
                 atomic_set_inline(&g_init_state, MEMOP_READY);
+                /* Caminho obrigatorio de qualquer alocacao: e aqui que se descobre se existe
+                   mais de uma copia do xplatbase no processo (ver xplat_instance.c). */
+                xplat_instance_register();
                 return;
             }
         }

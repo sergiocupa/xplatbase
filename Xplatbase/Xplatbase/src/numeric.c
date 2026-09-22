@@ -1,6 +1,6 @@
 #include "numeric.h"
 #include <stdio.h>
-#include <stdlib.h>]
+#include <stdlib.h>
 #include <math.h>
 
 
@@ -22,7 +22,7 @@ char* numeric_int_to_string(int value)
 //}
 
 
-double numeric_parse_double(char* data, int* check_error)
+double numeric_parse_double(const char* data, int* check_error)
 {
 	int result      = 0;
 	int is_negative = 0;
