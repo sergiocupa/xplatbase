@@ -226,6 +226,29 @@ static void instance_read_policy(void)
 #endif
 }
 
+
+// A biblioteca NAO pode ser descarregada enquanto viver: o platform_init sobe pool de threads
+// e rastreador, e descarregar o modulo com thread viva mata o processo -- o codigo some
+// debaixo dela. Apareceu de verdade duas vezes: no teste da duplicata e no executor de
+// testes do Visual Studio, que descarrega o modulo de teste ao terminar.
+// Fixar custa nada: a biblioteca e pequena e vive o processo inteiro de qualquer forma.
+static void instance_pin_module(void)
+{
+#ifdef XPLATBASE_WIN
+    HMODULE h = 0;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                       (LPCSTR)&g_self_marker, &h);
+#else
+    Dl_info info;
+    if (dladdr((void*)&g_self_marker, &info) && info.dli_fname)
+    {
+        /* NODELETE: continua carregada mesmo apos o ultimo dlclose. */
+        void* h = dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD | RTLD_NODELETE);
+        (void)h;
+    }
+#endif
+}
+
 void xplat_instance_register(void)
 {
     if (g_registered) return;
@@ -237,6 +260,8 @@ void xplat_instance_register(void)
     snprintf(g_first.Module, sizeof(g_first.Module), "%s", g_my_module);
 
     instance_register_os();
+
+    if (!g_duplicate) instance_pin_module();
 
     if (g_duplicate)
     {
