@@ -71,6 +71,7 @@
   <ItemGroup>
     <ClCompile Include="memory_pool_test.c" />
     <ClCompile Include="$(SRCDIR)\memory_pool.c" />
+    <ClCompile Include="$(SRCDIR)\xplat_instance.c" />
     <ClCompile Include="$(SRCDIR)\mem_leak_watch.c" />
     <ClCompile Include="$(SRCDIR)\thread_handler.c" />
     <ClCompile Include="$(SRCDIR)\thread_wait.c" />

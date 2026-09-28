@@ -17,6 +17,7 @@ dependencies, auto-initialized on module load, and a stable API exported via
 ## Contents
 
 - [Initialization](#initialization)
+- [One instance per process](#one-instance-per-process)
 - [Highlights](#highlights)
 - [🧵 Thread Pool](#-thread-pool)
 - [🧠 Memory Pool](#-memory-pool)
@@ -67,6 +68,75 @@ To **disable auto-initialization** and call `platform_init()` manually, define
 | `void platform_init(void)` | Initializes the platform (idempotent). Auto-called on load unless `XPLATBASE_NO_AUTO_INIT`. |
 
 ---
+
+## One instance per process
+
+The memory pool, the thread registry and the global thread pool are **process-wide state
+held in file-static variables**. Two copies of this library in the same process means two
+pools: memory allocated by one is invisible to the other, and a block freed across the
+boundary is a crash waiting to happen.
+
+That is easy to do by accident — a plugin, or any library that links Xplatbase
+statically and is then loaded into a host that already has it.
+
+### The rule
+
+When more than one module in the same process uses Xplatbase, **all of them link the
+shared build**. Exactly one copy, one pool.
+
+| how you build | macro to define | when |
+|---|---|---|
+| static library | *(none)* | single executable, no plugins |
+| shared build | `XPLATBASE_BUILD_SHARED` | building the .dll/.so itself |
+| consumer of the shared build | `XPLATBASE_USE_SHARED` | executable or plugin that links it |
+
+On Windows the shared configurations (`Debug DLL` / `Release DLL`) output to
+`$(Platform)\$(Configuration)\dll\`, next to the static ones — the same project builds both,
+and the consumer decides which it wants. On CMake, `-DXPLATBASE_SHARED=ON`.
+
+One more rule that comes with it: **Debug and Release must not be mixed** across modules.
+The struct layouts are the ABI here.
+
+### The safeguard
+
+Initialization registers the instance with the operating system — a named mapping plus a
+named mutex on Windows, a lock file under `TMPDIR` on POSIX, both keyed by process id. The
+second copy to come up finds the first, reports it, and **stays inert**: it does not create
+a second pool.
+
+```c
+XplatInstanceInfo first;
+if (xplat_instance_check(&first))
+    printf("duplicate: first came from %s
+", first.Module);
+
+printf("this instance lives in %s
+", xplat_instance_module());
+```
+
+What happens on detection is a policy:
+
+| `XPLATBASE_DUPLICATE_FATAL` | behaviour |
+|---|---|
+| unset | abort in Debug, report and continue in Release |
+| `1` | always abort |
+| `0` | always report and continue |
+
+The variable is read at **load** time, so set it before the module that would duplicate is
+loaded — by then the detection has already happened. `xplat_instance_set_fatal()` does the
+same from code.
+
+The module that owns the live instance is **pinned** (`GET_MODULE_HANDLE_EX_FLAG_PIN`,
+`RTLD_NODELETE`): unloading it while pool threads are running took the process down, and
+pinning is what makes a plugin safe to unload.
+
+### Proving it
+
+`test/unittests/test_instancia_modulos.c` in the appserver project carries the pair worth
+copying: a module that consumes the shared build and is checked to share pool, tasks and
+thread registry; and a module that links statically **on purpose**, which the tests require
+the detector to catch. A detector never seen accusing is worth nothing.
+
 
 ## Highlights
 

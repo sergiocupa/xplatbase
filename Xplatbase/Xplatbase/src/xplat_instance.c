@@ -269,7 +269,18 @@ void xplat_instance_register(void)
         // Duplicata e defeito de BUILD, nao condicao de execucao: em Debug para na hora, onde
         // a pilha ainda mostra quem carregou o segundo modulo. O teste que provoca a duplicata
         // de proposito desliga isto antes (xplat_instance_set_fatal).
-        if (g_fatal) abort();
+        if (g_fatal)
+        {
+#ifdef XPLATBASE_WIN
+            // Parar NA HORA, sem caixa de dialogo. O abort() da CRT de Debug abre um dialogo
+            // modal e aciona o Windows Error Reporting; num processo sem janela (servidor
+            // iniciado em segundo plano) ninguem ve o dialogo, e o processo fica vivo e mudo --
+            // e, enquanto o WER o segura, nem "taskkill /F" o encerra ("acesso negado").
+            // Aconteceu no appservertester: parecia um travamento do servidor, era isto.
+            _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
+            abort();
+        }
     }
 }
 

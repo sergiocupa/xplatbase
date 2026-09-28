@@ -106,6 +106,14 @@
 #ifndef POOL_PARK_TIMEOUT_US
 #define POOL_PARK_TIMEOUT_US 1000
 #endif
+/* Recuo do estacionamento ocioso: cada timeout SEM trabalho dobra a espera ate este teto,
+ * e qualquer trabalho volta ao POOL_PARK_TIMEOUT_US. Com 1 ms fixo, cada core ocioso
+ * acordava mil vezes por segundo e girava de novo: medido, um servidor parado consumia
+ * 4,3 nucleos de 16. O teto so pesa se algum caminho depender do timeout para achar
+ * trabalho -- e nenhum depende mais (ver pool_wake_one_core e o re-teste antes de dormir). */
+#ifndef POOL_PARK_MAX_US
+#define POOL_PARK_MAX_US   50000
+#endif
 #ifndef POOL_MON_MS
 #define POOL_MON_MS        5
 #endif
@@ -417,6 +425,21 @@ POOL_INLINE bool pool_try_get(ThreadPool* pool, PoolWorker* self, PoolTask* out)
     return false;
 }
 
+/* Perf C: acorda exatamente UM core que esteja de fato estacionado. */
+static void pool_wake_one_core(ThreadPool* pool){
+    if (atomic_get_inline(&pool->n_parked_core) <= 0) return;
+    int nc=pool->n_core;
+    uint32_t start=atomic_u32_add_inline(&pool->wake_rr,1u);
+    for (int j=0;j<nc;j++){
+        int idx=(int)((start+(uint32_t)j)%(uint32_t)nc);
+        if (!atomic_get_inline(&pool->workers[idx].parked)) continue;   /* Perf I */
+        int exp=1;
+        if (atomic_cas_inline(&pool->workers[idx].parked,&exp,0)){
+            thread_wait_wake_inline(&pool->workers[idx].wait); break;
+        }
+    }
+}
+
 static bool pool_spin(ThreadPool* pool, PoolWorker* self, PoolTask* out){
     for (int i=0;i<POOL_SPIN_PAUSE;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; xcpu_pause(); }
     for (int i=0;i<POOL_SPIN_YIELD;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; pool_yield(); }
@@ -446,16 +469,35 @@ static POOL_FN pool_worker_fn(void* raw){
     }
 
     int is_core=self->is_core;
+    long long park_us=POOL_PARK_TIMEOUT_US;
+    int ocioso=0;   /* a ultima espera venceu por tempo e nao havia trabalho */
     while (!atomic_get_inline(&pool->stop)){
-        if (pool_try_get(pool,self,&t)){ pool_run(pool,self,&t); continue; }
+        if (pool_try_get(pool,self,&t)){ pool_run(pool,self,&t); park_us=POOL_PARK_TIMEOUT_US; ocioso=0; continue; }
         thread_wait_prepare_inline(&self->wait);
-        if (pool_try_get(pool,self,&t)){ pool_run(pool,self,&t); continue; }
-        if (is_core){ if (pool_spin(pool,self,&t)){ pool_run(pool,self,&t); continue; } }
+        if (pool_try_get(pool,self,&t)){ pool_run(pool,self,&t); park_us=POOL_PARK_TIMEOUT_US; ocioso=0; continue; }
+        /* Girar so compensa logo depois de trabalho (a proxima tarefa costuma vir em
+         * seguida). Depois de um timeout ocioso, girar e so queimar CPU. */
+        if (is_core && !ocioso){ if (pool_spin(pool,self,&t)){ pool_run(pool,self,&t); park_us=POOL_PARK_TIMEOUT_US; continue; } }
         if (atomic_get_inline(&pool->stop)) break;
         /* Perf C: marca este core como parqueado para wakeup direcionado. */
         if (is_core){ atomic_set_inline(&self->parked,1); atomic_add_inline(&pool->n_parked_core,1); }
-        thread_wait_sleep_for_inline(&self->wait, POOL_PARK_TIMEOUT_US);
+        /* Re-testa DEPOIS de se anunciar estacionado. Sem isto, uma tarefa que entra entre o
+         * fim do giro e o parked=1 nao acorda ninguem (quem submete ve n_parked_core==0) e
+         * fica esperando o timeout -- o que era invisivel com 1 ms, e nao seria com o recuo. */
+        if (is_core && pool_try_get(pool,self,&t)){
+            atomic_sub_inline(&pool->n_parked_core,1); atomic_set_inline(&self->parked,0);
+            pool_run(pool,self,&t); park_us=POOL_PARK_TIMEOUT_US; ocioso=0; continue;
+        }
+        /* Workers nao-core nao recebem despertar dirigido: para eles o timeout e o unico
+         * jeito de achar trabalho, e ficam no valor base. */
+        boolean acordado = thread_wait_sleep_for_inline(&self->wait, is_core ? park_us : POOL_PARK_TIMEOUT_US);
         if (is_core){ atomic_sub_inline(&pool->n_parked_core,1); atomic_set_inline(&self->parked,0); }
+        if (is_core && !acordado){
+            ocioso=1;
+            park_us*=2; if (park_us>POOL_PARK_MAX_US) park_us=POOL_PARK_MAX_US;
+        } else {
+            ocioso=0; park_us=POOL_PARK_TIMEOUT_US;
+        }
     }
     POOL_RET;
 }
@@ -553,6 +595,11 @@ boolean pool_submit_relative(ThreadPool* pool, pool_task_fn fn, void* arg)
         PoolTask old=me->lifo_task; me->lifo_task=t;
         if (!pool_deque_push(&me->deque,&old))
             pool_run(pool,me,&old);            /* deque cheio: roda a antiga ja */
+        else
+            /* Agora ha trabalho ROUBAVEL. Antes ninguem era acordado aqui: os outros cores so
+             * o achavam quando o timeout de 1 ms vencia -- o paralelismo aninhado dependia
+             * do timeout, e por isso ele nao podia crescer. */
+            pool_wake_one_core(pool);
         return true;
     }
     int G=pool->n_shards; int spins=0;
@@ -561,19 +608,7 @@ boolean pool_submit_relative(ThreadPool* pool, pool_task_fn fn, void* arg)
         PoolTask t = { fn, arg };
         atomic_add64_inline(&pool->ctrs[s].v,1);
         if (pool_ring_push(&pool->shards[s].ring, &t)){
-            if (atomic_get_inline(&pool->n_parked_core) > 0){
-                /* Perf C: acorda exatamente UM core que esteja de fato parqueado. */
-                int nc=pool->n_core;
-                uint32_t start=atomic_u32_add_inline(&pool->wake_rr,1u);
-                for (int j=0;j<nc;j++){
-                    int idx=(int)((start+(uint32_t)j)%(uint32_t)nc);
-                    if (!atomic_get_inline(&pool->workers[idx].parked)) continue;   /* Perf I */
-                    int exp=1;
-                    if (atomic_cas_inline(&pool->workers[idx].parked,&exp,0)){
-                        thread_wait_wake_inline(&pool->workers[idx].wait); break;
-                    }
-                }
-            }
+            pool_wake_one_core(pool);
             return true;
         }
         atomic_sub64_inline(&pool->ctrs[s].v,1);
