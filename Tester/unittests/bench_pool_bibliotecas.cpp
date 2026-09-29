@@ -1,24 +1,30 @@
 /*
- * Tester/thread_pool_bench.cpp
+ * bench_pool_bibliotecas.cpp -- PoolDeTarefas.BenchContraTbbEWinTP no Gerenciador de Testes
+ * (convertido de Tester/thread_pool/thread_pool_bench.cpp: cenarios, colunas e medidas sao
+ * os mesmos; muda a moldura).
  *
- * Bench oficial: thread_pool vs TBB vs WinTP. Tres versoes do nosso pool, lado a lado:
- *   BEFORE = thread_pool.c de antes da ultima alteracao commitada
- *            (Tester/unittests/referencia/thread_pool_antes.c, via versao_before.c)
- *   AFTER  = src/thread_pool.c atual (era a coluna "oficial")
- *   AJUSTE = o mesmo src/thread_pool.c com 1 vigia ligado (pool_vigias_relative)
- * A ordem das colunas GIRA a cada rep, para nenhuma rodar sempre primeiro.
- * (As variantes por grupo g1..g4/all/final foram consolidadas no oficial;
- *  historico de resultados nos thread_pool_bench_results_run*.tsv.)
+ * Pool de tarefas contra TBB e o pool do Windows (WinTP), com tres versoes do nosso:
+ *   BEFORE = thread_pool.c de antes da ultima alteracao commitada (pool_antes.c)
+ *   AFTER  = src/thread_pool.c atual
+ *   AJUSTE = src atual com 1 vigia ligado (pool_ajuste.c)
+ * -- as MESMAS tres versoes do BenchAntesXDepois (pool_versoes.h).
  *
- * Tabelas (uma por cenario): flat-externo, spawn-arvore, fork-join (1 mae -> 64
- * filhas; em regime e apos 1 s ocioso; filhas de CPU e de relogio), os classicos,
- * malloc-default (tasks que alocam/liberam com malloc padrao) e lento-misto.
- * Colunas: latencias (us no console / ms no TSV), maxms = MEDIA das rodadas,
- * max10 = media dos 10 maiores, Mtask/s, tasks/s, cores, cpu%,
- * xTBB/xWinTP = velocidade relativa (Mtask/s adapter / referencia; >1 = mais rapido).
+ * Tabelas (uma por cenario): flat-externo, spawn-arvore, fork-join (1 mae -> 64 filhas; em
+ * regime e apos 1 s ocioso; filhas de CPU e de relogio), os classicos, malloc-default,
+ * mempool e lento-misto. Colunas: latencias (us), maxms = media das rodadas, max10 = media
+ * dos 10 maiores, Mtask/s, tasks/s, cores, cpu%, xTBB/xWinTP = velocidade relativa (>1 =
+ * mais rapido). A ordem das colunas GIRA a cada rep.
  *
- * Build: build.bat   Run: thread_pool_bench.exe [reps] [N_flat] [filtro de cenario]
- * Salva thread_pool_bench_results.tsv (ms, 6 casas, ponto decimal, tab).
+ * Diferencas para o programa original:
+ *   - CPU (cores, cpu%) em CICLOS (QueryProcessCycleTime), nao GetProcessTimes: aquele cobra
+ *     por tique de relogio e dava 0,00 num fork-join apos ocioso de poucos ms.
+ *   - sem o stub de platform_init (a DLL de testes nao chama o platform_init real).
+ *   - TBB so entra se estiver instalado (o .vcxproj define TBB_AVAILABLE); sem ele a coluna
+ *     TBB sai zerada.
+ *   - so mede em Release (pulado em Debug); e PULADO por padrao no Gerenciador (ver
+ *     registro.cpp). Parametros: XPB_BENCH_REPS (padrao 10), XPB_BENCH_NFLAT (padrao
+ *     1.000.000), XPB_BENCH_FILTRO (so cenarios cujo nome contem o texto).
+ *   - tabelas na saida do teste; TSV em pool_bibliotecas.tsv ao lado da DLL de testes.
  */
 
 #include <windows.h>
@@ -31,10 +37,14 @@
 #include <random>
 
 extern "C" {
-#include "thread_pool.h"                    /* pool oficial (V2.05) */
+#include "thread_pool.h"
 #include "memory_pool.h"                    /* cenarios mempool/* (interacao) */
 #include "thread_handler.h"
 }
+#include "ctest_core.h"
+#include "testes.h"
+#include "pool_versoes.h"                   /* BEFORE / AFTER / AJUSTE */
+#include "bench_pool.h"                     /* bench_tsc_hz */
 
 #ifdef TBB_AVAILABLE
 #include <tbb/task_arena.h>
@@ -42,10 +52,6 @@ extern "C" {
 #include <tbb/global_control.h>
 #endif
 
-/* Stub: isola o bench do platform_init real (memory_pool WIP + pool global de
- * 33 threads criado no CRT init). Mesmo padrao do bench/linux/bench_linux.c.
- * xplatbase.c e memory_pool.c ficam FORA do link (ver build.bat). */
-extern "C" XPLATBASE_API void platform_init(void) {}
 
 #ifdef TBB_AVAILABLE
 /* global_control e process-wide no TBB; criar/destruir por rep gera crash
@@ -67,10 +73,10 @@ static double top10_mean(const std::vector<double>& asc){ int n=(int)asc.size();
 static uint32_t lcg(uint32_t* s){ *s=(*s*1664525u)+1013904223u; return *s; }
 static void precise_sleep_us(int us){ if(us<=0)return; LARGE_INTEGER a=qpc_now(); double tgt=(double)us/1000.0; for(;;){ if(qpc_ms(a,qpc_now())>=tgt)return; YieldProcessor(); } }
 
-struct CpuSnap { unsigned long long t100ns; };
-static unsigned long long ft2u(const FILETIME& f){ ULARGE_INTEGER u; u.LowPart=f.dwLowDateTime; u.HighPart=f.dwHighDateTime; return u.QuadPart; }
-static CpuSnap cpu_snap(){ FILETIME c,e,k,u; GetProcessTimes(GetCurrentProcess(),&c,&e,&k,&u); CpuSnap s; s.t100ns=ft2u(k)+ft2u(u); return s; }
-static double cpu_ms(CpuSnap a, CpuSnap b){ return (double)(b.t100ns-a.t100ns)/10000.0; }
+/* CPU em CICLOS: o GetProcessTimes cobra por tique de relogio e mede 0 em intervalos curtos */
+struct CpuSnap { ULONG64 ciclos; };
+static CpuSnap cpu_snap(){ CpuSnap s; s.ciclos=0; QueryProcessCycleTime(GetCurrentProcess(),&s.ciclos); return s; }
+static double cpu_ms(CpuSnap a, CpuSnap b){ return (double)(b.ciclos-a.ciclos)*1000.0/bench_tsc_hz(); }
 
 struct Res { double wall_ms,p50,p99,p999,maxv,max10,mtask_s,tasks_s,cores,cpu_pct; int wrk; };
 struct Scen { const char* name; int tasks; int wmin, wmax, long_every, long_us; int allocs; int alloc_pool; };
@@ -84,33 +90,22 @@ struct PoolAPI {
     void  (*dims)(void*, int*, int*);
 };
 
-#define MK_API(pfx, T, CRE, DES, SUB, WID, DIM)                                        \
-    static void* pfx##_cr(int c){ return (void*)CRE(c); }                             \
-    static void  pfx##_de(void* p){ DES((T*)p); }                                     \
-    static bool  pfx##_su(void* p, void(*f)(void*), void* a){ return SUB((T*)p,f,a) != 0; } \
-    static void  pfx##_wi(void* p){ WID((T*)p); }                                     \
-    static void  pfx##_dm(void* p,int* w,int* c){ DIM((T*)p,w,c); }
+/* As tres versoes do nosso pool (pool_versoes.h), atras da mesma interface. */
+#define MK_VERSAO(pfx, V)                                                               \
+    static void* pfx##_cr(int c){ return (void*)V.Criar(c); }                          \
+    static void  pfx##_de(void* p){ V.Destruir((ThreadPool*)p); }                      \
+    static bool  pfx##_su(void* p, void(*f)(void*), void* a){ return V.Submeter((ThreadPool*)p,f,a) != 0; } \
+    static void  pfx##_dm(void* p,int* w,int* c){ V.Dims((ThreadPool*)p,w,c); }
 
-/* BEFORE: o thread_pool.c anterior, com os simbolos renomeados (versao_before.c).
- * AFTER: o src/thread_pool.c atual. AJUSTE: o mesmo src com 1 vigia (pool_vigias_relative). */
-extern "C" {
-ThreadPool* before_pool_create_relative(int);
-void        before_pool_destroy_relative(ThreadPool*);
-boolean     before_pool_submit_relative(ThreadPool*, pool_task_fn, void*);
-void        before_pool_wait_idle_relative(ThreadPool*);
-void        before_pool_dims_relative(ThreadPool*, int*, int*);
-}
-static ThreadPool* ajuste_create(int c){ ThreadPool* p=pool_create_relative(c); pool_vigias_relative(p,1); return p; }
-
-MK_API(bf, ThreadPool,   before_pool_create_relative, before_pool_destroy_relative, before_pool_submit_relative, before_pool_wait_idle_relative, before_pool_dims_relative)
-MK_API(of, ThreadPool,   pool_create_relative, pool_destroy_relative, pool_submit_relative, pool_wait_idle_relative, pool_dims_relative)
-MK_API(aj, ThreadPool,   ajuste_create, pool_destroy_relative, pool_submit_relative, pool_wait_idle_relative, pool_dims_relative)
+MK_VERSAO(bf, POOL_ANTES)
+MK_VERSAO(of, POOL_DEPOIS)
+MK_VERSAO(aj, POOL_AJUSTE)
 
 #define NPOOL 3
 static const PoolAPI POOLS[NPOOL] = {
-    { bf_cr, bf_de, bf_su, bf_wi, bf_dm },
-    { of_cr, of_de, of_su, of_wi, of_dm },
-    { aj_cr, aj_de, aj_su, aj_wi, aj_dm },
+    { bf_cr, bf_de, bf_su, nullptr, bf_dm },
+    { of_cr, of_de, of_su, nullptr, of_dm },
+    { aj_cr, aj_de, aj_su, nullptr, aj_dm },
 };
 
 static const char* NM[] = {"BEFORE","AFTER","AJUSTE","TBB","WinTP"};
@@ -445,12 +440,12 @@ static void aggregate(Res* out, std::vector<Res>* per){
     }
 }
 static void print_table(const char* title, Res* res){
-    printf("\n=== %s ===\n",title);
-    printf("%-8s %4s %9s %9s %9s %9s %9s %9s %10s %12s %7s %7s %7s %7s\n",
+    t_logf("\n=== %s ===\n",title);
+    t_logf("%-8s %4s %9s %9s %9s %9s %9s %9s %10s %12s %7s %7s %7s %7s\n",
         "adapter","wrk","wall_ms","p50us","p99us","p999us","maxms","max10ms","Mtask/s","tasks/s","cores","cpu%","xTBB","xWinTP");
-    printf("-------------------------------------------------------------------------------------------------------------------------------------\n");
+    t_logf("-------------------------------------------------------------------------------------------------------------------------------------\n");
     for(int i=0;i<NADAPT;i++)
-        printf("%-8s %4d %9.2f %9.3f %9.3f %9.3f %9.3f %9.3f %10.4f %12.0f %7.2f %7.1f %7.2f %7.2f\n",
+        t_logf("%-8s %4d %9.2f %9.3f %9.3f %9.3f %9.3f %9.3f %10.4f %12.0f %7.2f %7.1f %7.2f %7.2f\n",
             NM[i],res[i].wrk,res[i].wall_ms,res[i].p50*1000,res[i].p99*1000,res[i].p999*1000,res[i].maxv,res[i].max10,
             res[i].mtask_s,res[i].tasks_s,res[i].cores,res[i].cpu_pct,
             rel_speed(res[i],res[NADAPT-2]),rel_speed(res[i],res[NADAPT-1]));
@@ -466,17 +461,45 @@ static void bench_flat(const Scen& s, int reps, int cpus){
     Res res[NADAPT]; aggregate(res,per); print_table(s.name,res);
 }
 
-/* 3o argumento opcional: roda so os cenarios cujo nome contem o texto (ex.: fork-join) */
-static const char* g_filtro = nullptr;
-static bool quer(const char* nome){ return !g_filtro || !g_filtro[0] || strstr(nome,g_filtro)!=nullptr; }
+/* XPB_BENCH_FILTRO: roda so os cenarios cujo nome contem o texto (ex.: fork-join) */
+static char g_filtro[128];
+static bool quer(const char* nome){ return !g_filtro[0] || strstr(nome,g_filtro)!=nullptr; }
 
-int main(int argc,char**argv){
+static int env_int(const char* nome, int padrao){
+    char* v=nullptr; size_t n=0; int r=padrao;
+    if (_dupenv_s(&v,&n,nome)==0 && v){ if(v[0]) r=atoi(v); free(v); }
+    return r;
+}
+
+static void tsv_ao_lado(char* caminho, size_t tam){
+    HMODULE eu=nullptr; char* barra;
+    caminho[0]=0;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)(void*)&tsv_ao_lado,&eu);
+    if (!GetModuleFileNameA(eu,caminho,(DWORD)tam)) { caminho[0]=0; return; }
+    barra=strrchr(caminho,'\\'); if(!barra){ caminho[0]=0; return; }
+    snprintf(barra+1,tam-(size_t)(barra+1-caminho),"pool_bibliotecas.tsv");
+}
+
+extern "C" void teste_pool_bench_bibliotecas(TestResult* tr){
+    t_start(tr);
+#ifdef _DEBUG
+    if (env_int("XPB_BENCH_DEBUG",0)!=1)
+        T_SKIP(tr, "build Debug nao mede desempenho real (sem otimizacao, heap de Debug). Compile em Release. XPB_BENCH_DEBUG=1 forca.");
+#endif
     QueryPerformanceFrequency(&g_freq);
-    int reps=(argc>1)?atoi(argv[1]):10; if(reps<1)reps=1;
-    int Nflat=(argc>2)?atoi(argv[2]):1000000; if(Nflat<1000)Nflat=1000;
-    g_filtro=(argc>3)?argv[3]:nullptr;
+    int reps=env_int("XPB_BENCH_REPS",10); if(reps<1)reps=1;
+    int Nflat=env_int("XPB_BENCH_NFLAT",1000000); if(Nflat<1000)Nflat=1000;
+    {
+        char* v=nullptr; size_t n=0; g_filtro[0]=0;
+        if (_dupenv_s(&v,&n,"XPB_BENCH_FILTRO")==0 && v){ snprintf(g_filtro,sizeof(g_filtro),"%s",v); free(v); }
+    }
+    g_rows.clear();
+    t_logf("BEFORE = %s\nAFTER  = %s\nAJUSTE = %s\n", pool_antes_descricao(), pool_depois_descricao(), pool_ajuste_descricao());
+#ifndef TBB_AVAILABLE
+    t_logf("(sem TBB: nao instalado nesta maquina; a coluna TBB sai zerada)\n");
+#endif
     g_cpus=logical_cpus();
-    printf("CPUs=%d  reps=%d  N_flat=%d\n",g_cpus,reps,Nflat); fflush(stdout);
+    t_logf("CPUs=%d  reps=%d  N_flat=%d\n",g_cpus,reps,Nflat); 
 
     /* memory_pool: init + hooks de thread — todo worker de todo pool criado no
      * bench ganha/perde lane (interacao thread_pool x memory_pool). Threads do
@@ -548,18 +571,17 @@ int main(int argc,char**argv){
     int nscn=(int)(sizeof(SCN)/sizeof(SCN[0]));
     for(int i=0;i<nscn;i++){ if(!quer(SCN[i].name)) continue; fprintf(stderr,"\n## %s\n",SCN[i].name); fflush(stderr); bench_flat(SCN[i],reps,g_cpus); }
 
-    write_tsv("thread_pool_bench_results.tsv");
+    { char tsv[MAX_PATH]; tsv_ao_lado(tsv,sizeof(tsv)); if(tsv[0]){ write_tsv(tsv); t_logf("\nTSV: %s\n",tsv); } }
 
     /* evidencia da interacao: lanes/allocs/frees devem estar pareados */
     {
         MemPoolStats st; memop_get_stats(&st);
-        printf("\n== memory_pool stats ==\n");
-        printf("lanes criadas/destruidas : %llu / %llu\n",(unsigned long long)st.lanes_created,(unsigned long long)st.lanes_destroyed);
-        printf("alloc/free               : %llu / %llu\n",(unsigned long long)st.alloc_count,(unsigned long long)st.free_count);
-        printf("frees remotos            : %llu\n",(unsigned long long)st.remote_frees);
-        printf("refills sync/async       : %llu / %llu (req async %llu)\n",(unsigned long long)st.sync_refills,(unsigned long long)st.async_refills,(unsigned long long)st.async_requests);
-        printf("reservado do SO / cache  : %llu KB / %llu chunks (purgas %llu)\n",(unsigned long long)(st.os_reserved_bytes/1024),(unsigned long long)st.cached_chunks,(unsigned long long)st.purge_count);
-        fflush(stdout);
+        t_logf("\n== memory_pool stats ==\n");
+        t_logf("lanes criadas/destruidas : %llu / %llu\n",(unsigned long long)st.lanes_created,(unsigned long long)st.lanes_destroyed);
+        t_logf("alloc/free               : %llu / %llu\n",(unsigned long long)st.alloc_count,(unsigned long long)st.free_count);
+        t_logf("frees remotos            : %llu\n",(unsigned long long)st.remote_frees);
+        t_logf("refills sync/async       : %llu / %llu (req async %llu)\n",(unsigned long long)st.sync_refills,(unsigned long long)st.async_refills,(unsigned long long)st.async_requests);
+        t_logf("reservado do SO / cache  : %llu KB / %llu chunks (purgas %llu)\n",(unsigned long long)(st.os_reserved_bytes/1024),(unsigned long long)st.cached_chunks,(unsigned long long)st.purge_count);
+        
     }
-    return 0;
 }

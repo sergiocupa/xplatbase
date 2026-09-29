@@ -77,6 +77,17 @@ extern "C" {
 	typedef uint64_t     uint64;
 
 
+	// Inicializa a lib: pool de memoria, registro de threads, POOL DE TAREFAS global e
+	// monitor de vazamento. Roda SOZINHO na carga da lib (inicializador da CRT / construtor),
+	// sem argumentos; chamar de novo nao faz nada. Por isso nao recebe parametros: a
+	// configuracao do pool e feita DEPOIS, por funcao, e vale na hora.
+	//
+	// POOL DE TAREFAS -- VIGIAS DESLIGADOS POR PADRAO (economia de energia):
+	//   parado, o pool nao gasta CPU; a 1a tarefa depois de uma pausa espera ~15-20 us para
+	//   comecar (o sistema acordar um worker). Se a prontidao importar mais que a bateria:
+	//       pool_vigias(1);   // ~2-3 us de prontidao, ao custo de ~1 nucleo sempre ocupado
+	//       pool_vigias(0);   // volta ao padrao
+	//   Detalhes e numeros em src/thread_pool.h (pool_vigias / pool_vigias_relative).
 	XPLATBASE_API void platform_init(void);
 
 

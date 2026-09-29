@@ -59,6 +59,31 @@ XPLATBASE_API void pool_wait_idle();
 XPLATBASE_API void pool_dims(int* w, int* c);
 
 
+/* ---- VIGIAS: prontidao x energia ------------------------------------------------------
+ *
+ * PADRAO: DESLIGADO (0 vigias) -- prioriza ECONOMIA DE ENERGIA. Com o pool ocioso todos os
+ * workers dormem de verdade: ~0 CPU parado. Custo: a 1a tarefa depois de uma pausa (mais de
+ * ~0,1 ms sem trabalho) espera o sistema acordar um worker, ~15-20 us no Windows, e um 1o
+ * trabalho pesado encontra os nucleos com o clock baixo. Sob carga continua, nao muda nada.
+ *
+ * pool_vigias(n): mantem os primeiros n workers core ACORDADOS, girando, com o pool ocioso.
+ * A 1a tarefa depois de uma pausa comeca em ~2-3 us (como antes da versao economica), em
+ * troca de ~1 NUCLEO OCUPADO POR VIGIA, o tempo todo, enquanto o pool existir (~6% da CPU
+ * numa maquina de 16 processadores logicos). Em dispositivo com bateria, deixe 0.
+ *
+ *   n = 0            desliga (padrao)
+ *   n = 1            recomendado quando a prontidao importa mais que a energia
+ *   n > 1            mais nucleos quentes; limitado ao numero de workers core
+ *
+ * Vale NA HORA e pode ser chamado a qualquer momento depois da inicializacao (o pool global
+ * e criado pelo platform_init, que roda sozinho na carga da lib) e quantas vezes quiser.
+ * Medido no Tester/unittests (bench ANTES x DEPOIS x AJUSTE): com 1 vigia, a carga fica no
+ * mesmo patamar; o despertar volta de ~17 us para ~3 us.
+ */
+XPLATBASE_API void pool_vigias(int vigias);                                 /* pool global */
+XPLATBASE_API void pool_vigias_relative(ThreadPool* p, int vigias);        /* pool proprio */
+
+
 
 #ifdef __cplusplus
 }

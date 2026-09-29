@@ -1,0 +1,287 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Testes do xplatbase no Gerenciador de Testes do Visual Studio (CppUnitTest, embutido
+       no VS). Mesmo modelo do appserver/test/unittests: logica em C, registro.cpp so lista.
+
+       As fontes do xplatbase sao compiladas AQUI, com as opcoes deste projeto, e nao
+       linkadas da lib: o bench ANTES x DEPOIS precisa das duas versoes do thread_pool.c
+       compiladas exatamente do mesmo jeito, senao mede diferenca de compilacao.
+
+       Na solution, a configuracao Debug compila ESTE projeto em Release: o bench mede
+       desempenho, e em Debug (sem otimizacao, heap de Debug) ele media numero que nao
+       existe em producao (6-10% de "piora" de vazao que em Release nao aparecia). Quem
+       compilar este .vcxproj em Debug direto ve o bench PULADO, com o motivo. -->
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>18.0</VCProjectVersion>
+    <ProjectGuid>{B3E1C5A7-2D4F-4E8B-9A61-5C7D3F2E1A90}</ProjectGuid>
+    <RootNamespace>xplatbase_tests</RootNamespace>
+    <ProjectName>xplatbase_tests</ProjectName>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectSubType>NativeUnitTestProject</ProjectSubType>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(MSBuildThisFileDirectory)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)$(Platform)\$(Configuration)\obj\</IntDir>
+    <XpbRaiz>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..'))</XpbRaiz>
+    <XpbSrc>$(XpbRaiz)\Xplatbase\Xplatbase\src</XpbSrc>
+    <XpbInc>$(XpbRaiz)\Xplatbase\Xplatbase\include</XpbInc>
+    <GeradoDir>$(MSBuildThisFileDirectory)$(Platform)\$(Configuration)\gerado\</GeradoDir>
+    <!-- O "ANTES" do bench do pool, nesta ordem:
+         1. PoolAntesRef, se informado (msbuild -p:PoolAntesRef=<sha|HEAD> ou variavel de
+            ambiente): o thread_pool.c daquela revisao do git;
+         2. referencia\thread_pool_antes.c, se existir: o thread_pool.c de ANTES da ultima
+            alteracao commitada (ver referencia\atualiza.bat para trocar a referencia);
+         3. HEAD: o que esta commitado contra o que esta no disco. -->
+    <PoolAntesArquivo>$(MSBuildThisFileDirectory)referencia\thread_pool_antes.c</PoolAntesArquivo>
+  </PropertyGroup>
+  <PropertyGroup>
+    <!-- XpbBench=true: compila os BENCHMARKS como testes normais; senao eles aparecem como
+         ignorados no Gerenciador (registro.cpp). Variavel de ambiente ou -p:XpbBench=true. -->
+    <XpbBench Condition="'$(XpbBench)'==''">false</XpbBench>
+    <!-- Terceiros OPCIONAIS dos benchmarks: entram so se existirem nesta maquina.
+         rpmalloc/mimalloc (bench de alocadores) nao sao versionados; o TBB vem do vcpkg. -->
+    <XpbRpmalloc Condition="Exists('$(XpbRaiz)\bench\rpmalloc\rpmalloc\rpmalloc.c')">true</XpbRpmalloc>
+    <XpbMimalloc Condition="Exists('$(XpbRaiz)\bench\mimalloc\src\static.c')">true</XpbMimalloc>
+    <TBB_DIR Condition="'$(TBB_DIR)'==''">E:\tools\vcpkg\bin\installed\x64-windows</TBB_DIR>
+    <XpbTbb Condition="Exists('$(TBB_DIR)\include\tbb\task_arena.h')">true</XpbTbb>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>XPLATBASE_NO_AUTO_INIT;_CRT_SECURE_NO_WARNINGS;WIN32;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory);$(GeradoDir);$(XpbSrc);$(XpbInc);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard_C>stdclatest</LanguageStandard_C>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <ConformanceMode>true</ConformanceMode>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>synchronization.lib;dbghelp.lib;winmm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
+    <ClCompile>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Release'">
+    <ClCompile>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(XpbBench)'=='true'">
+    <ClCompile>
+      <PreprocessorDefinitions>XPB_BENCH_ATIVO;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(XpbRpmalloc)'=='true'">
+    <ClCompile>
+      <PreprocessorDefinitions>XPB_TEM_RPMALLOC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(XpbRaiz)\bench\rpmalloc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(XpbMimalloc)'=='true'">
+    <ClCompile>
+      <PreprocessorDefinitions>XPB_TEM_MIMALLOC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(XpbRaiz)\bench\mimalloc\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(XpbTbb)'=='true'">
+    <ClCompile>
+      <PreprocessorDefinitions>TBB_AVAILABLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(TBB_DIR)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(XpbTbb)'=='true' And '$(Configuration)'=='Release'">
+    <Link>
+      <AdditionalLibraryDirectories>$(TBB_DIR)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>tbb12.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(XpbTbb)'=='true' And '$(Configuration)'=='Debug'">
+    <Link>
+      <AdditionalLibraryDirectories>$(TBB_DIR)\debug\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>tbb12_debug.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup Label="Testes">
+    <ClCompile Include="ctest_core.c" />
+    <ClCompile Include="bench_pool_antes_depois.c" />
+    <ClCompile Include="bench_pool_cenarios.c" />
+    <ClCompile Include="bench_estatistica.c" />
+    <ClCompile Include="pool_antes.c" />
+    <ClCompile Include="pool_depois.c" />
+    <ClCompile Include="pool_ajuste.c" />
+    <ClCompile Include="test_pool_vigia.c" />
+    <ClCompile Include="test_memory_pool.c" />
+    <ClCompile Include="test_string_handler.c" />
+    <ClCompile Include="bench_alocadores.c" />
+    <ClCompile Include="bench_pool_bibliotecas.cpp" />
+    <ClCompile Include="registro.cpp" />
+  </ItemGroup>
+  <ItemGroup Label="xplatbase (as mesmas fontes do Xplatbase.vcxproj)">
+    <ClCompile Include="$(XpbSrc)\atomics.c" />
+    <ClCompile Include="$(XpbSrc)\event_handler.c" />
+    <ClCompile Include="$(XpbSrc)\list_hander.c" />
+    <ClCompile Include="$(XpbSrc)\mem_leak_watch.c" />
+    <ClCompile Include="$(XpbSrc)\memory_pool.c" />
+    <ClCompile Include="$(XpbSrc)\xplat_instance.c" />
+    <ClCompile Include="$(XpbSrc)\numeric.c" />
+    <ClCompile Include="$(XpbSrc)\ring_queue.c" />
+    <ClCompile Include="$(XpbSrc)\string_handler.c" />
+    <ClCompile Include="$(XpbSrc)\thread_activity_win.c" />
+    <ClCompile Include="$(XpbSrc)\thread_handler.c" />
+    <ClCompile Include="$(XpbSrc)\thread_pool.c" />
+    <ClCompile Include="$(XpbSrc)\thread_wait.c" />
+    <ClCompile Include="$(XpbSrc)\xplatbase.c" />
+  </ItemGroup>
+  <ItemGroup Label="Terceiros opcionais do bench de alocadores (so se existirem: nao sao versionados)">
+    <ClCompile Include="$(XpbRaiz)\bench\rpmalloc\rpmalloc\rpmalloc.c" Condition="'$(XpbRpmalloc)'=='true'">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <AdditionalOptions>/experimental:c11atomics %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="$(XpbRaiz)\bench\mimalloc\src\static.c" Condition="'$(XpbMimalloc)'=='true'">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <AdditionalOptions>/experimental:c11atomics %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="ctest_core.h" />
+    <ClInclude Include="testes.h" />
+    <ClInclude Include="pool_versoes.h" />
+    <ClInclude Include="bench_pool.h" />
+    <ClInclude Include="bench_estatistica.h" />
+  </ItemGroup>
+  <ItemGroup Label="Referencia do bench (nao compila direto: o GeraPoolAntes copia e o pool_antes.c inclui)">
+    <None Include="referencia\thread_pool_antes.c" />
+    <None Include="referencia\atualiza.bat" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+
+  <!-- ====================================================================
+       Versao ANTES do thread_pool.c para o bench do pool.
+
+       Poe o thread_pool.c "antes" em gerado\thread_pool_antes_src.c, onde o
+       pool_antes.c o inclui com os simbolos publicos renomeados: copia do
+       referencia\thread_pool_antes.c ou "git show" da revisao PoolAntesRef
+       (ordem de escolha no PropertyGroup do topo). Gera tambem
+       pool_antes_info.h com a descricao das duas versoes para o relatorio.
+
+       Sem git, ou revisao inexistente: a compilacao NAO falha; o header
+       marca POOL_ANTES_INDISPONIVEL e o teste aparece como PULADO, com o
+       motivo.
+       ==================================================================== -->
+  <Target Name="GeraPoolAntes" BeforeTargets="ClCompile">
+    <MakeDir Directories="$(GeradoDir)" />
+    <PropertyGroup>
+      <PoolAntesModo Condition="'$(PoolAntesRef)'==''">arquivo</PoolAntesModo>
+      <PoolAntesModo Condition="'$(PoolAntesRef)'=='' And !Exists('$(PoolAntesArquivo)')">git</PoolAntesModo>
+      <PoolAntesModo Condition="'$(PoolAntesRef)'!=''">git</PoolAntesModo>
+      <PoolAntesRef Condition="'$(PoolAntesRef)'==''">HEAD</PoolAntesRef>
+    </PropertyGroup>
+
+    <!-- modo arquivo: a 1a linha do arquivo diz de onde ele veio ("// ANTES: ...") -->
+    <Copy Condition="'$(PoolAntesModo)'=='arquivo'" SourceFiles="$(PoolAntesArquivo)"
+          DestinationFiles="$(GeradoDir)thread_pool_antes_src.c" SkipUnchangedFiles="true" />
+    <PropertyGroup Condition="'$(PoolAntesModo)'=='arquivo'">
+      <_RefTexto>$([System.IO.File]::ReadAllText('$(PoolAntesArquivo)'))</_RefTexto>
+      <_RefLinha>$(_RefTexto.Substring(0, $(_RefTexto.IndexOf('&#10;'))).Trim())</_RefLinha>
+      <_RefLinha Condition="$(_RefLinha.StartsWith('// ANTES: '))">$(_RefLinha.Substring(10))</_RefLinha>
+      <PoolAntesOk>1</PoolAntesOk>
+      <PoolAntesDesc>referencia/thread_pool_antes.c: $(_RefLinha.Replace('&quot;', '').Replace('\', '/'))</PoolAntesDesc>
+    </PropertyGroup>
+
+    <!-- modo git -->
+    <Exec Condition="'$(PoolAntesModo)'=='git'"
+          Command="git -C &quot;$(XpbRaiz)&quot; rev-parse --short --verify &quot;$(PoolAntesRef)^{commit}&quot;"
+          ConsoleToMSBuild="true" IgnoreExitCode="true" EchoOff="true"
+          StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="PoolAntesSha" />
+      <Output TaskParameter="ExitCode" PropertyName="PoolAntesRc" />
+    </Exec>
+    <Exec Condition="'$(PoolAntesModo)'=='git' And '$(PoolAntesRc)'=='0'"
+          Command="git -C &quot;$(XpbRaiz)&quot; show &quot;$(PoolAntesSha):Xplatbase/Xplatbase/src/thread_pool.c&quot; &gt; &quot;$(GeradoDir)thread_pool_antes_src.c&quot;"
+          IgnoreExitCode="true" EchoOff="true" StandardErrorImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="PoolAntesRc2" />
+    </Exec>
+    <Exec Command="git -C &quot;$(XpbRaiz)&quot; rev-parse --short HEAD"
+          ConsoleToMSBuild="true" IgnoreExitCode="true" EchoOff="true"
+          StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="PoolHeadSha" />
+    </Exec>
+    <Exec Command="git -C &quot;$(XpbRaiz)&quot; status --porcelain -- Xplatbase/Xplatbase/src/thread_pool.c"
+          ConsoleToMSBuild="true" IgnoreExitCode="true" EchoOff="true"
+          StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="PoolDepoisMod" />
+    </Exec>
+    <PropertyGroup Condition="'$(PoolAntesModo)'=='git'">
+      <PoolAntesOk Condition="'$(PoolAntesRc)'=='0' And '$(PoolAntesRc2)'=='0'">1</PoolAntesOk>
+      <PoolAntesDesc Condition="'$(PoolAntesOk)'=='1'">thread_pool.c da revisao $(PoolAntesRef) ($(PoolAntesSha))</PoolAntesDesc>
+      <PoolAntesDesc Condition="'$(PoolAntesOk)'!='1'">nao foi possivel extrair a revisao '$(PoolAntesRef)' do git</PoolAntesDesc>
+    </PropertyGroup>
+    <PropertyGroup>
+      <PoolDepoisDesc>thread_pool.c do disco (HEAD $(PoolHeadSha), sem alteracao local)</PoolDepoisDesc>
+      <PoolDepoisDesc Condition="'$(PoolDepoisMod)'!=''">thread_pool.c do disco (HEAD $(PoolHeadSha) + alteracoes locais)</PoolDepoisDesc>
+    </PropertyGroup>
+
+
+    <ItemGroup>
+      <PoolInfoLinha Include="// Gerado pelo alvo GeraPoolAntes (xplatbase_tests.vcxproj). Nao editar." />
+      <PoolInfoLinha Include="#define POOL_ANTES_DESC &quot;$(PoolAntesDesc)&quot;" />
+      <PoolInfoLinha Include="#define POOL_DEPOIS_DESC &quot;$(PoolDepoisDesc)&quot;" />
+      <PoolInfoLinha Condition="'$(PoolAntesOk)'!='1'" Include="#define POOL_ANTES_INDISPONIVEL 1" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(GeradoDir)pool_antes_info.h" Lines="@(PoolInfoLinha)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <Message Importance="high" Text="Bench do pool: ANTES = $(PoolAntesDesc) | DEPOIS = $(PoolDepoisDesc) | AJUSTE = depois + pool_vigias_relative(pool, 1)" />
+  </Target>
+
+  <!-- Com TBB, a DLL de testes importa o tbb12.dll: sem ele ao lado, o executor nem carrega o
+       modulo e TODOS os testes somem da lista. -->
+  <Target Name="CopiaTbb" AfterTargets="Build" Condition="'$(XpbTbb)'=='true'">
+    <Copy Condition="'$(Configuration)'=='Release' And Exists('$(TBB_DIR)\bin\tbb12.dll')"
+          SourceFiles="$(TBB_DIR)\bin\tbb12.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy Condition="'$(Configuration)'=='Debug' And Exists('$(TBB_DIR)\debug\bin\tbb12_debug.dll')"
+          SourceFiles="$(TBB_DIR)\debug\bin\tbb12_debug.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

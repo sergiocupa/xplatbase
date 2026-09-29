@@ -1,5 +1,16 @@
-#include "../../Xplatbase/Xplatbase/src/memory_pool.h"
-#include "../../Xplatbase/Xplatbase/src/mem_leak_watch.h"
+//  Testes do memory_pool, no Gerenciador de Testes (convertido de
+//  Tester/memory_pool/memory_pool_test.c: o corpo de cada teste e o mesmo, so a moldura mudou
+//  -- CHECK registra no resultado do teste em vez de imprimir, e cada TESTE virou um caso).
+//
+//  Cada teste comeca com reset_pool() (memop_test_reset: destroi e recria o pool). Como no
+//  programa original, isso so e seguro sem outra thread alocando no pool -- vale aqui porque
+//  os testes rodam em sequencia e os pools de tarefas dos outros testes sao destruidos ao fim
+//  de cada um.
+
+#include "ctest_core.h"
+#include "testes.h"
+#include "memory_pool.h"
+#include "mem_leak_watch.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -9,12 +20,8 @@
 #include <share.h>
 #endif
 
-static int g_failed = 0;
-
-#define CHECK(name, expr) do { \
-    if (expr) { printf("  [OK]   %s\n", name); } \
-    else { printf("  [FAIL] %s\n", name); g_failed++; } \
-} while (0)
+static TestResult* g_r;
+#define CHECK(name, expr) T_CHECK(g_r, (expr), "%s", name)
 
 static void reset_pool(void)
 {
@@ -70,7 +77,7 @@ static void test_basic_alloc_free(void)
     MemBuffer b;
     MemPoolStats s;
 
-    printf("\nTESTE 1: alloc/free basico\n");
+    t_logf("\nTESTE 1: alloc/free basico\n");
     reset_pool();
 
     b = memop_alloc(32);
@@ -97,7 +104,7 @@ static void test_size_classes(void)
     MemBuffer b2;
     MemBuffer b3;
 
-    printf("\nTESTE 2: classes de tamanho\n");
+    t_logf("\nTESTE 2: classes de tamanho\n");
     reset_pool();
 
     b1 = memop_alloc(64);
@@ -140,7 +147,7 @@ static void test_thread_lane_lifecycle(void)
     Thread* t;
     MemPoolStats s;
 
-    printf("\nTESTE 3: lane por thread criada\n");
+    t_logf("\nTESTE 3: lane por thread criada\n");
     reset_pool();
 
     t = thread_create(lane_thread_fn, &ok, &status);
@@ -163,7 +170,7 @@ static void test_span_growth(void)
     int i;
     int all_allocs_ok = 1;
 
-    printf("\nTESTE 4: crescimento por spans (refill sincrono)\n");
+    t_logf("\nTESTE 4: crescimento por spans (refill sincrono)\n");
     reset_pool();
     buffers = (MemBuffer*)calloc(N, sizeof(MemBuffer));
 
@@ -240,7 +247,7 @@ static void test_remote_free_reactivation(void)
     int status = 0;
     int i;
 
-    printf("\nTESTE 5: free remoto reativa spans cheios\n");
+    t_logf("\nTESTE 5: free remoto reativa spans cheios\n");
     reset_pool();
 
     memset(&ctx, 0, sizeof(ctx));
@@ -300,7 +307,12 @@ static void* lw_alive_ref_fn(void* arg)
     while (!*ctx->stop)
     {
         Sleep(20);
-        { void* volatile keep_alive = kept; (void)keep_alive; }   /* mantem 'kept' vivo na pilha ("void* volatile": a variavel e volatile; "volatile void*" sumia em Release) */
+        /* mantem 'kept' vivo na pilha. "void* volatile": a VARIAVEL e volatile, entao o store na
+         * pilha nao pode sumir. Era "volatile void*" (ponteiro PARA volatile): em Release o
+         * compilador eliminava a linha, 'kept' morria depois do ctx->kept = kept, e o unico
+         * lugar com o ponteiro passava a ser a pilha da thread que chama o scan -- que o
+         * monitor nao varre. Resultado: o 6.2 falhava so em Release. */
+        { void* volatile keep_alive = kept; (void)keep_alive; }
     }
     return (xthread_result_t)0;
 }
@@ -346,7 +358,8 @@ static void* lw_leak_static_ref_fn(void* arg)
 static void test_leak_watch(void)
 {
     MemLeakWatchConfig cfg;
-    const char* path = "memory_pool_test_leak.log";
+    char path_buf[MAX_PATH];
+    const char* path = path_buf;
     Thread* t;
     int status;
     void* leaked_simple = NULL;
@@ -355,7 +368,9 @@ static void test_leak_watch(void)
     LwMultiCtx multi_ctx;
     volatile int stop_flag = 0;
 
-    printf("\nTESTE 6: mem_leak_watch - deteccao sem colecao\n");
+    GetTempPathA(MAX_PATH, path_buf);
+    strncat(path_buf, "xplatbase_tests_leak.log", MAX_PATH - strlen(path_buf) - 1);
+    t_logf("\nTESTE 6: mem_leak_watch - deteccao sem colecao\n");
     reset_pool();
     remove(path);
 
@@ -438,25 +453,20 @@ static void test_leak_watch(void)
     remove(path);
 }
 
-int main(void)
+
+// ---- casos do Gerenciador ---------------------------------------------------------------
+
+static void roda(TestResult* r, void (*teste)(void))
 {
-    printf("memory_pool_test\n");
-
-    test_basic_alloc_free();
-    test_size_classes();
-    test_thread_lane_lifecycle();
-    test_span_growth();
-    test_remote_free_reactivation();
-    test_leak_watch();
-
-    memop_shutdown();
-
-    if (g_failed)
-    {
-        printf("\nRESULTADO: %d falhas\n", g_failed);
-        return 1;
-    }
-
-    printf("\nRESULTADO: todos os testes passaram\n");
-    return 0;
+    t_start(r);
+    g_r = r;
+    teste();
+    g_r = 0;
 }
+
+void teste_memoria_alloc_free_basico(TestResult* r)      { roda(r, test_basic_alloc_free); }
+void teste_memoria_classes_de_tamanho(TestResult* r)     { roda(r, test_size_classes); }
+void teste_memoria_lane_por_thread(TestResult* r)        { roda(r, test_thread_lane_lifecycle); }
+void teste_memoria_crescimento_por_spans(TestResult* r)  { roda(r, test_span_growth); }
+void teste_memoria_free_remoto_reativa(TestResult* r)    { roda(r, test_remote_free_reactivation); }
+void teste_memoria_vazamento_sem_colecao(TestResult* r)  { roda(r, test_leak_watch); }

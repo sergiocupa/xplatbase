@@ -70,6 +70,10 @@ void platform_init()
 	// parametro para o memory_pool monitorar cria��o de threads para gerenciar suas lanes internas
 	thread_init(memop_on_created_thread, memop_on_ended_thread);
 
+	// Pool de tarefas global. VIGIAS DESLIGADOS por padrao (economia de energia): parado, o
+	// pool nao gasta CPU, e a 1a tarefa depois de uma pausa espera ~15-20 us para comecar.
+	// Para prontidao de ~2-3 us ao custo de ~1 nucleo sempre ocupado, a aplicacao chama
+	// pool_vigias(1) depois da inicializacao (ver xplatbase.h e src/thread_pool.h).
 	pool_create();
 
 	mem_leak_watch_start(NULL);

@@ -80,6 +80,8 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="thread_pool_bench.cpp" />
+    <!-- coluna BEFORE: o thread_pool.c anterior, simbolos renomeados (AJUSTE usa o src + vigia) -->
+    <ClCompile Include="versao_before.c" />
     <ClCompile Include="$(SRCDIR)\thread_pool.c" />
     <ClCompile Include="$(SRCDIR)\ring_queue.c" />
     <ClCompile Include="$(SRCDIR)\thread_wait.c" />
