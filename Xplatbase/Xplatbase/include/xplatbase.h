@@ -88,6 +88,10 @@ extern "C" {
 	//       pool_vigias(1);   // ~2-3 us de prontidao, ao custo de ~1 nucleo sempre ocupado
 	//       pool_vigias(0);   // volta ao padrao
 	//   Detalhes e numeros em src/thread_pool.h (pool_vigias / pool_vigias_relative).
+	//
+	//   PERFIL do pool (performance x economia de energia): PERFORMANCE por padrao. Para
+	//   aparelho com bateria, pool_perfil(POOL_PERFIL_ECONOMIA) depois da inicializacao; pode
+	//   alternar a qualquer momento. Ver src/thread_pool.h (pool_perfil / pool_perfil_relative).
 	XPLATBASE_API void platform_init(void);
 
 

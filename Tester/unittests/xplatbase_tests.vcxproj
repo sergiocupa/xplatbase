@@ -152,6 +152,7 @@
     <ClCompile Include="pool_depois.c" />
     <ClCompile Include="pool_ajuste.c" />
     <ClCompile Include="test_pool_vigia.c" />
+    <ClCompile Include="test_pool_perfil.c" />
     <ClCompile Include="test_memory_pool.c" />
     <ClCompile Include="test_string_handler.c" />
     <ClCompile Include="bench_alocadores.c" />
@@ -273,7 +274,7 @@
       <PoolInfoLinha Condition="'$(PoolAntesOk)'!='1'" Include="#define POOL_ANTES_INDISPONIVEL 1" />
     </ItemGroup>
     <WriteLinesToFile File="$(GeradoDir)pool_antes_info.h" Lines="@(PoolInfoLinha)" Overwrite="true" WriteOnlyWhenDifferent="true" />
-    <Message Importance="high" Text="Bench do pool: ANTES = $(PoolAntesDesc) | DEPOIS = $(PoolDepoisDesc) | AJUSTE = depois + pool_vigias_relative(pool, 1)" />
+    <Message Importance="high" Text="Bench do pool: ANTES = $(PoolAntesDesc) | DEPOIS = $(PoolDepoisDesc) | AJUSTE = depois + pool_vigias_relative(pool, 1) (ou XPB_BENCH_AJUSTE_GIRO_US / XPB_BENCH_AJUSTE_PERFIL)" />
   </Target>
 
   <!-- Com TBB, a DLL de testes importa o tbb12.dll: sem ele ao lado, o executor nem carrega o

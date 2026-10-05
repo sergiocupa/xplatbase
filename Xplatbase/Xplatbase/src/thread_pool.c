@@ -117,6 +117,14 @@
 #ifndef POOL_MON_MS
 #define POOL_MON_MS        5
 #endif
+/* Perfil ECONOMIA: giro maximo depois de trabalho (us) e quanto o monitor dorme com o pool
+ * parado (ms) -- quem submete o acorda antes. */
+#ifndef POOL_ECONOMIA_GIRO_US
+#define POOL_ECONOMIA_GIRO_US   20
+#endif
+#ifndef POOL_ECONOMIA_MON_OCIOSO_MS
+#define POOL_ECONOMIA_MON_OCIOSO_MS 1000
+#endif
 #ifndef POOL_STUCK_MIN
 #define POOL_STUCK_MIN     2
 #endif
@@ -367,6 +375,11 @@ struct XPL_ALIGN(XPL_CACHELINE) ThreadPool {
     char           _padb4[XPL_CACHELINE - sizeof(xatomic_int)];
     xatomic_int    n_vigia;        /* workers core que ficam acordados com o pool ocioso (0 = nenhum; ver pool_vigias) */
     char           _padb5[XPL_CACHELINE - sizeof(xatomic_int)];
+    xatomic_int    giro_us;        /* limite do giro depois de trabalho (-1 = padrao historico; ver pool_giro_max_us) */
+    char           _padb6[XPL_CACHELINE - sizeof(xatomic_int)];
+    xatomic_int    perfil;         /* POOL_PERFIL_PERFORMANCE (padrao) / POOL_PERFIL_ECONOMIA (ver pool_perfil) */
+    xatomic_int    mon_dormindo;   /* economia: monitor dormindo com o pool parado; quem submete acorda */
+    char           _padb7[XPL_CACHELINE - 2 * sizeof(xatomic_int)];
     pool_thread_t  mon_handle;
     xwait_t        mon_wait;
 };
@@ -442,7 +455,35 @@ static void pool_wake_one_core(ThreadPool* pool){
     }
 }
 
+/* Relogio para o giro limitado (pool_giro_max_us). Lido a cada 64 pauses: o custo some. */
+#ifdef XPLATBASE_WIN
+static long long pool_agora_us(void){
+    static LARGE_INTEGER f; LARGE_INTEGER c;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (long long)(c.QuadPart / f.QuadPart) * 1000000LL + (long long)((c.QuadPart % f.QuadPart) * 1000000LL / f.QuadPart);
+}
+#else
+static long long pool_agora_us(void){
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000000LL + t.tv_nsec / 1000;
+}
+#endif
+
 static bool pool_spin(ThreadPool* pool, PoolWorker* self, PoolTask* out){
+    /* Giro limitado por TEMPO (pool_giro_max_us): so pause, sem yield/sleep0, ate 'giro' us.
+     * -1 (padrao) segue para o giro historico abaixo, sem nenhuma diferenca. */
+    int giro = atomic_get_inline(&pool->giro_us);
+    if (giro >= 0){
+        if (giro == 0) return false;
+        long long fim = pool_agora_us() + giro;
+        for (int i=0;;i++){
+            if (pool_try_get(pool,self,out)) return true;
+            if (atomic_get_inline(&pool->stop)) return false;
+            xcpu_pause();
+            if ((i & 63) == 63 && pool_agora_us() >= fim) return false;
+        }
+    }
     for (int i=0;i<POOL_SPIN_PAUSE;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; xcpu_pause(); }
     for (int i=0;i<POOL_SPIN_YIELD;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; pool_yield(); }
     for (int i=0;i<POOL_SPIN_SLEEP0;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; pool_sleep0(); }
@@ -520,11 +561,26 @@ static POOL_FN pool_worker_fn(void* raw){
     POOL_RET;
 }
 
+static long long pool_total_pending(ThreadPool* pool);
+
 static POOL_FN pool_monitor_fn(void* raw){
     ThreadPool* pool=(ThreadPool*)raw;
     thread_wait_prepare_inline(&pool->mon_wait);
     while (!atomic_get_inline(&pool->stop)){
-        thread_wait_sleep_for_inline(&pool->mon_wait, POOL_MON_MS*1000);
+        long long espera_us = POOL_MON_MS*1000;
+        /* Perfil ECONOMIA: com o pool parado (nada pendente, nada rodando) o monitor nao tem o
+         * que vigiar -- dorme longo em vez de acordar a cada POOL_MON_MS. Anuncia que vai
+         * dormir e RE-TESTA: um submit que chegue entre o teste e o anuncio ve mon_dormindo=1
+         * e acorda; um que chegue antes do anuncio aparece no re-teste. O sono tem limite
+         * (POOL_ECONOMIA_MON_OCIOSO_MS) como rede de seguranca. */
+        if (atomic_get_inline(&pool->perfil) == POOL_PERFIL_ECONOMIA && pool_total_pending(pool) == 0){
+            thread_wait_prepare_inline(&pool->mon_wait);
+            int exp=0; atomic_cas_inline(&pool->mon_dormindo,&exp,1);
+            if (pool_total_pending(pool) == 0) espera_us = (long long)POOL_ECONOMIA_MON_OCIOSO_MS*1000;
+            else atomic_set_inline(&pool->mon_dormindo,0);
+        }
+        thread_wait_sleep_for_inline(&pool->mon_wait, espera_us);
+        atomic_set_inline(&pool->mon_dormindo,0);
         if (atomic_get_inline(&pool->stop)) break;
         int stuck=0;
         for (int i=0;i<pool->n_workers;i++){
@@ -560,6 +616,9 @@ ThreadPool* pool_create_relative(int cores_override)
 
     ThreadPool* pool=(ThreadPool*)calloc(1,sizeof(ThreadPool)); if(!pool) return NULL;
     pool->n_core=nc; pool->n_workers=nw; pool->n_elastic=ne; pool->n_total=nt; pool->n_shards=G;
+    atomic_set_inline(&pool->giro_us, -1);   /* giro historico ate alguem pedir outro (pool_giro_max_us) */
+    atomic_set_inline(&pool->perfil, POOL_PERFIL_PERFORMANCE);
+    atomic_set_inline(&pool->mon_dormindo, 0);
     pool->n_ctrs=G+nt;
     pool->ctrs=(PoolCtr*)calloc((size_t)pool->n_ctrs,sizeof(PoolCtr));
     pool->shards=(PoolShard*)calloc((size_t)G,sizeof(PoolShard));
@@ -627,6 +686,12 @@ boolean pool_submit_relative(ThreadPool* pool, pool_task_fn fn, void* arg)
         atomic_add64_inline(&pool->ctrs[s].v,1);
         if (pool_ring_push(&pool->shards[s].ring, &t)){
             pool_wake_one_core(pool);
+            /* economia: o monitor pode estar dormindo longo com o pool parado. No perfil
+             * performance mon_dormindo nunca sai de 0: e uma leitura que nao muda. */
+            if (atomic_get_inline(&pool->mon_dormindo)){
+                int exp=1;
+                if (atomic_cas_inline(&pool->mon_dormindo,&exp,0)) thread_wait_wake_inline(&pool->mon_wait);
+            }
             return true;
         }
         atomic_sub64_inline(&pool->ctrs[s].v,1);
@@ -718,6 +783,34 @@ void pool_vigias_relative(ThreadPool* pool, int vigias)
             thread_wait_wake_inline(&pool->workers[i].wait);
     }
 }
+
+void pool_giro_max_us_relative(ThreadPool* pool, int us){
+    if (!pool) return;
+    if (us < -1) us = -1;
+    atomic_set_inline(&pool->giro_us, us);
+}
+
+void pool_giro_max_us(int us){ pool_giro_max_us_relative(GlobalPool, us); }
+
+void pool_perfil_relative(ThreadPool* pool, int perfil){
+    if (!pool) return;
+    if (perfil == POOL_PERFIL_ECONOMIA){
+        atomic_set_inline(&pool->perfil, POOL_PERFIL_ECONOMIA);
+        pool_giro_max_us_relative(pool, POOL_ECONOMIA_GIRO_US);
+        pool_vigias_relative(pool, 0);
+    } else {
+        atomic_set_inline(&pool->perfil, POOL_PERFIL_PERFORMANCE);
+        pool_giro_max_us_relative(pool, -1);
+        /* o monitor pode estar no sono longo da economia: volta ja ao passo normal */
+        int exp=1;
+        if (atomic_cas_inline(&pool->mon_dormindo,&exp,0)) thread_wait_wake_inline(&pool->mon_wait);
+    }
+}
+
+void pool_perfil(int perfil){ pool_perfil_relative(GlobalPool, perfil); }
+
+int pool_perfil_atual_relative(ThreadPool* pool){ return pool ? atomic_get_inline(&pool->perfil) : POOL_PERFIL_PERFORMANCE; }
+int pool_perfil_atual(void){ return pool_perfil_atual_relative(GlobalPool); }
 
 void pool_vigias(int vigias)
 {

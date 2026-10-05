@@ -84,6 +84,56 @@ XPLATBASE_API void pool_vigias(int vigias);                                 /* p
 XPLATBASE_API void pool_vigias_relative(ThreadPool* p, int vigias);        /* pool proprio */
 
 
+/* ---- GIRO MAXIMO: quanto um worker gira depois de trabalhar, antes de dormir -----------
+ *
+ * PADRAO: -1 -- o giro historico (512 pause + 64 yield + 8 sleep0, sem limite de tempo),
+ * sem NENHUMA mudanca para quem nao chamar esta funcao.
+ *
+ * Depois de executar uma tarefa, um worker core gira um pouco antes de dormir: se a proxima
+ * tarefa chegar nesse intervalo, ele a pega sem o custo de ser acordado (~15-20 us). Sob
+ * carga continua isso vale muito; com tarefas esparsas (um servidor com poucos clientes, num
+ * aparelho com bateria) o giro e CPU gasta a cada tarefa -- os yields sao chamadas ao sistema.
+ *
+ * pool_giro_max_us(us): limita o giro a 'us' microssegundos, so com pause (sem yield/sleep0).
+ *   us = -1   padrao historico
+ *   us =  0   nao gira: dorme logo depois do trabalho (minimo de CPU; cada tarefa nova acorda)
+ *   us >  0   gira ate 'us' us (ex.: 20-50: pega a proxima tarefa de uma rajada, custa pouco)
+ *
+ * Vale na hora, a qualquer momento, quantas vezes quiser. Nao muda o vigia (pool_vigias), o
+ * estacionamento ocioso nem os workers elasticos.
+ */
+XPLATBASE_API void pool_giro_max_us(int us);                                /* pool global */
+XPLATBASE_API void pool_giro_max_us_relative(ThreadPool* p, int us);       /* pool proprio */
+
+
+/* ---- PERFIL: performance x economia de energia, por pool ---------------------------------
+ *
+ * Atalho para os ajustes acima, valendo para TODAS as tarefas daquele pool, na hora, a
+ * qualquer momento (pode alternar quantas vezes quiser -- ex.: economia o tempo todo e
+ * performance so enquanto um trabalho pesado roda).
+ *
+ *   POOL_PERFIL_PERFORMANCE (PADRAO): o comportamento de sempre -- giro historico depois de
+ *     trabalho, monitor a cada POOL_MON_MS. Quem nunca chamar pool_perfil nao muda nada.
+ *     Nao liga vigias (pool_vigias continua sendo escolha a parte).
+ *
+ *   POOL_PERFIL_ECONOMIA: para aparelho com bateria e carga esparsa.
+ *     - giro curto depois de trabalho (POOL_ECONOMIA_GIRO_US, 20 us): pega a proxima tarefa
+ *       de uma rajada sem os yields/sleep0 do giro historico;
+ *     - vigias desligados;
+ *     - com o pool parado, o monitor dorme (ate POOL_ECONOMIA_MON_OCIOSO_MS) em vez de
+ *       acordar a cada POOL_MON_MS; o primeiro submit o acorda.
+ *     Custo: sob carga continua de tarefas minusculas a vazao cai (medido com giro de 30 us:
+ *     flat-externo +46% de tempo). Depois de escolher o perfil, pool_giro_max_us ajusta fino.
+ */
+#define POOL_PERFIL_PERFORMANCE 0
+#define POOL_PERFIL_ECONOMIA    1
+
+XPLATBASE_API void pool_perfil(int perfil);                                  /* pool global */
+XPLATBASE_API void pool_perfil_relative(ThreadPool* p, int perfil);         /* pool proprio */
+XPLATBASE_API int  pool_perfil_atual(void);
+XPLATBASE_API int  pool_perfil_atual_relative(ThreadPool* p);
+
+
 
 #ifdef __cplusplus
 }

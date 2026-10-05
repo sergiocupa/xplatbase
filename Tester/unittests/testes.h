@@ -11,6 +11,7 @@ extern "C" {
 
 // Pool de tarefas
 void teste_pool_vigia_liga_e_desliga(TestResult* r);
+void teste_pool_perfil_economia_e_performance(TestResult* r);
 void teste_pool_bench_antes_depois(TestResult* r);        // benchmark
 void teste_pool_bench_bibliotecas(TestResult* r);         // benchmark (bench_pool_bibliotecas.cpp)
 

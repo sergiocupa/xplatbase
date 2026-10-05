@@ -23,6 +23,16 @@
 #define pool_submit              antes_pool_submit
 #define pool_wait_idle           antes_pool_wait_idle
 #define pool_dims                antes_pool_dims
+// Simbolos publicos que existem so em algumas revisoes: renomear e inofensivo quando nao
+// existem, e evita simbolo duplicado quando o ANTES e uma revisao que ja os tem (dd04d29+).
+#define pool_vigias              antes_pool_vigias
+#define pool_vigias_relative     antes_pool_vigias_relative
+#define pool_giro_max_us         antes_pool_giro_max_us
+#define pool_giro_max_us_relative antes_pool_giro_max_us_relative
+#define pool_perfil              antes_pool_perfil
+#define pool_perfil_relative     antes_pool_perfil_relative
+#define pool_perfil_atual        antes_pool_perfil_atual
+#define pool_perfil_atual_relative antes_pool_perfil_atual_relative
 
 #include "thread_pool_antes_src.c"
 
