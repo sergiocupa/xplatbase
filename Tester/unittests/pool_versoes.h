@@ -38,6 +38,12 @@ extern const PoolVersao POOL_AJUSTE;     // src/thread_pool.c com 1 vigia (pool_
 int         pool_antes_disponivel(void);
 int         pool_ajuste_disponivel(void);
 
+// XPB_BENCH_PERFIL=economia: ANTES e DEPOIS criados com pool_perfil_relative(ECONOMIA), para
+// comparar o perfil economia antes x depois de uma alteracao (o AJUSTE segue a propria regra).
+// pool_antes_tem_perfil: 0 quando a revisao ANTES e anterior aos perfis (roda no padrao).
+int         pool_bench_perfil_economia(void);
+int         pool_antes_tem_perfil(void);
+
 // De onde veio cada versao, para o relatorio (revisao, sha, se ha alteracao local).
 const char* pool_antes_descricao(void);
 const char* pool_depois_descricao(void);

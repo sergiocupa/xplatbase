@@ -10,7 +10,8 @@
  * -- as MESMAS tres versoes do BenchAntesXDepois (pool_versoes.h).
  *
  * Tabelas (uma por cenario): flat-externo, spawn-arvore, fork-join (1 mae -> 64 filhas; em
- * regime e apos 1 s ocioso; filhas de CPU e de relogio), os classicos, malloc-default,
+ * regime e apos 1 s ocioso; filhas de CPU e de relogio), despertar-apos-ocioso (1 tarefa
+ * depois de 200 ms parado: p50/max do submit ao inicio), os classicos, malloc-default,
  * mempool e lento-misto. Colunas: latencias (us), maxms = media das rodadas, max10 = media
  * dos 10 maiores, Mtask/s, tasks/s, cores, cpu%, xTBB/xWinTP = velocidade relativa (>1 =
  * mais rapido). A ordem das colunas GIRA a cada rep.
@@ -401,6 +402,54 @@ static Res fj_roda(int adapter, bool cpu, bool ocioso, int cpus){
     return r;
 }
 
+/* ===================== despertar apos ocioso =====================
+ * Pool PARADO (200 ms sem trabalho), 1 tarefa: tempo do submit ate ela comecar. 6 amostras
+ * por rodada (p50 e max, em ms). O mesmo cenario do BenchAntesXDepois, aqui com TBB e WinTP. */
+static std::atomic<int> g_desp_ok;
+static LARGE_INTEGER    g_desp_ini;
+static void desp_marca(){ g_desp_ini=qpc_now(); g_desp_ok.store(1,std::memory_order_release); }
+static void desp_tramp(void*){ desp_marca(); }
+static VOID CALLBACK desp_wintp(PTP_CALLBACK_INSTANCE,PVOID){ desp_marca(); }
+
+static Res desp_roda(int adapter, int cpus){
+    int wrk=cpus; void* pp=nullptr; const PoolAPI* api=nullptr;
+    PTP_POOL wp=nullptr; TP_CALLBACK_ENVIRON env;
+#ifdef TBB_AVAILABLE
+    tbb::task_arena* ar=nullptr;
+#endif
+    if (adapter<NPOOL){ api=&POOLS[adapter]; pp=api->create(0); int l; api->dims(pp,&wrk,&l); }
+#ifdef TBB_AVAILABLE
+    else if (adapter==NPOOL){ tbb_ensure_gc(cpus); ar=new tbb::task_arena(cpus); ar->initialize(); }
+#endif
+    else { wp=CreateThreadpool(NULL); SetThreadpoolThreadMaximum(wp,(DWORD)cpus); SetThreadpoolThreadMinimum(wp,(DWORD)cpus); InitializeThreadpoolEnvironment(&env); SetThreadpoolCallbackPool(&env,wp); }
+
+    std::vector<double> lat;
+    Sleep(300);
+    for (int i=0;i<6;i++){
+        Sleep(200);
+        g_desp_ok.store(0,std::memory_order_release);
+        LARGE_INTEGER t0=qpc_now();
+        if (adapter<NPOOL){ while(!api->submit(pp,desp_tramp,nullptr)){} }
+#ifdef TBB_AVAILABLE
+        else if (adapter==NPOOL){ ar->enqueue([]{ desp_marca(); }); }
+#endif
+        else { TrySubmitThreadpoolCallback(desp_wintp,nullptr,&env); }
+        while (!g_desp_ok.load(std::memory_order_acquire)){ if (qpc_ms(t0,qpc_now())>5000) break; SwitchToThread(); }
+        lat.push_back(qpc_ms(t0,g_desp_ini));
+    }
+
+    if (adapter<NPOOL) api->destroy(pp);
+#ifdef TBB_AVAILABLE
+    else if (adapter==NPOOL){ delete ar; }
+#endif
+    else { DestroyThreadpoolEnvironment(&env); CloseThreadpool(wp); }
+
+    std::sort(lat.begin(),lat.end());
+    Res r; memset(&r,0,sizeof(r)); r.wrk=wrk;
+    r.p50=med(lat); r.maxv=lat.back(); r.wall_ms=r.p50; r.max10=lat.back();
+    return r;
+}
+
 /* ===================== driver ===================== */
 struct Row { char name[64]; Res r[NADAPT]; };
 static std::vector<Row> g_rows;
@@ -541,6 +590,16 @@ extern "C" void teste_pool_bench_bibliotecas(TestResult* tr){
             fprintf(stderr,"    [%s/%s] rep %d/%d  wall=%.2fms  p99=%.0fus\n",f.nome,NM[a],rep+1,reps,r.wall_ms,r.p99*1000); fflush(stderr);
         }
         Res res[NADAPT]; aggregate(res,per); print_table(f.nome,res);
+    }
+
+    if (quer("despertar-apos-ocioso")) {
+        fprintf(stderr,"\n## despertar-apos-ocioso\n"); fflush(stderr);
+        std::vector<Res> per[NADAPT];
+        for(int rep=0;rep<reps;rep++) for(int ia=0;ia<NADAPT;ia++){ int a=(ia+rep)%NADAPT;   /* ordem gira a cada rep */
+            Res r=desp_roda(a,g_cpus); per[a].push_back(r);
+            fprintf(stderr,"    [despertar/%s] rep %d/%d  p50=%.1fus  max=%.1fus\n",NM[a],rep+1,reps,r.p50*1000,r.maxv*1000); fflush(stderr);
+        }
+        Res res[NADAPT]; aggregate(res,per); print_table("despertar-apos-ocioso",res);
     }
 
     static Scen SCN[] = {

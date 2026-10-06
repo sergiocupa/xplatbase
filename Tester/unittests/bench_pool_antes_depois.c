@@ -33,7 +33,8 @@
 //
 //  Variaveis: XPB_BENCH_REPS (rodadas, padrao 15), XPB_BENCH_FILTRO (so cenarios cujo nome
 //  contem o texto), XPB_BENCH_TSV_ENTRADA (nao mede: refaz o relatorio e o calculo sobre as
-//  rodadas de um TSV ja gravado), XPB_BENCH_DEBUG=1 (mede mesmo em Debug). Rodadas brutas:
+//  rodadas de um TSV ja gravado), XPB_BENCH_DEBUG=1 (mede mesmo em Debug), XPB_BENCH_PERFIL=
+//  economia (ANTES e DEPOIS no perfil economia: compara o perfil antes x depois). Rodadas brutas:
 //  pool_antes_depois.tsv ao lado da DLL.
 
 #include "ctest_core.h"
@@ -669,6 +670,9 @@ void teste_pool_bench_antes_depois(TestResult* r)
         rel("  antes : %s\n", pool_antes_descricao());
         rel("  depois: %s\n", pool_depois_descricao());
         rel("  ajuste: %s\n", pool_ajuste_descricao());
+        if (pool_bench_perfil_economia())
+            rel("  perfil: ECONOMIA no depois%s (XPB_BENCH_PERFIL=economia)\n",
+                pool_antes_tem_perfil() ? " e no antes" : "; o ANTES nao tem perfil e roda no padrao");
         rel("  pool: %d workers (%d core) | %d rodadas por cenario, ordem girando | TSC %.2f GHz\n",
             workers, core, reps, bench_tsc_hz() / 1e9);
     }

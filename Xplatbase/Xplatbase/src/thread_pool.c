@@ -125,6 +125,16 @@
 #ifndef POOL_ECONOMIA_MON_OCIOSO_MS
 #define POOL_ECONOMIA_MON_OCIOSO_MS 1000
 #endif
+/* Perfil ECONOMIA, pool parado: teto do sono dos cores (o timeout deles e so rede de seguranca:
+ * quem submete os acorda direto) e sono dos elasticos (so o monitor os ativa). Os nao-core,
+ * que dependem do timeout para achar trabalho, recuam ate POOL_PARK_MAX_US. Medido antes: um
+ * servidor parado acordava ~3.800 vezes por segundo, ~650 por nao-core (1 ms fixo). */
+#ifndef POOL_ECONOMIA_PARK_MAX_US
+#define POOL_ECONOMIA_PARK_MAX_US 250000
+#endif
+#ifndef POOL_ECONOMIA_ELASTIC_PARK_US
+#define POOL_ECONOMIA_ELASTIC_PARK_US 1000000
+#endif
 #ifndef POOL_STUCK_MIN
 #define POOL_STUCK_MIN     2
 #endif
@@ -510,7 +520,9 @@ static POOL_FN pool_worker_fn(void* raw){
         while (!atomic_get_inline(&pool->stop)){
             atomic_set_inline(&self->parked,1);
             thread_wait_prepare_inline(&self->wait);
-            if (atomic_get_inline(&self->parked)) thread_wait_sleep_for_inline(&self->wait, POOL_ELASTIC_PARK_US);
+            if (atomic_get_inline(&self->parked))
+                thread_wait_sleep_for_inline(&self->wait, atomic_get_inline(&pool->perfil) == POOL_PERFIL_ECONOMIA
+                                                          ? POOL_ECONOMIA_ELASTIC_PARK_US : POOL_ELASTIC_PARK_US);
             if (atomic_get_inline(&pool->stop)) break;
             if (atomic_get_inline(&self->parked)) continue;     /* timeout, nao ativado */
             int idle=0; long long fim_giro=0;
@@ -558,12 +570,20 @@ static POOL_FN pool_worker_fn(void* raw){
             pool_run(pool,self,&t); park_us=POOL_PARK_TIMEOUT_US; ocioso=0; continue;
         }
         /* Workers nao-core nao recebem despertar dirigido: para eles o timeout e o unico
-         * jeito de achar trabalho, e ficam no valor base. */
-        boolean acordado = thread_wait_sleep_for_inline(&self->wait, is_core ? park_us : POOL_PARK_TIMEOUT_US);
+         * jeito de achar trabalho. PERFORMANCE: ficam no valor base, prontos para o excedente.
+         * ECONOMIA: recuam como os cores (ate POOL_PARK_MAX_US) -- a primeira tarefa achada os
+         * traz de volta ao valor base; e os cores vao ate POOL_ECONOMIA_PARK_MAX_US. Em
+         * PERFORMANCE nada muda: o teto dos cores e limitado tambem aqui, para quem voltou de
+         * economia com a espera alta. */
+        int eco = atomic_get_inline(&pool->perfil) == POOL_PERFIL_ECONOMIA;
+        long long espera = is_core ? (eco || park_us <= POOL_PARK_MAX_US ? park_us : POOL_PARK_MAX_US)
+                                   : (eco ? park_us : POOL_PARK_TIMEOUT_US);
+        boolean acordado = thread_wait_sleep_for_inline(&self->wait, espera);
         if (is_core){ atomic_sub_inline(&pool->n_parked_core,1); atomic_set_inline(&self->parked,0); }
-        if (is_core && !acordado){
+        if ((is_core || eco) && !acordado){
             ocioso=1;
-            park_us*=2; if (park_us>POOL_PARK_MAX_US) park_us=POOL_PARK_MAX_US;
+            long long teto = (is_core && eco) ? POOL_ECONOMIA_PARK_MAX_US : POOL_PARK_MAX_US;
+            park_us*=2; if (park_us>teto) park_us=teto;
         } else {
             ocioso=0; park_us=POOL_PARK_TIMEOUT_US;
         }

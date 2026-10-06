@@ -49,9 +49,23 @@
 
 #include "pool_versoes.h"
 
+// Revisoes com perfil (489ea12+) definem POOL_ECONOMIA_GIRO_US no thread_pool.c.
+#ifdef POOL_ECONOMIA_GIRO_US
+int pool_antes_tem_perfil(void) { return 1; }
+static ThreadPool* antes_cria(int cores)
+{
+    ThreadPool* p = antes_pool_create_relative(cores);
+    if (p && pool_bench_perfil_economia()) antes_pool_perfil_relative(p, POOL_PERFIL_ECONOMIA);
+    return p;
+}
+#else
+int pool_antes_tem_perfil(void) { return 0; }
+static ThreadPool* antes_cria(int cores) { return antes_pool_create_relative(cores); }
+#endif
+
 const PoolVersao POOL_ANTES = {
     "antes",
-    antes_pool_create_relative,
+    antes_cria,
     antes_pool_destroy_relative,
     antes_pool_submit_relative,
     antes_pool_dims_relative,
@@ -66,6 +80,7 @@ int pool_antes_disponivel(void) { return 1; }
 const PoolVersao POOL_ANTES = { "antes", 0, 0, 0, 0 };
 
 int pool_antes_disponivel(void) { return 0; }
+int pool_antes_tem_perfil(void) { return 0; }
 
 #endif
 

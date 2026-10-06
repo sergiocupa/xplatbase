@@ -13,6 +13,7 @@ extern "C" {
 void teste_pool_vigia_liga_e_desliga(TestResult* r);
 void teste_pool_perfil_economia_e_performance(TestResult* r);
 void teste_pool_rajadas_intermitentes_nao_giram(TestResult* r);
+void teste_pool_parado_economia_acorda_pouco(TestResult* r);
 void teste_pool_bench_antes_depois(TestResult* r);        // benchmark
 void teste_pool_bench_bibliotecas(TestResult* r);         // benchmark (bench_pool_bibliotecas.cpp)
 

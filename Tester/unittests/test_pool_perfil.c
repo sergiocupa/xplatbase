@@ -5,7 +5,9 @@
 //    - em ECONOMIA nenhuma tarefa se perde nem atrasa por causa do monitor dormindo: depois
 //      de um tempo parado, a primeira tarefa roda logo (o submit acorda quem precisa);
 //    - em ECONOMIA, com o pool parado, a CPU do processo nao e maior que em PERFORMANCE
-//      (o monitor deixa de acordar a cada POOL_MON_MS).
+//      (o monitor deixa de acordar a cada POOL_MON_MS);
+//    - em ECONOMIA, com o pool parado, as threads acordam pouco (trocas de contexto/s);
+//    - rajadas intermitentes nao deixam os elasticos girando, nos dois perfis.
 //  CPU em ciclos (QueryProcessCycleTime), como no teste do vigia.
 
 #include "ctest_core.h"
@@ -127,4 +129,66 @@ void teste_pool_rajadas_intermitentes_nao_giram(TestResult* r)
     t_logf("  rajadas de 8 x 300 us a cada 20 ms (trabalho ~0.12 nucleo): economia %.2f nucleo | performance %.2f nucleo\n", cpu[0], cpu[1]);
     T_ASSERT(r, cpu[0] < 0.5, "economia: %.2f nucleo para ~0.12 de trabalho (elasticos girando?)", cpu[0]);
     T_ASSERT(r, cpu[1] < 1.0, "performance: %.2f nucleo para ~0.12 de trabalho (elasticos girando?)", cpu[1]);
+}
+
+// Pool PARADO em economia: quantas vezes por segundo as threads do processo acordam (trocas
+// de contexto, somadas). Antes, os workers nao-core dormiam 1 ms fixo em qualquer perfil:
+// ~650 acordadas/s cada, ~3.800/s num pool de 16 -- o que impede o processador de descansar,
+// mesmo com pouca CPU. Em economia o pool parado tem de acordar pouco; em performance segue
+// como antes (prontidao). Mede a diferenca para o processo SEM este pool (outras threads do
+// teste entram nas duas medidas igual).
+#include <winternl.h>
+#pragma comment(lib, "ntdll.lib")
+
+static double acordadas_por_s(int ms)
+{
+    static BYTE buf[8 << 20];
+    double soma[2] = { 0, 0 };
+    for (int k = 0; k < 2; k++)
+    {
+        if (k == 1) Sleep((DWORD)ms);
+        ULONG n = 0;
+        if (NtQuerySystemInformation(SystemProcessInformation, buf, sizeof(buf), &n) != 0) return -1;
+        for (BYTE* p = buf;;)
+        {
+            SYSTEM_PROCESS_INFORMATION* sp = (SYSTEM_PROCESS_INFORMATION*)p;
+            if ((DWORD)(ULONG_PTR)sp->UniqueProcessId == GetCurrentProcessId())
+            {
+                SYSTEM_THREAD_INFORMATION* t = (SYSTEM_THREAD_INFORMATION*)(sp + 1);
+                for (ULONG i = 0; i < sp->NumberOfThreads; i++) soma[k] += (double)t[i].Reserved3;   // ContextSwitches
+                break;
+            }
+            if (!sp->NextEntryOffset) return -1;
+            p += sp->NextEntryOffset;
+        }
+    }
+    return (soma[1] - soma[0]) / (ms / 1000.0);
+}
+
+void teste_pool_parado_economia_acorda_pouco(TestResult* r)
+{
+    t_start(r);
+    double base = acordadas_por_s(1000);
+    ThreadPool* p = pool_create_relative(0);
+    T_ASSERT(r, p != 0, "pool_create_relative falhou");
+    int workers = 0, core = 0; pool_dims_relative(p, &workers, &core);
+
+    Sleep(500);
+    double perf = acordadas_por_s(1000) - base;
+
+    pool_perfil_relative(p, POOL_PERFIL_ECONOMIA);
+    Sleep(1500);   // recuo: os sonos dobram ate o teto
+    double eco = acordadas_por_s(2000) - base;
+
+    // parado nao quer dizer surdo: rajada depois da pausa, tudo executa
+    atomic_set_inline(&g_feitas, 0);
+    for (int i = 0; i < 20000; i++) pool_submit_relative(p, conta, 0);
+    int ok = espera_feitas(20000, 5000);
+    pool_destroy_relative(p);
+
+    t_logf("  pool parado (%d workers, %d core), acordadas/s alem do processo: performance %.0f | economia %.0f\n",
+           workers, core, perf, eco);
+    T_ASSERT(r, ok, "economia: rajada depois de parado executou so %d de 20000", atomic_get_inline(&g_feitas));
+    T_ASSERT(r, eco < 500, "economia parado: %.0f acordadas/s (performance: %.0f)", eco, perf);
+    T_ASSERT(r, eco <= 0.25 * perf + 50, "economia parado acorda quase tanto quanto performance (%.0f x %.0f)", eco, perf);
 }
