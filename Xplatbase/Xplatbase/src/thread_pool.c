@@ -336,8 +336,9 @@ typedef struct XPL_ALIGN(XPL_CACHELINE) {
     uint32_t      shard_cursor;
     uint32_t      steal_cursor;
     volatile long done_count;     /* progresso (single-writer = este worker) */
+    volatile long start_count;    /* tarefas INICIADAS (single-writer): o monitor julga travamento por ele */
     volatile int  in_task;        /* profundidade (Bug 1) */
-    long          mon_last;       /* uso exclusivo do monitor */
+    long          mon_last;       /* uso exclusivo do monitor: start_count do passo anterior */
     /* Perf J: LIFO slot (so o dono acessa — campos simples) */
     PoolTask      lifo_task;
     int           lifo_full;
@@ -404,6 +405,7 @@ POOL_INLINE void pool_ctr_dec_self(ThreadPool* pool, PoolWorker* self){
 
 POOL_INLINE void pool_run(ThreadPool* pool, PoolWorker* self, PoolTask* t){
     self->in_task++;          /* Bug 1: profundidade (suporta pool_run aninhado) */
+    self->start_count++;
     t->fn(t->arg);
     self->in_task--;
     self->done_count++;
@@ -511,10 +513,18 @@ static POOL_FN pool_worker_fn(void* raw){
             if (atomic_get_inline(&self->parked)) thread_wait_sleep_for_inline(&self->wait, POOL_ELASTIC_PARK_US);
             if (atomic_get_inline(&pool->stop)) break;
             if (atomic_get_inline(&self->parked)) continue;     /* timeout, nao ativado */
-            int idle=0;
+            int idle=0; long long fim_giro=0;
             while (!atomic_get_inline(&pool->stop)){
-                if (pool_try_get(pool,self,&t)){ pool_run(pool,self,&t); idle=0; continue; }
-                if (++idle > POOL_ELASTIC_RETIRE_SPINS) break;
+                if (pool_try_get(pool,self,&t)){ pool_run(pool,self,&t); idle=0; fim_giro=0; continue; }
+                /* Giro limitado (pool_giro_max_us; o perfil economia usa): o elastico tambem
+                 * respeita o tempo, em vez das POOL_ELASTIC_RETIRE_SPINS voltas (dezenas de ms). */
+                int giro = atomic_get_inline(&pool->giro_us);
+                if (giro >= 0){
+                    if (giro == 0) break;
+                    if (!fim_giro) fim_giro = pool_agora_us() + giro;
+                    if ((++idle & 63) == 63 && pool_agora_us() >= fim_giro) break;
+                }
+                else if (++idle > POOL_ELASTIC_RETIRE_SPINS) break;
                 xcpu_pause();
             }
         }
@@ -582,12 +592,19 @@ static POOL_FN pool_monitor_fn(void* raw){
         thread_wait_sleep_for_inline(&pool->mon_wait, espera_us);
         atomic_set_inline(&pool->mon_dormindo,0);
         if (atomic_get_inline(&pool->stop)) break;
+        /* TRAVADO = a MESMA tarefa rodando desde o passo anterior: em tarefa e sem ter INICIADO
+         * outra desde entao. Pelo done_count (terminadas), um worker que estava parado e acabou
+         * de pegar tarefa tambem parecia travado -- e numa rajada intermitente (ex.: um evento a
+         * cada 20 ms dividido em tarefas) dois deles bastavam para acordar os elasticos, que
+         * giram ate POOL_ELASTIC_RETIRE_SPINS, pegam a rajada seguinte e nunca mais dormem:
+         * nucleos inteiros ocupados por um trabalho de 50 Hz. No perfil economia, depois do
+         * sono longo do monitor, isso acontecia a cada submit. */
         int stuck=0;
         for (int i=0;i<pool->n_workers;i++){
             PoolWorker* w=&pool->workers[i];
-            long dc=w->done_count;
-            if (w->in_task && dc==w->mon_last) stuck++;
-            w->mon_last=dc;
+            long sc=w->start_count;
+            if (w->in_task && sc==w->mon_last) stuck++;
+            w->mon_last=sc;
         }
         if (stuck < POOL_STUCK_MIN) continue;
         int backlog=0;

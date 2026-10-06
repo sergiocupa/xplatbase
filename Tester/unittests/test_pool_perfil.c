@@ -80,3 +80,51 @@ void teste_pool_perfil_economia_e_performance(TestResult* r)
     // margem para o ruido de 1 s de medida: economia nao pode gastar mais que performance parado
     T_ASSERT(r, cpu_eco <= cpu_perf + 0.02, "economia parado gastou mais CPU que performance (%.3f x %.3f)", cpu_eco, cpu_perf);
 }
+
+// Rajadas intermitentes (8 tarefas de ~300 us a cada 20 ms, como um evento dividido em pistas):
+// o trabalho de verdade e ~0.12 nucleo. O monitor julgava "travado" quem acabara de PEGAR
+// tarefa depois de parado (done_count sem mudar); dois assim acordavam os elasticos, que giravam
+// ate POOL_ELASTIC_RETIRE_SPINS, pegavam a rajada seguinte e nao dormiam mais -- 3 a 6 nucleos
+// ocupados. Nos dois perfis o pool tem de ficar perto do trabalho real.
+static void trabalho_300us(void* a)
+{
+    (void)a;
+    LARGE_INTEGER f, t0, t; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&t0);
+    do QueryPerformanceCounter(&t); while ((t.QuadPart - t0.QuadPart) * 1000000 / f.QuadPart < 300);
+    atomic_add_inline(&g_feitas, 1);
+}
+
+static double rajadas(ThreadPool* p, int ms)
+{
+    ULONG64 c0 = 0, c1 = 0;
+    int voltas = ms / 20, aquece = 25;
+    for (int v = 0; v < aquece + voltas; v++)
+    {
+        if (v == aquece) QueryProcessCycleTime(GetCurrentProcess(), &c0);
+        for (int i = 0; i < 8; i++) pool_submit_relative(p, trabalho_300us, 0);
+        Sleep(20);
+    }
+    QueryProcessCycleTime(GetCurrentProcess(), &c1);
+    return (double)(c1 - c0) / bench_tsc_hz() / (voltas * 20 / 1000.0);
+}
+
+void teste_pool_rajadas_intermitentes_nao_giram(TestResult* r)
+{
+    t_start(r);
+    bench_tsc_hz();
+    double cpu[2];
+    int perfis[2] = { POOL_PERFIL_ECONOMIA, POOL_PERFIL_PERFORMANCE };
+    for (int k = 0; k < 2; k++)
+    {
+        ThreadPool* p = pool_create_relative(0);
+        T_ASSERT(r, p != 0, "pool_create_relative falhou");
+        pool_perfil_relative(p, perfis[k]);
+        atomic_set_inline(&g_feitas, 0);
+        cpu[k] = rajadas(p, 2000);
+        pool_wait_idle_relative(p);
+        pool_destroy_relative(p);
+    }
+    t_logf("  rajadas de 8 x 300 us a cada 20 ms (trabalho ~0.12 nucleo): economia %.2f nucleo | performance %.2f nucleo\n", cpu[0], cpu[1]);
+    T_ASSERT(r, cpu[0] < 0.5, "economia: %.2f nucleo para ~0.12 de trabalho (elasticos girando?)", cpu[0]);
+    T_ASSERT(r, cpu[1] < 1.0, "performance: %.2f nucleo para ~0.12 de trabalho (elasticos girando?)", cpu[1]);
+}

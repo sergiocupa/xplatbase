@@ -74,6 +74,7 @@ TEST_CLASS(PoolDeTarefas)
 public:
     CASO (VigiaLigaEDesliga,       teste_pool_vigia_liga_e_desliga)
     CASO (PerfilEconomiaEPerformance, teste_pool_perfil_economia_e_performance)
+    CASO (RajadasIntermitentesNaoGiram, teste_pool_rajadas_intermitentes_nao_giram)
     BENCH(BenchAntesXDepois,       teste_pool_bench_antes_depois)
     BENCH(BenchContraTbbEWinTP,    teste_pool_bench_bibliotecas)
 };
