@@ -571,7 +571,10 @@ boolean mem_leak_watch_start(const MemLeakWatchConfig* cfg)
     memop_leak_watch_enable(g_cfg.enabled);
     if (!g_cfg.enabled) { atomic_set_inline(&g_running, 0); return false; }
 
-    thread_wait_init(false);
+    /* Sem thread_wait_init: ele eleva o timer do Windows para 1 ms, e este vigia espera em
+     * SEGUNDOS (interval_ms, 60 s em Release). Segurava o timer fino o tempo todo em qualquer
+     * processo que chamasse platform_init -- o processador acordando ~1000 vezes por segundo
+     * a toa (bateria). */
     thread_wait_prepare_inline(&g_wait);
 
     g_thread = thread_create(mlw_monitor_loop, NULL, &status);
@@ -579,7 +582,6 @@ boolean mem_leak_watch_start(const MemLeakWatchConfig* cfg)
     {
         atomic_set_inline(&g_running, 0);
         thread_wait_destroy_inline(&g_wait);
-        thread_wait_shutdown();
         memop_leak_watch_enable(false);
         return false;
     }
@@ -595,7 +597,6 @@ void mem_leak_watch_stop(void)
     thread_wait_wake_inline(&g_wait);
     thread_join(&g_thread);
     thread_wait_destroy_inline(&g_wait);
-    thread_wait_shutdown();
     memop_leak_watch_enable(false);
 
     thread_mutex_lock_inline(&g_log_lock);

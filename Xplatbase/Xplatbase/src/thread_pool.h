@@ -125,7 +125,11 @@ XPLATBASE_API void pool_giro_max_us_relative(ThreadPool* p, int us);       /* po
  *     - com o pool parado, os workers acordam pouco: os nao-core recuam como os cores (ate
  *       POOL_PARK_MAX_US, em vez de 1 ms fixo), os cores ate POOL_ECONOMIA_PARK_MAX_US e os
  *       elasticos ate POOL_ECONOMIA_ELASTIC_PARK_US. Custo: depois de uma pausa, os nao-core
- *       levam ate POOL_PARK_MAX_US para ajudar (os cores sao acordados na hora pelo submit).
+ *       levam ate POOL_PARK_MAX_US para ajudar (os cores sao acordados na hora pelo submit);
+ *     - parado ha POOL_ECONOMIA_TIMER_SOLTA_MS, devolve o timer de 1 ms do Windows (pedido por
+ *       thread_wait_init) e o pede de novo com o primeiro trabalho. Atencao: o timer e do
+ *       PROCESSO -- quem depende de Sleep(1) preciso com o pool parado tem de pedir o seu
+ *       (thread_wait_init / timeBeginPeriod).
  *     Custo: sob carga continua de tarefas minusculas a vazao cai (medido com giro de 30 us:
  *     flat-externo +46% de tempo). Depois de escolher o perfil, pool_giro_max_us ajusta fino.
  */

@@ -103,6 +103,15 @@
 #ifndef POOL_SPIN_SLEEP0
 #define POOL_SPIN_SLEEP0   8
 #endif
+/* Core acordado que NAO achou tarefa (outro core, girando, pegou antes): gira so este tempo,
+ * com pause, antes de estacionar de novo -- e nao o giro inteiro (pause + yield + sleep0) de
+ * quem acabou de rodar tarefa. Medido num servidor HTTP (Linux, perfil performance): com o giro
+ * inteiro, cada submit acordava um core que perdia a tarefa e girava; 11 workers a 60% de CPU.
+ * Sem giro nenhum, a tarefa seguinte (dezenas de us depois) pagava um despertar inteiro: p50 da
+ * conexao nova +36%. */
+#ifndef POOL_GIRO_APOS_DESPERTAR_US
+#define POOL_GIRO_APOS_DESPERTAR_US 20
+#endif
 #ifndef POOL_PARK_TIMEOUT_US
 #define POOL_PARK_TIMEOUT_US 1000
 #endif
@@ -124,6 +133,12 @@
 #endif
 #ifndef POOL_ECONOMIA_MON_OCIOSO_MS
 #define POOL_ECONOMIA_MON_OCIOSO_MS 1000
+#endif
+/* Perfil ECONOMIA: parado ha este tempo, o pool devolve o timer de 1 ms do Windows (pedido em
+ * thread_wait_init); com o primeiro trabalho, pede de novo. Histerese: carga intermitente
+ * (um evento a cada 100 ms) nao fica ligando e desligando. */
+#ifndef POOL_ECONOMIA_TIMER_SOLTA_MS
+#define POOL_ECONOMIA_TIMER_SOLTA_MS 1000
 #endif
 /* Perfil ECONOMIA, pool parado: teto do sono dos cores (o timeout deles e so rede de seguranca:
  * quem submete os acorda direto) e sono dos elasticos (so o monitor os ativa). Os nao-core,
@@ -373,7 +388,8 @@ struct XPL_ALIGN(XPL_CACHELINE) ThreadPool {
     PoolWorker*    workers;        /* [0,n_core)=core [n_core,n_workers)=reserva [n_workers,n_total)=elastico */
     PoolCtr*       ctrs;
     int            n_ctrs;         /* n_shards + n_total */
-    int            wait_inited;    /* Bug 2/3: pareia thread_wait_init/shutdown */
+    int            wait_inited;    /* Bug 2/3: pareia thread_wait_init/shutdown; = o pool segura o timer de 1 ms agora */
+    long long      ocioso_desde_ms;/* economia: desde quando o pool esta parado (0 = em uso); so o monitor */
     /* Perf B: atomicos quentes em linhas de cache separadas */
     char           _padb0[XPL_CACHELINE];
     xatomic_uint32 submit_rr;
@@ -482,19 +498,25 @@ static long long pool_agora_us(void){
 }
 #endif
 
-static bool pool_spin(ThreadPool* pool, PoolWorker* self, PoolTask* out){
+static bool pool_spin(ThreadPool* pool, PoolWorker* self, PoolTask* out, int curto){
     /* Giro limitado por TEMPO (pool_giro_max_us): so pause, sem yield/sleep0, ate 'giro' us.
-     * -1 (padrao) segue para o giro historico abaixo, sem nenhuma diferenca. */
+     * -1 (padrao) segue para o giro historico abaixo, sem nenhuma diferenca. 'curto' (acordado
+     * sem achar tarefa): no padrao, giro limitado a POOL_GIRO_APOS_DESPERTAR_US. */
     int giro = atomic_get_inline(&pool->giro_us);
+    int dorme0 = 0;
+    if (curto && giro < 0){ giro = POOL_GIRO_APOS_DESPERTAR_US; dorme0 = 1; }
     if (giro >= 0){
-        if (giro == 0) return false;
-        long long fim = pool_agora_us() + giro;
-        for (int i=0;;i++){
-            if (pool_try_get(pool,self,out)) return true;
-            if (atomic_get_inline(&pool->stop)) return false;
-            xcpu_pause();
-            if ((i & 63) == 63 && pool_agora_us() >= fim) return false;
+        if (giro > 0){
+            long long fim = pool_agora_us() + giro;
+            for (int i=0;;i++){
+                if (pool_try_get(pool,self,out)) return true;
+                if (atomic_get_inline(&pool->stop)) return false;
+                xcpu_pause();
+                if ((i & 63) == 63 && pool_agora_us() >= fim) break;
+            }
         }
+        for (int i=0;dorme0 && i<POOL_SPIN_SLEEP0;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; pool_sleep0(); }
+        return false;
     }
     for (int i=0;i<POOL_SPIN_PAUSE;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; xcpu_pause(); }
     for (int i=0;i<POOL_SPIN_YIELD;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; pool_yield(); }
@@ -545,7 +567,8 @@ static POOL_FN pool_worker_fn(void* raw){
 
     int is_core=self->is_core;
     long long park_us=POOL_PARK_TIMEOUT_US;
-    int ocioso=0;   /* a ultima espera venceu por tempo e nao havia trabalho */
+    int ocioso=0;   /* 0 = acabou de rodar tarefa (giro inteiro); 1 = a espera venceu por tempo
+                     * (nao gira); 2 = acordado e ainda sem tarefa (giro curto) */
     while (!atomic_get_inline(&pool->stop)){
         if (pool_try_get(pool,self,&t)){ pool_run(pool,self,&t); park_us=POOL_PARK_TIMEOUT_US; ocioso=0; continue; }
         /* Vigia (desligado por padrao; pool_vigias): os primeiros n_vigia cores nao dormem.
@@ -557,8 +580,9 @@ static POOL_FN pool_worker_fn(void* raw){
         thread_wait_prepare_inline(&self->wait);
         if (pool_try_get(pool,self,&t)){ pool_run(pool,self,&t); park_us=POOL_PARK_TIMEOUT_US; ocioso=0; continue; }
         /* Girar so compensa logo depois de trabalho (a proxima tarefa costuma vir em
-         * seguida). Depois de um timeout ocioso, girar e so queimar CPU. */
-        if (is_core && !ocioso){ if (pool_spin(pool,self,&t)){ pool_run(pool,self,&t); park_us=POOL_PARK_TIMEOUT_US; continue; } }
+         * seguida). Depois de um timeout ocioso, girar e so queimar CPU. Acordado sem achar
+         * tarefa: giro curto (POOL_GIRO_APOS_DESPERTAR_US). */
+        if (is_core && ocioso != 1){ if (pool_spin(pool,self,&t,ocioso == 2)){ pool_run(pool,self,&t); park_us=POOL_PARK_TIMEOUT_US; ocioso=0; continue; } }
         if (atomic_get_inline(&pool->stop)) break;
         /* Perf C: marca este core como parqueado para wakeup direcionado. */
         if (is_core){ atomic_set_inline(&self->parked,1); atomic_add_inline(&pool->n_parked_core,1); }
@@ -580,13 +604,13 @@ static POOL_FN pool_worker_fn(void* raw){
                                    : (eco ? park_us : POOL_PARK_TIMEOUT_US);
         boolean acordado = thread_wait_sleep_for_inline(&self->wait, espera);
         if (is_core){ atomic_sub_inline(&pool->n_parked_core,1); atomic_set_inline(&self->parked,0); }
+        /* Acordado: se nao achar tarefa (outro core, girando, pegou antes), so o giro curto --
+         * ver POOL_GIRO_APOS_DESPERTAR_US. */
         if ((is_core || eco) && !acordado){
             ocioso=1;
             long long teto = (is_core && eco) ? POOL_ECONOMIA_PARK_MAX_US : POOL_PARK_MAX_US;
             park_us*=2; if (park_us>teto) park_us=teto;
-        } else {
-            ocioso=0; park_us=POOL_PARK_TIMEOUT_US;
-        }
+        } else { ocioso=2; park_us=POOL_PARK_TIMEOUT_US; }
     }
     POOL_RET;
 }
@@ -603,15 +627,35 @@ static POOL_FN pool_monitor_fn(void* raw){
          * dormir e RE-TESTA: um submit que chegue entre o teste e o anuncio ve mon_dormindo=1
          * e acorda; um que chegue antes do anuncio aparece no re-teste. O sono tem limite
          * (POOL_ECONOMIA_MON_OCIOSO_MS) como rede de seguranca. */
-        if (atomic_get_inline(&pool->perfil) == POOL_PERFIL_ECONOMIA && pool_total_pending(pool) == 0){
+        int eco = atomic_get_inline(&pool->perfil) == POOL_PERFIL_ECONOMIA;
+        if (eco && pool_total_pending(pool) == 0){
             thread_wait_prepare_inline(&pool->mon_wait);
             int exp=0; atomic_cas_inline(&pool->mon_dormindo,&exp,1);
-            if (pool_total_pending(pool) == 0) espera_us = (long long)POOL_ECONOMIA_MON_OCIOSO_MS*1000;
+            if (pool_total_pending(pool) == 0){
+                espera_us = (long long)POOL_ECONOMIA_MON_OCIOSO_MS*1000;
+                /* Timer de 1 ms (thread_wait_init): parado ha POOL_ECONOMIA_TIMER_SOLTA_MS, o pool
+                 * o devolve -- com ele o Windows acorda o processador ~1000 vezes por segundo mesmo
+                 * sem trabalho. Volta assim que chegar tarefa (abaixo). As tarefas acordam os
+                 * workers por evento: so os TEMPOS de espera ficam grossos enquanto parado. */
+                long long agora = pool_agora_us() / 1000;
+                if (!pool->ocioso_desde_ms) pool->ocioso_desde_ms = agora;
+                else if (pool->wait_inited && agora - pool->ocioso_desde_ms >= POOL_ECONOMIA_TIMER_SOLTA_MS){
+                    thread_wait_shutdown(); pool->wait_inited = 0;
+                }
+            }
             else atomic_set_inline(&pool->mon_dormindo,0);
         }
         thread_wait_sleep_for_inline(&pool->mon_wait, espera_us);
         atomic_set_inline(&pool->mon_dormindo,0);
         if (atomic_get_inline(&pool->stop)) break;
+        /* Trabalho de novo (ou o perfil voltou a performance): o timer fino volta. So entra aqui
+         * quem estava parado ou sem o timer: em performance, em regime, e um teste so. */
+        if (pool->ocioso_desde_ms || !pool->wait_inited){
+            if (atomic_get_inline(&pool->perfil) != POOL_PERFIL_ECONOMIA || pool_total_pending(pool) > 0){
+                pool->ocioso_desde_ms = 0;
+                if (!pool->wait_inited) pool->wait_inited = thread_wait_init(false) ? 1 : 0;
+            }
+        }
         /* TRAVADO = a MESMA tarefa rodando desde o passo anterior: em tarefa e sem ter INICIADO
          * outra desde entao. Pelo done_count (terminadas), um worker que estava parado e acabou
          * de pegar tarefa tambem parecia travado -- e numa rajada intermitente (ex.: um evento a

@@ -76,8 +76,10 @@ public:
     CASO (PerfilEconomiaEPerformance, teste_pool_perfil_economia_e_performance)
     CASO (RajadasIntermitentesNaoGiram, teste_pool_rajadas_intermitentes_nao_giram)
     CASO (ParadoEconomiaAcordaPouco, teste_pool_parado_economia_acorda_pouco)
+    CASO (TimerSoltoNoEconomiaParado, teste_pool_timer_solto_no_economia_parado)
     BENCH(BenchAntesXDepois,       teste_pool_bench_antes_depois)
     BENCH(BenchContraTbbEWinTP,    teste_pool_bench_bibliotecas)
+    BENCH(TimerDoProcesso,         teste_pool_timer_do_processo)
 };
 
 TEST_CLASS(PoolDeMemoria)

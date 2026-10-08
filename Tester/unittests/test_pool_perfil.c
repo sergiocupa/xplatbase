@@ -192,3 +192,71 @@ void teste_pool_parado_economia_acorda_pouco(TestResult* r)
     T_ASSERT(r, eco < 500, "economia parado: %.0f acordadas/s (performance: %.0f)", eco, perf);
     T_ASSERT(r, eco <= 0.25 * perf + 50, "economia parado acorda quase tanto quanto performance (%.0f x %.0f)", eco, perf);
 }
+
+// MEDIDA (benchmark, nao exigencia): o pool eleva o timer do Windows para 1 ms
+// (timeBeginPeriod, em thread_wait_init) e o mantem enquanto existe. Timer fino tambem custa
+// bateria: o processador acorda mais vezes. Desde o Windows 10 2004 o efeito vale por
+// processo, e aparece no proprio Sleep(1): ~15,6 ms com o timer padrao, ~1-2 ms com 1 ms.
+// Mede antes do pool, com ele em performance, parado em economia e depois de destruido --
+// referencia para quando o economia passar a soltar o timer com o pool parado.
+static double ms_por_sleep1(void)
+{
+    LARGE_INTEGER f, a, b; QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&a);
+    for (int i = 0; i < 20; i++) Sleep(1);
+    QueryPerformanceCounter(&b);
+    return (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart / 20.0;
+}
+
+void teste_pool_timer_do_processo(TestResult* r)
+{
+    t_start(r);
+    double antes = ms_por_sleep1();
+    ThreadPool* p = pool_create_relative(0);
+    T_ASSERT(r, p != 0, "pool_create_relative falhou");
+    Sleep(200);
+    double perf = ms_por_sleep1();
+    pool_perfil_relative(p, POOL_PERFIL_ECONOMIA);
+    Sleep(1500);
+    double eco = ms_por_sleep1();
+    pool_destroy_relative(p);
+    Sleep(200);
+    double depois = ms_por_sleep1();
+    t_logf("  Sleep(1) dura: antes do pool %.2f ms | performance %.2f ms | economia parado %.2f ms | pool destruido %.2f ms\n",
+           antes, perf, eco, depois);
+    t_logf("  (~15,6 ms = timer padrao; ~1-2 ms = o processo pediu timer de 1 ms)\n");
+    if (antes < 5.0)
+        T_SKIP(r, "o processo ja tinha timer fino antes do pool (Sleep(1) = %.2f ms): sem como isolar o efeito do pool -- rode este teste sozinho", antes);
+}
+
+// Economia parado devolve o timer de 1 ms; trabalhando, o pede de novo. Performance segura.
+void teste_pool_timer_solto_no_economia_parado(TestResult* r)
+{
+    t_start(r);
+    double antes = ms_por_sleep1();
+    if (antes < 5.0)
+        T_SKIP(r, "o processo ja tinha timer fino antes do pool (Sleep(1) = %.2f ms): sem como medir o pool", antes);
+    ThreadPool* p = pool_create_relative(0);
+    T_ASSERT(r, p != 0, "pool_create_relative falhou");
+    Sleep(200);
+    double perf = ms_por_sleep1();                 // performance: timer fino
+    pool_perfil_relative(p, POOL_PERFIL_ECONOMIA);
+    Sleep(2500);                                   // parado: passa de POOL_ECONOMIA_TIMER_SOLTA_MS
+    double eco = ms_por_sleep1();                  // devolvido
+    atomic_set_inline(&g_feitas, 0);
+    for (int i = 0; i < 1000; i++) pool_submit_relative(p, conta, 0);
+    int ok = espera_feitas(1000, 5000);
+    Sleep(50);
+    double volta = ms_por_sleep1();                // trabalho: pedido de novo
+    pool_perfil_relative(p, POOL_PERFIL_PERFORMANCE);
+    Sleep(2500);
+    double perf2 = ms_por_sleep1();                // performance parado: segura
+    pool_destroy_relative(p);
+    t_logf("  Sleep(1): performance %.2f | economia parado %.2f | economia com trabalho %.2f | performance parado %.2f ms\n",
+           perf, eco, volta, perf2);
+    T_ASSERT(r, ok, "economia: so %d de 1000 tarefas depois de parado", atomic_get_inline(&g_feitas));
+    T_ASSERT(r, perf < 5.0, "performance devia segurar o timer fino (Sleep(1) = %.2f ms)", perf);
+    T_ASSERT(r, eco >= 8.0, "economia parado devia devolver o timer (Sleep(1) = %.2f ms)", eco);
+    T_ASSERT(r, volta < 5.0, "com trabalho o timer fino devia voltar (Sleep(1) = %.2f ms)", volta);
+    T_ASSERT(r, perf2 < 5.0, "performance parado devia segurar o timer fino (Sleep(1) = %.2f ms)", perf2);
+}
