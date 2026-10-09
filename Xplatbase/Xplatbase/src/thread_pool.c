@@ -112,6 +112,21 @@
 #ifndef POOL_GIRO_APOS_DESPERTAR_US
 #define POOL_GIRO_APOS_DESPERTAR_US 20
 #endif
+/* Perfil PERFORMANCE (giro historico): quem submete so acorda um core estacionado se NENHUM
+ * estiver girando -- o que gira pega a tarefa. O ultimo a sair do giro com tarefa acorda o
+ * proximo se ainda houver fila (despertar em cadeia: sem ele, o limite derrubava o flat em
+ * 57%, ver o cabecalho). Antes, cada submit acordava um core mesmo com outros girando; num
+ * servidor HTTP esse core perdia a tarefa e girava a toa. 0 desliga (comportamento anterior). */
+#ifndef POOL_LIMITA_GIRADORES
+#define POOL_LIMITA_GIRADORES 1
+#endif
+/* Quantos cores girando bastam para quem submete nao acordar outro. Medido: com 1, servidor
+ * HTTP (Linux, performance) com CPU por requisicao -51% e latencia -22% a -26% nas rotas lentas
+ * e clientes lentos; no teste de rajadas do pool, p99 de ~1,2 para ~7 us. Com 3, latencia do
+ * pool igual a de antes, mas o servidor nao ganha nada (-0,5% a -3,5%). */
+#ifndef POOL_GIRADORES_MIN
+#define POOL_GIRADORES_MIN 1
+#endif
 #ifndef POOL_PARK_TIMEOUT_US
 #define POOL_PARK_TIMEOUT_US 1000
 #endif
@@ -398,6 +413,8 @@ struct XPL_ALIGN(XPL_CACHELINE) ThreadPool {
     char           _padb2[XPL_CACHELINE - sizeof(xatomic_uint32)];
     xatomic_int    n_parked_core;
     char           _padb3[XPL_CACHELINE - sizeof(xatomic_int)];
+    xatomic_int    n_girando;      /* cores no giro ativo (pause/yield) do perfil performance; ver POOL_LIMITA_GIRADORES */
+    char           _padb3b[XPL_CACHELINE - sizeof(xatomic_int)];
     xatomic_int    stop;
     char           _padb4[XPL_CACHELINE - sizeof(xatomic_int)];
     xatomic_int    n_vigia;        /* workers core que ficam acordados com o pool ocioso (0 = nenhum; ver pool_vigias) */
@@ -483,6 +500,43 @@ static void pool_wake_one_core(ThreadPool* pool){
     }
 }
 
+/* Despertar de quem submete (POOL_LIMITA_GIRADORES). A barreira ordena a publicacao da tarefa
+ * antes da leitura de n_girando (store -> load): se este submit le n_girando > 0, o core que
+ * gira so sai do giro DEPOIS (decremento) e re-testa a fila ao se anunciar estacionado -- a
+ * tarefa nao fica presa. Rajada: se a fila (do shard ou do deque onde a tarefa entrou) passa
+ * do numero de cores girando, acorda mesmo assim -- so os que giram nao dao conta.
+ * Custo: a barreira e a contagem da fila (linhas disputadas com os consumidores) so entram
+ * quando ha core estacionado E giradores bastantes; no caminho comum e uma leitura a mais.
+ * Medido: barreira + contagem em todo submit custavam +25% a +35% no submit externo. */
+POOL_INLINE void pool_wake_submit(ThreadPool* pool, PoolRing* ring, PoolDeque* dq){
+#if POOL_LIMITA_GIRADORES
+    if (atomic_get_inline(&pool->n_parked_core) > 0 && atomic_get_inline(&pool->n_girando) >= POOL_GIRADORES_MIN){
+        pool_fence();
+        int g = atomic_get_inline(&pool->n_girando);
+        int fila = ring ? pool_ring_count(ring) : (int)(pool_ld(&dq->bottom) - pool_ld(&dq->top));
+        if (g >= POOL_GIRADORES_MIN && fila <= g) return;
+    }
+#else
+    (void)ring; (void)dq;
+#endif
+    pool_wake_one_core(pool);
+}
+
+#if POOL_LIMITA_GIRADORES
+POOL_INLINE bool pool_ha_fila(ThreadPool* pool){
+    for (int s=0;s<pool->n_shards;s++) if (pool_ring_count(&pool->shards[s].ring) > 0) return true;
+    return false;
+}
+/* Fim do giro ativo. Achou tarefa e ficaram menos de POOL_GIRADORES_MIN girando: acorda outro core se ainda ha fila
+ * (despertar em cadeia). Nao achou: a barreira ordena o decremento antes do re-teste da fila
+ * que o worker faz ao se anunciar estacionado. */
+POOL_INLINE void pool_gira_fim(ThreadPool* pool, bool achou){
+    int antes = atomic_sub_inline(&pool->n_girando,1);
+    if (achou){ if (antes <= POOL_GIRADORES_MIN && pool_ha_fila(pool)) pool_wake_one_core(pool); }
+    else pool_fence();
+}
+#endif
+
 /* Relogio para o giro limitado (pool_giro_max_us). Lido a cada 64 pauses: o custo some. */
 #ifdef XPLATBASE_WIN
 static long long pool_agora_us(void){
@@ -504,23 +558,35 @@ static bool pool_spin(ThreadPool* pool, PoolWorker* self, PoolTask* out, int cur
      * sem achar tarefa): no padrao, giro limitado a POOL_GIRO_APOS_DESPERTAR_US. */
     int giro = atomic_get_inline(&pool->giro_us);
     int dorme0 = 0;
+    /* Conta como girando (POOL_LIMITA_GIRADORES) so no giro historico (performance sem ajuste) e
+     * so na parte ativa (pause/yield): no sleep0 o core demora a voltar, entao quem submete
+     * acorda outro. Economia e giro ajustado (giro >= 0) nao contam: nada muda neles. */
+    int conta = POOL_LIMITA_GIRADORES && giro < 0;
+    bool achou = false;
     if (curto && giro < 0){ giro = POOL_GIRO_APOS_DESPERTAR_US; dorme0 = 1; }
+#if POOL_LIMITA_GIRADORES
+    if (conta) atomic_add_inline(&pool->n_girando,1);
+#endif
     if (giro >= 0){
         if (giro > 0){
             long long fim = pool_agora_us() + giro;
             for (int i=0;;i++){
-                if (pool_try_get(pool,self,out)) return true;
-                if (atomic_get_inline(&pool->stop)) return false;
+                if (pool_try_get(pool,self,out)){ achou = true; break; }
+                if (atomic_get_inline(&pool->stop)) break;
                 xcpu_pause();
                 if ((i & 63) == 63 && pool_agora_us() >= fim) break;
             }
         }
-        for (int i=0;dorme0 && i<POOL_SPIN_SLEEP0;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; pool_sleep0(); }
-        return false;
+    } else {
+        for (int i=0;!achou && i<POOL_SPIN_PAUSE;i++){ if(pool_try_get(pool,self,out)){ achou=true; break; } if(atomic_get_inline(&pool->stop))break; xcpu_pause(); }
+        for (int i=0;!achou && i<POOL_SPIN_YIELD;i++){ if(pool_try_get(pool,self,out)){ achou=true; break; } if(atomic_get_inline(&pool->stop))break; pool_yield(); }
+        dorme0 = 1;
     }
-    for (int i=0;i<POOL_SPIN_PAUSE;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; xcpu_pause(); }
-    for (int i=0;i<POOL_SPIN_YIELD;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; pool_yield(); }
-    for (int i=0;i<POOL_SPIN_SLEEP0;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; pool_sleep0(); }
+#if POOL_LIMITA_GIRADORES
+    if (conta) pool_gira_fim(pool, achou);
+#endif
+    if (achou) return true;
+    for (int i=0;dorme0 && i<POOL_SPIN_SLEEP0;i++){ if(pool_try_get(pool,self,out))return true; if(atomic_get_inline(&pool->stop))return false; pool_sleep0(); }
     return false;
 }
 
@@ -757,7 +823,7 @@ boolean pool_submit_relative(ThreadPool* pool, pool_task_fn fn, void* arg)
             /* Agora ha trabalho ROUBAVEL. Antes ninguem era acordado aqui: os outros cores so
              * o achavam quando o timeout de 1 ms vencia -- o paralelismo aninhado dependia
              * do timeout, e por isso ele nao podia crescer. */
-            pool_wake_one_core(pool);
+            pool_wake_submit(pool, NULL, &me->deque);
         return true;
     }
     int G=pool->n_shards; int spins=0;
@@ -766,7 +832,7 @@ boolean pool_submit_relative(ThreadPool* pool, pool_task_fn fn, void* arg)
         PoolTask t = { fn, arg };
         atomic_add64_inline(&pool->ctrs[s].v,1);
         if (pool_ring_push(&pool->shards[s].ring, &t)){
-            pool_wake_one_core(pool);
+            pool_wake_submit(pool, &pool->shards[s].ring, NULL);
             /* economia: o monitor pode estar dormindo longo com o pool parado. No perfil
              * performance mon_dormindo nunca sai de 0: e uma leitura que nao muda. */
             if (atomic_get_inline(&pool->mon_dormindo)){

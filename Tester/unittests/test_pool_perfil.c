@@ -17,6 +17,7 @@
 #include "atomics.h"
 
 #include <windows.h>
+#include <stdlib.h>
 
 static double nucleos_em(int ms)
 {
@@ -259,4 +260,69 @@ void teste_pool_timer_solto_no_economia_parado(TestResult* r)
     T_ASSERT(r, eco >= 8.0, "economia parado devia devolver o timer (Sleep(1) = %.2f ms)", eco);
     T_ASSERT(r, volta < 5.0, "com trabalho o timer fino devia voltar (Sleep(1) = %.2f ms)", volta);
     T_ASSERT(r, perf2 < 5.0, "performance parado devia segurar o timer fino (Sleep(1) = %.2f ms)", perf2);
+}
+
+// PERFORMANCE com o giro limitado (POOL_LIMITA_GIRADORES): quem submete nao acorda ninguem se
+// algum core esta girando. Nenhuma tarefa pode ficar presa por isso (um submit que ve alguem
+// girando enquanto ele desiste). Carga de servidor: tarefas curtas com intervalos de 0 a ~100 us
+// e rajadas de 64; mede submit -> inicio de cada tarefa. Uma tarefa presa so seria achada pelo
+// timeout de quem dorme (>= 1 ms): o teste conta as acima de 1 ms.
+#define PRESA_N 20000
+static LONGLONG g_sub[PRESA_N];
+static LONGLONG g_lat[PRESA_N];
+static void marca_inicio(void* a)
+{
+    int i = (int)(intptr_t)a;
+    LARGE_INTEGER t; QueryPerformanceCounter(&t);
+    g_lat[i] = t.QuadPart - g_sub[i];
+    atomic_add_inline(&g_feitas, 1);
+}
+static int cmp_ll(const void* a, const void* b)
+{
+    LONGLONG x = *(const LONGLONG*)a, y = *(const LONGLONG*)b;
+    return x < y ? -1 : x > y;
+}
+
+void teste_pool_giro_limitado_sem_tarefa_presa(TestResult* r)
+{
+    t_start(r);
+    bench_tsc_hz();
+    LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+    ThreadPool* p = pool_create_relative(0);
+    T_ASSERT(r, p != 0, "pool_create_relative falhou");
+    Sleep(200);
+    atomic_set_inline(&g_feitas, 0);
+    unsigned semente = 12345;
+    ULONG64 c0 = 0, c1 = 0;
+    QueryProcessCycleTime(GetCurrentProcess(), &c0);
+    LARGE_INTEGER t0, t1; QueryPerformanceCounter(&t0);
+    for (int i = 0; i < PRESA_N; i++)
+    {
+        LARGE_INTEGER t; QueryPerformanceCounter(&t);
+        g_sub[i] = t.QuadPart;
+        pool_submit_relative(p, marca_inicio, (void*)(intptr_t)i);
+        if ((i & 255) < 192)                       // 3/4: intervalo de 0 a ~100 us; 1/4: rajada de 64
+        {
+            semente = semente * 1103515245u + 12345u;
+            LONGLONG gap = (LONGLONG)((semente >> 16) % 100) * f.QuadPart / 1000000;
+            LARGE_INTEGER w; do QueryPerformanceCounter(&w); while (w.QuadPart - t.QuadPart < gap);
+        }
+    }
+    int ok = espera_feitas(PRESA_N, 10000);
+    QueryPerformanceCounter(&t1);
+    QueryProcessCycleTime(GetCurrentProcess(), &c1);
+    pool_destroy_relative(p);
+    T_ASSERT(r, ok, "so %d de %d tarefas rodaram", atomic_get_inline(&g_feitas), PRESA_N);
+
+    double us = 1000000.0 / (double)f.QuadPart;
+    int acima_1ms = 0;
+    for (int i = 0; i < PRESA_N; i++) if (g_lat[i] * us > 1000.0) acima_1ms++;
+    qsort(g_lat, PRESA_N, sizeof(LONGLONG), cmp_ll);
+    double seg = (double)(t1.QuadPart - t0.QuadPart) / (double)f.QuadPart;
+    double nucleos = (double)(c1 - c0) / bench_tsc_hz() / seg;
+    t_logf("  %d tarefas em %.2f s: latencia p50 %.1f | p99 %.1f | p999 %.1f | max %.1f us | acima de 1 ms: %d | CPU %.2f nucleo\n",
+           PRESA_N, seg, g_lat[PRESA_N / 2] * us, g_lat[PRESA_N * 99 / 100] * us, g_lat[PRESA_N * 999 / 1000] * us,
+           g_lat[PRESA_N - 1] * us, acima_1ms, nucleos);
+    // preempcao do SO pode atrasar algumas; presa de verdade aparece como muitas acima de 1 ms
+    T_ASSERT(r, acima_1ms <= PRESA_N / 1000, "%d tarefas esperaram mais de 1 ms (tarefa presa?)", acima_1ms);
 }
