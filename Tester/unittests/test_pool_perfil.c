@@ -262,6 +262,45 @@ void teste_pool_timer_solto_no_economia_parado(TestResult* r)
     T_ASSERT(r, perf2 < 5.0, "performance parado devia segurar o timer fino (Sleep(1) = %.2f ms)", perf2);
 }
 
+// Economia: o timer fino volta com QUALQUER trabalho -- mesmo uma tarefa que acaba antes de o
+// monitor acordar -- e fica enquanto houver carga intermitente (histerese de
+// POOL_ECONOMIA_TIMER_SOLTA_MS). Antes o monitor so via trabalho em tarefa PENDENTE: com tarefa
+// curta o sinal se perdia (e o TimerSoltoNoEconomiaParado falhava em ~metade das vezes).
+void teste_pool_timer_volta_com_tarefa_curta(TestResult* r)
+{
+    t_start(r);
+    double antes = ms_por_sleep1();
+    if (antes < 5.0)
+        T_SKIP(r, "o processo ja tinha timer fino antes do pool (Sleep(1) = %.2f ms): sem como medir o pool", antes);
+    ThreadPool* p = pool_create_relative(0);
+    T_ASSERT(r, p != 0, "pool_create_relative falhou");
+    pool_perfil_relative(p, POOL_PERFIL_ECONOMIA);
+    Sleep(2500);                                   // parado: passa de POOL_ECONOMIA_TIMER_SOLTA_MS
+    double solto = ms_por_sleep1();                // devolvido
+
+    // 1) uma tarefa so: termina em microssegundos, antes de o monitor acordar
+    atomic_set_inline(&g_feitas, 0);
+    pool_submit_relative(p, conta, 0);
+    int ok1 = espera_feitas(1, 2000);
+    Sleep(50);
+    double uma = ms_por_sleep1();
+
+    // 2) carga intermitente: uma tarefa curta a cada 100 ms por 2,5 s (mais que a histerese):
+    //    o timer nao pode ser solto no meio
+    atomic_set_inline(&g_feitas, 0);
+    for (int i = 0; i < 25; i++) { pool_submit_relative(p, conta, 0); Sleep(100); }
+    int ok2 = espera_feitas(25, 2000);
+    double intermitente = ms_por_sleep1();
+    pool_destroy_relative(p);
+
+    t_logf("  Sleep(1): economia parado %.2f | depois de 1 tarefa curta %.2f | carga intermitente %.2f ms\n",
+           solto, uma, intermitente);
+    T_ASSERT(r, ok1 && ok2, "economia: tarefas nao rodaram (1: %d, intermitente: %d de 25)", ok1, atomic_get_inline(&g_feitas));
+    T_ASSERT(r, solto >= 8.0, "economia parado devia devolver o timer (Sleep(1) = %.2f ms)", solto);
+    T_ASSERT(r, uma < 5.0, "uma tarefa curta: o timer fino devia voltar (Sleep(1) = %.2f ms)", uma);
+    T_ASSERT(r, intermitente < 5.0, "carga intermitente: o timer fino nao devia ser solto (Sleep(1) = %.2f ms)", intermitente);
+}
+
 // PERFORMANCE com o giro limitado (POOL_LIMITA_GIRADORES): quem submete nao acorda ninguem se
 // algum core esta girando. Nenhuma tarefa pode ficar presa por isso (um submit que ve alguem
 // girando enquanto ele desiste). Carga de servidor: tarefas curtas com intervalos de 0 a ~100 us

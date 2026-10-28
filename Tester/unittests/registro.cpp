@@ -77,6 +77,7 @@ public:
     CASO (RajadasIntermitentesNaoGiram, teste_pool_rajadas_intermitentes_nao_giram)
     CASO (ParadoEconomiaAcordaPouco, teste_pool_parado_economia_acorda_pouco)
     CASO (TimerSoltoNoEconomiaParado, teste_pool_timer_solto_no_economia_parado)
+    CASO (TimerVoltaComTarefaCurta, teste_pool_timer_volta_com_tarefa_curta)
     CASO (GiroLimitadoSemTarefaPresa, teste_pool_giro_limitado_sem_tarefa_presa)
     CASO (ContadoresSobMonitor,    teste_pool_contadores_sob_monitor)
     BENCH(BenchAntesXDepois,       teste_pool_bench_antes_depois)

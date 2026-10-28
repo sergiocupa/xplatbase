@@ -180,10 +180,14 @@ extern "C" {
 
     /* Acquire/release sem barreira completa: no x86/x64 o mesmo mov dos de cima; no ARM64
      * ldar/stlr. Para publicar dados por um indice (o 'bottom' do deque do pool): quem grava
-     * os dados e depois o indice com release, e quem le o indice com acquire, ve os dados. */
+     * os dados e depois o indice com release, e quem le o indice com acquire, ve os dados.
+     * Windows x86/x64: o volatile direto, como o ReadAcquire64/WriteRelease64 de la (memoria
+     * forte + /volatile:ms), sem a chamada a mais no Debug; outras arquiteturas: os intrinsecos. */
     STATIC_INLINE long long thread_atomic64_load_acquire_inline(xthread_atomic64* p)
     {
-#ifdef XPLATBASE_WIN
+#if defined(XPLATBASE_WIN) && (defined(_M_X64) || defined(_M_IX86))
+        return (long long)(*p);
+#elif defined(XPLATBASE_WIN)
         return (long long)ReadAcquire64(p);
 #else
         return atomic_load_explicit(p, memory_order_acquire);
@@ -194,7 +198,9 @@ extern "C" {
 
     STATIC_INLINE void thread_atomic64_store_release_inline(xthread_atomic64* p, long long v)
     {
-#ifdef XPLATBASE_WIN
+#if defined(XPLATBASE_WIN) && (defined(_M_X64) || defined(_M_IX86))
+        *p = (LONG64)v;
+#elif defined(XPLATBASE_WIN)
         WriteRelease64(p, (LONG64)v);
 #else
         atomic_store_explicit(p, v, memory_order_release);

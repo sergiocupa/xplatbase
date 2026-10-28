@@ -422,6 +422,7 @@ struct XPL_ALIGN(XPL_CACHELINE) ThreadPool {
     int            n_ctrs;         /* n_shards + n_total */
     int            wait_inited;    /* Bug 2/3: pareia thread_wait_init/shutdown; = o pool segura o timer de 1 ms agora */
     long long      ocioso_desde_ms;/* economia: desde quando o pool esta parado (0 = em uso); so o monitor */
+    int64_t        ocioso_iniciadas;/* economia: soma dos start_count quando parou; so o monitor */
     /* Perf B: atomicos quentes em linhas de cache separadas */
     char           _padb0[XPL_CACHELINE];
     xatomic_uint32 submit_rr;
@@ -699,6 +700,12 @@ static POOL_FN pool_worker_fn(void* raw){
 
 static long long pool_total_pending(ThreadPool* pool);
 
+/* Tarefas iniciadas por todos os workers (elasticos inclusive). Cresce sempre: se mudou entre
+ * duas leituras, rodou tarefa no meio -- mesmo que ja tenha terminado. */
+static int64_t pool_iniciadas(ThreadPool* pool){
+    int64_t s=0; for (int i=0;i<pool->n_total;i++) s+=atomic_get64_relaxed_inline(&pool->workers[i].start_count); return s;
+}
+
 static POOL_FN pool_monitor_fn(void* raw){
     ThreadPool* pool=(ThreadPool*)raw;
     thread_wait_prepare_inline(&pool->mon_wait);
@@ -711,6 +718,8 @@ static POOL_FN pool_monitor_fn(void* raw){
          * (POOL_ECONOMIA_MON_OCIOSO_MS) como rede de seguranca. */
         int eco = atomic_get_inline(&pool->perfil) == POOL_PERFIL_ECONOMIA;
         if (eco && pool_total_pending(pool) == 0){
+            /* Lida ANTES do re-teste: tarefa que comecar depois disto muda a soma. */
+            int64_t iniciadas = pool_iniciadas(pool);
             thread_wait_prepare_inline(&pool->mon_wait);
             int exp=0; atomic_cas_inline(&pool->mon_dormindo,&exp,1);
             if (pool_total_pending(pool) == 0){
@@ -720,7 +729,7 @@ static POOL_FN pool_monitor_fn(void* raw){
                  * sem trabalho. Volta assim que chegar tarefa (abaixo). As tarefas acordam os
                  * workers por evento: so os TEMPOS de espera ficam grossos enquanto parado. */
                 long long agora = pool_agora_us() / 1000;
-                if (!pool->ocioso_desde_ms) pool->ocioso_desde_ms = agora;
+                if (!pool->ocioso_desde_ms){ pool->ocioso_desde_ms = agora; pool->ocioso_iniciadas = iniciadas; }
                 else if (pool->wait_inited && agora - pool->ocioso_desde_ms >= POOL_ECONOMIA_TIMER_SOLTA_MS){
                     thread_wait_shutdown(); pool->wait_inited = 0;
                 }
@@ -731,9 +740,14 @@ static POOL_FN pool_monitor_fn(void* raw){
         atomic_set_inline(&pool->mon_dormindo,0);
         if (atomic_get_inline(&pool->stop)) break;
         /* Trabalho de novo (ou o perfil voltou a performance): o timer fino volta. So entra aqui
-         * quem estava parado ou sem o timer: em performance, em regime, e um teste so. */
+         * quem estava parado ou sem o timer: em performance, em regime, e um teste so.
+         * "Trabalho" = tarefa pendente agora OU tarefa iniciada desde que o pool parou: so o
+         * pendente perdia o sinal quando as tarefas acabavam antes de o monitor acordar (1000
+         * tarefas curtas levam microssegundos) -- o timer nao voltava, e com carga intermitente
+         * rapida o pool soltava o timer mesmo com eventos chegando. */
         if (pool->ocioso_desde_ms || !pool->wait_inited){
-            if (atomic_get_inline(&pool->perfil) != POOL_PERFIL_ECONOMIA || pool_total_pending(pool) > 0){
+            int trabalhou = pool->ocioso_desde_ms && pool_iniciadas(pool) != pool->ocioso_iniciadas;
+            if (atomic_get_inline(&pool->perfil) != POOL_PERFIL_ECONOMIA || trabalhou || pool_total_pending(pool) > 0){
                 pool->ocioso_desde_ms = 0;
                 if (!pool->wait_inited) pool->wait_inited = thread_wait_init(false) ? 1 : 0;
             }

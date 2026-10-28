@@ -164,35 +164,53 @@ extern "C" {
 	    return 0;
 	}
 
-	/* Relaxed (ver o comentario depois do #endif): NoFence = volatile ISO, sem barreira. */
+	/* Relaxed e um so escritor (ver o comentario depois do #endif). Os tipos ja sao volatile: o
+	 * acesso direto e relaxed ou mais forte em qualquer arquitetura do Windows (/volatile:iso:
+	 * relaxed; /volatile:ms, o padrao no x86/x64: acquire/release, que la e o mesmo mov) -- e o
+	 * que ReadNoFence/WriteNoFence fazem, sem a chamada a mais no Debug (sem inline), que pesa
+	 * no giro do pool. */
 	STATIC_INLINE int atomic_get_relaxed_inline(xatomic_int* s)
 	{
-	    return (int)ReadNoFence(s);
+	    return (int)*s;
 	}
 
 	STATIC_INLINE void atomic_set_relaxed_inline(xatomic_int* s, int val)
 	{
-	    WriteNoFence(s, (LONG)val);
+	    *s = (LONG)val;
 	}
 
 	STATIC_INLINE int64_t atomic_get64_relaxed_inline(xatomic_int64* s)
 	{
-	    return (int64_t)ReadNoFence64(s);
+	    return (int64_t)*s;
 	}
 
 	STATIC_INLINE void atomic_set64_relaxed_inline(xatomic_int64* s, int64_t val)
 	{
-	    WriteNoFence64(s, (LONG64)val);
+	    *s = (LONG64)val;
 	}
 
 	STATIC_INLINE void* atomic_get_ptr_relaxed_inline(xatomic_ptr* s)
 	{
-	    return ReadPointerNoFence((PVOID volatile const*)s);
+	    return (void*)*s;
 	}
 
 	STATIC_INLINE void atomic_set_ptr_relaxed_inline(xatomic_ptr* s, void* val)
 	{
-	    WritePointerNoFence((PVOID volatile*)s, val);
+	    *s = (PVOID)val;
+	}
+
+	STATIC_INLINE int atomic_add_single_writer_inline(xatomic_int* s, int val)
+	{
+	    LONG v = *s + (LONG)val;
+	    *s = v;
+	    return (int)v;
+	}
+
+	STATIC_INLINE int64_t atomic_add64_single_writer_inline(xatomic_int64* s, int64_t val)
+	{
+	    LONG64 v = *s + (LONG64)val;
+	    *s = v;
+	    return (int64_t)v;
 	}
 
 #else
@@ -348,6 +366,20 @@ extern "C" {
 	    atomic_store_explicit(s, val, memory_order_relaxed);
 	}
 
+	STATIC_INLINE int atomic_add_single_writer_inline(xatomic_int* s, int val)
+	{
+	    int v = atomic_load_explicit(s, memory_order_relaxed) + val;
+	    atomic_store_explicit(s, v, memory_order_relaxed);
+	    return v;
+	}
+
+	STATIC_INLINE int64_t atomic_add64_single_writer_inline(xatomic_int64* s, int64_t val)
+	{
+	    int64_t v = atomic_load_explicit(s, memory_order_relaxed) + val;
+	    atomic_store_explicit(s, v, memory_order_relaxed);
+	    return v;
+	}
+
 #endif
 
 	/* ---- Relaxed: atomico sem ordenacao ---------------------------------------------------
@@ -363,19 +395,6 @@ extern "C" {
 	 * atomic_add{,64}_single_writer_inline: soma num campo que SO UMA thread escreve (as
 	 * outras so leem), com leitura e escrita relaxed e sem lock xadd. NAO e leitura-
 	 * modificacao-escrita atomica: com dois escritores, perde soma. Devolve o valor novo. */
-	STATIC_INLINE int atomic_add_single_writer_inline(xatomic_int* s, int val)
-	{
-	    int v = atomic_get_relaxed_inline(s) + val;
-	    atomic_set_relaxed_inline(s, v);
-	    return v;
-	}
-
-	STATIC_INLINE int64_t atomic_add64_single_writer_inline(xatomic_int64* s, int64_t val)
-	{
-	    int64_t v = atomic_get64_relaxed_inline(s) + val;
-	    atomic_set64_relaxed_inline(s, v);
-	    return v;
-	}
 
 
 
