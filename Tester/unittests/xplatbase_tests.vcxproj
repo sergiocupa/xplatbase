@@ -153,6 +153,7 @@
     <ClCompile Include="pool_ajuste.c" />
     <ClCompile Include="test_pool_vigia.c" />
     <ClCompile Include="test_pool_perfil.c" />
+    <ClCompile Include="test_pool_atomico.c" />
     <ClCompile Include="test_memory_pool.c" />
     <ClCompile Include="test_string_handler.c" />
     <ClCompile Include="bench_alocadores.c" />

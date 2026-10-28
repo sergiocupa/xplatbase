@@ -280,6 +280,16 @@ void thread_atomic64_store(xthread_atomic64* p, long long v)
     thread_atomic64_store_inline(p, v);
 }
 
+long long thread_atomic64_load_acquire(xthread_atomic64* p)
+{
+    return thread_atomic64_load_acquire_inline(p);
+}
+
+void thread_atomic64_store_release(xthread_atomic64* p, long long v)
+{
+    thread_atomic64_store_release_inline(p, v);
+}
+
 void thread_fence(void)
 {
     thread_fence_inline();

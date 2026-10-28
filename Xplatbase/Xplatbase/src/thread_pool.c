@@ -31,8 +31,9 @@
  *       nao-roubavel do worker (estilo Tokio) — o filho roda em seguida com
  *       cache quente; anti-inanicao via POOL_LIFO_CAP usos consecutivos.
  *     - Perf K (deque): take com fast-path de vazio (bottom<=top) sem pagar o
- *       mfence do protocolo Chase-Lev; push com fence RELEASE (x86: barreira
- *       de compilador) — so o take precisa de mfence (Le et al. 2013).
+ *       mfence do protocolo Chase-Lev; push publica com store RELEASE em
+ *       'bottom' (x86: mov) — so o take precisa de mfence (Le et al. 2013).
+ *       Ordens de memoria do deque: ver o comentario do PoolSlot.
  *     - Perf L (contador): decremento de pending do worker com store RELEASE
  *       single-writer (o contador so e escrito pelo proprio worker) em vez de
  *       lock xadd.
@@ -202,19 +203,10 @@ typedef xthread_atomic64 pool_a64;
 #define POOL_RET                 return (xthread_result_t)0
 #define pool_ld(p)               thread_atomic64_load_inline((p))
 #define pool_st(p,v)             thread_atomic64_store_inline((p), (long long)(v))
+#define pool_ld_acq(p)           thread_atomic64_load_acquire_inline((p))
+#define pool_st_rel(p,v)         thread_atomic64_store_release_inline((p), (long long)(v))
 #define pool_fence()             thread_fence_inline()
 #define pool_cas64(p,e,d)        thread_atomic64_cas_inline((p), (long long)(e), (long long)(d))
-
-/* Perf K: fence de release para o push do deque.
- * x86: stores nao reordenam entre si -> basta impedir o compilador.
- * MSVC nao-x86 cai no MemoryBarrier; POSIX usa fence release C11. */
-#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-#define pool_fence_release() _WriteBarrier()
-#elif defined(_MSC_VER)
-#define pool_fence_release() MemoryBarrier()
-#else
-#define pool_fence_release() atomic_thread_fence(memory_order_release)
-#endif
 
 /* Perf A+D: contador de pending de 64 bits, cada um na sua propria linha de
  * cache (o decremento por-worker pode acumular drift grande). */
@@ -324,24 +316,47 @@ POOL_INLINE int pool_ring_count(PoolRing* r){
     int32_t d=(int32_t)(t-h); return d>0?d:0;
 }
 
-/* ==================== deque Chase-Lev (Perf K) ==================== */
+/* ==================== deque Chase-Lev (Perf K) ====================
+ * Ordens de memoria da versao C11 de Le, Pop, Cohen e Zappa Nardelli (PPoPP 2013), a que
+ * vale em memoria fraca (ARM64):
+ *   - slot: fn e arg atomicos relaxed. O ladrao pode ler um slot que o dono esta regravando
+ *     (volta do anel, com 'top' ja avancado por outro ladrao): o CAS em 'top' falha e o valor
+ *     e descartado, mas o acesso precisa ser atomico para nao ser corrida de dados;
+ *   - push: 'top' com acquire (o ladrao que avancou 'top' leu o slot antes do CAS; regravar
+ *     o slot depois nao corre com essa leitura) e 'bottom' com release (publica o slot);
+ *   - steal: 'bottom' com acquire. Sem ele, no ARM64 a leitura do slot pode vir antes da de
+ *     'bottom' (cargas independentes reordenam): o ladrao pega o conteudo VELHO do slot e o
+ *     CAS em 'top' da certo -- roda de novo uma tarefa antiga e perde a nova.
+ * No x86/x64 continuam movs simples, sem barreira nova (a copia do slot vira dois movs de 8
+ * bytes); no ARM64, ldar/stlr no lugar de ldr e de dmb+str. */
+typedef struct { xatomic_ptr fn; xatomic_ptr arg; } PoolSlot;
+
+POOL_INLINE void pool_slot_set(PoolSlot* s, const PoolTask* t){
+    atomic_set_ptr_relaxed_inline(&s->fn, (void*)t->fn);
+    atomic_set_ptr_relaxed_inline(&s->arg, t->arg);
+}
+POOL_INLINE void pool_slot_get(PoolSlot* s, PoolTask* t){
+    t->fn = (pool_task_fn)atomic_get_ptr_relaxed_inline(&s->fn);
+    t->arg = atomic_get_ptr_relaxed_inline(&s->arg);
+}
+
 typedef struct XPL_ALIGN(XPL_CACHELINE) {
     pool_a64 top;
     char     _p0[XPL_CACHELINE - sizeof(pool_a64)];
     pool_a64 bottom;
     char     _p1[XPL_CACHELINE - sizeof(pool_a64)];
-    PoolTask* buf; int cap; int mask;
+    PoolSlot* buf; int cap; int mask;
 } PoolDeque;
 
 static bool pool_deque_init(PoolDeque* d, int cap){
-    d->buf=(PoolTask*)malloc((size_t)cap*sizeof(PoolTask)); if(!d->buf) return false;
+    d->buf=(PoolSlot*)malloc((size_t)cap*sizeof(PoolSlot)); if(!d->buf) return false;
     d->cap=cap; d->mask=cap-1; pool_st(&d->top,0); pool_st(&d->bottom,0); return true;
 }
 static void pool_deque_free(PoolDeque* d){ free(d->buf); d->buf=NULL; }
 POOL_INLINE bool pool_deque_push(PoolDeque* d, const PoolTask* t){
-    int64_t b=pool_ld(&d->bottom), tp=pool_ld(&d->top);
+    int64_t b=pool_ld(&d->bottom), tp=pool_ld_acq(&d->top);
     if (b - tp >= d->cap) return false;
-    d->buf[b & d->mask] = *t; pool_fence_release(); pool_st(&d->bottom, b+1); return true;
+    pool_slot_set(&d->buf[b & d->mask], t); pool_st_rel(&d->bottom, b+1); return true;
 }
 POOL_INLINE bool pool_deque_take(PoolDeque* d, PoolTask* out){
     /* Perf K: fast-path de vazio sem mfence. 'bottom' e exato (so o dono
@@ -351,13 +366,13 @@ POOL_INLINE bool pool_deque_take(PoolDeque* d, PoolTask* out){
     if (b - pool_ld(&d->top) <= 0) return false;
     b -= 1; pool_st(&d->bottom,b); pool_fence();
     int64_t t=pool_ld(&d->top);
-    if (t<=b){ *out=d->buf[b & d->mask];
+    if (t<=b){ pool_slot_get(&d->buf[b & d->mask], out);
         if (t==b){ int ok=pool_cas64(&d->top,t,t+1); pool_st(&d->bottom,b+1); return ok!=0; } return true;
     } else { pool_st(&d->bottom,b+1); return false; }
 }
 POOL_INLINE int pool_deque_steal(PoolDeque* d, PoolTask* out){
-    int64_t t=pool_ld(&d->top); pool_fence(); int64_t b=pool_ld(&d->bottom);
-    if (t<b){ PoolTask x=d->buf[t & d->mask]; if(!pool_cas64(&d->top,t,t+1)) return 0; *out=x; return 1; }
+    int64_t t=pool_ld(&d->top); pool_fence(); int64_t b=pool_ld_acq(&d->bottom);
+    if (t<b){ PoolTask x; pool_slot_get(&d->buf[t & d->mask], &x); if(!pool_cas64(&d->top,t,t+1)) return 0; *out=x; return 1; }
     return 0;
 }
 
@@ -375,10 +390,12 @@ typedef struct XPL_ALIGN(XPL_CACHELINE) {
     pool_thread_t handle;
     uint32_t      shard_cursor;
     uint32_t      steal_cursor;
-    volatile long done_count;     /* progresso (single-writer = este worker) */
-    volatile long start_count;    /* tarefas INICIADAS (single-writer): o monitor julga travamento por ele */
-    volatile int  in_task;        /* profundidade (Bug 1) */
-    long          mon_last;       /* uso exclusivo do monitor: start_count do passo anterior */
+    /* in_task e start_count: so este worker escreve e o monitor le em outra thread. Atomicos
+     * relaxed de um so escritor (atomics.h): o mesmo mov/ldr/str de um campo comum, sem
+     * corrida de dados no C11. */
+    xatomic_int64 start_count;    /* tarefas INICIADAS: o monitor julga travamento por ele */
+    xatomic_int   in_task;        /* profundidade (Bug 1) */
+    int64_t       mon_last;       /* uso exclusivo do monitor: start_count do passo anterior */
     /* Perf J: LIFO slot (so o dono acessa — campos simples) */
     PoolTask      lifo_task;
     int           lifo_full;
@@ -447,11 +464,10 @@ POOL_INLINE void pool_ctr_dec_self(ThreadPool* pool, PoolWorker* self){
 }
 
 POOL_INLINE void pool_run(ThreadPool* pool, PoolWorker* self, PoolTask* t){
-    self->in_task++;          /* Bug 1: profundidade (suporta pool_run aninhado) */
-    self->start_count++;
+    atomic_add_single_writer_inline(&self->in_task, 1);   /* Bug 1: profundidade (suporta pool_run aninhado) */
+    atomic_add64_single_writer_inline(&self->start_count, 1);
     t->fn(t->arg);
-    self->in_task--;
-    self->done_count++;
+    atomic_add_single_writer_inline(&self->in_task, -1);
     pool_ctr_dec_self(pool, self);
 }
 
@@ -723,7 +739,7 @@ static POOL_FN pool_monitor_fn(void* raw){
             }
         }
         /* TRAVADO = a MESMA tarefa rodando desde o passo anterior: em tarefa e sem ter INICIADO
-         * outra desde entao. Pelo done_count (terminadas), um worker que estava parado e acabou
+         * outra desde entao. Pelas terminadas (o antigo done_count), um worker que estava parado e acabou
          * de pegar tarefa tambem parecia travado -- e numa rajada intermitente (ex.: um evento a
          * cada 20 ms dividido em tarefas) dois deles bastavam para acordar os elasticos, que
          * giram ate POOL_ELASTIC_RETIRE_SPINS, pegam a rajada seguinte e nunca mais dormem:
@@ -732,8 +748,8 @@ static POOL_FN pool_monitor_fn(void* raw){
         int stuck=0;
         for (int i=0;i<pool->n_workers;i++){
             PoolWorker* w=&pool->workers[i];
-            long sc=w->start_count;
-            if (w->in_task && sc==w->mon_last) stuck++;
+            int64_t sc=atomic_get64_relaxed_inline(&w->start_count);
+            if (atomic_get_relaxed_inline(&w->in_task) && sc==w->mon_last) stuck++;
             w->mon_last=sc;
         }
         if (stuck < POOL_STUCK_MIN) continue;

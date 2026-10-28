@@ -126,3 +126,43 @@ int atomic_cas_ptr(xatomic_ptr* target, void** expected, void* desired)
 {
     return atomic_cas_ptr_inline(target, expected, desired);
 }
+
+int atomic_get_relaxed(xatomic_int* s)
+{
+    return atomic_get_relaxed_inline(s);
+}
+
+void atomic_set_relaxed(xatomic_int* s, int val)
+{
+    atomic_set_relaxed_inline(s, val);
+}
+
+int64_t atomic_get64_relaxed(xatomic_int64* s)
+{
+    return atomic_get64_relaxed_inline(s);
+}
+
+void atomic_set64_relaxed(xatomic_int64* s, int64_t val)
+{
+    atomic_set64_relaxed_inline(s, val);
+}
+
+void* atomic_get_ptr_relaxed(xatomic_ptr* s)
+{
+    return atomic_get_ptr_relaxed_inline(s);
+}
+
+void atomic_set_ptr_relaxed(xatomic_ptr* s, void* val)
+{
+    atomic_set_ptr_relaxed_inline(s, val);
+}
+
+int atomic_add_single_writer(xatomic_int* s, int val)
+{
+    return atomic_add_single_writer_inline(s, val);
+}
+
+int64_t atomic_add64_single_writer(xatomic_int64* s, int64_t val)
+{
+    return atomic_add64_single_writer_inline(s, val);
+}

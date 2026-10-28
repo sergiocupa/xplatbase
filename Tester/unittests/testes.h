@@ -17,6 +17,7 @@ void teste_pool_parado_economia_acorda_pouco(TestResult* r);
 void teste_pool_timer_do_processo(TestResult* r);         // benchmark (medida)
 void teste_pool_timer_solto_no_economia_parado(TestResult* r);
 void teste_pool_giro_limitado_sem_tarefa_presa(TestResult* r);
+void teste_pool_contadores_sob_monitor(TestResult* r);    // test_pool_atomico.c (TSan no Linux)
 void teste_pool_bench_antes_depois(TestResult* r);        // benchmark
 void teste_pool_bench_bibliotecas(TestResult* r);         // benchmark (bench_pool_bibliotecas.cpp)
 

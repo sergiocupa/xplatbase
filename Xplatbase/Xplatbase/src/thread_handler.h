@@ -178,6 +178,31 @@ extern "C" {
 
 
 
+    /* Acquire/release sem barreira completa: no x86/x64 o mesmo mov dos de cima; no ARM64
+     * ldar/stlr. Para publicar dados por um indice (o 'bottom' do deque do pool): quem grava
+     * os dados e depois o indice com release, e quem le o indice com acquire, ve os dados. */
+    STATIC_INLINE long long thread_atomic64_load_acquire_inline(xthread_atomic64* p)
+    {
+#ifdef XPLATBASE_WIN
+        return (long long)ReadAcquire64(p);
+#else
+        return atomic_load_explicit(p, memory_order_acquire);
+#endif
+    }
+
+
+
+    STATIC_INLINE void thread_atomic64_store_release_inline(xthread_atomic64* p, long long v)
+    {
+#ifdef XPLATBASE_WIN
+        WriteRelease64(p, (LONG64)v);
+#else
+        atomic_store_explicit(p, v, memory_order_release);
+#endif
+    }
+
+
+
     STATIC_INLINE void thread_fence_inline(void)
     {
 #ifdef XPLATBASE_WIN
@@ -212,6 +237,8 @@ extern "C" {
     XPLATBASE_API void      thread_sleep0(void);
     XPLATBASE_API long long thread_atomic64_load(xthread_atomic64* p);
     XPLATBASE_API void      thread_atomic64_store(xthread_atomic64* p, long long v);
+    XPLATBASE_API long long thread_atomic64_load_acquire(xthread_atomic64* p);
+    XPLATBASE_API void      thread_atomic64_store_release(xthread_atomic64* p, long long v);
     XPLATBASE_API void      thread_fence(void);
     XPLATBASE_API int       thread_atomic64_cas(xthread_atomic64* p, long long expected, long long desired);
 

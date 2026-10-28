@@ -164,6 +164,37 @@ extern "C" {
 	    return 0;
 	}
 
+	/* Relaxed (ver o comentario depois do #endif): NoFence = volatile ISO, sem barreira. */
+	STATIC_INLINE int atomic_get_relaxed_inline(xatomic_int* s)
+	{
+	    return (int)ReadNoFence(s);
+	}
+
+	STATIC_INLINE void atomic_set_relaxed_inline(xatomic_int* s, int val)
+	{
+	    WriteNoFence(s, (LONG)val);
+	}
+
+	STATIC_INLINE int64_t atomic_get64_relaxed_inline(xatomic_int64* s)
+	{
+	    return (int64_t)ReadNoFence64(s);
+	}
+
+	STATIC_INLINE void atomic_set64_relaxed_inline(xatomic_int64* s, int64_t val)
+	{
+	    WriteNoFence64(s, (LONG64)val);
+	}
+
+	STATIC_INLINE void* atomic_get_ptr_relaxed_inline(xatomic_ptr* s)
+	{
+	    return ReadPointerNoFence((PVOID volatile const*)s);
+	}
+
+	STATIC_INLINE void atomic_set_ptr_relaxed_inline(xatomic_ptr* s, void* val)
+	{
+	    WritePointerNoFence((PVOID volatile*)s, val);
+	}
+
 #else
 
     #include <stdatomic.h>
@@ -287,7 +318,64 @@ extern "C" {
 	    return atomic_compare_exchange_strong_explicit(target, expected, desired, memory_order_acq_rel, memory_order_relaxed);
 	}
 
+	STATIC_INLINE int atomic_get_relaxed_inline(xatomic_int* s)
+	{
+	    return atomic_load_explicit(s, memory_order_relaxed);
+	}
+
+	STATIC_INLINE void atomic_set_relaxed_inline(xatomic_int* s, int val)
+	{
+	    atomic_store_explicit(s, val, memory_order_relaxed);
+	}
+
+	STATIC_INLINE int64_t atomic_get64_relaxed_inline(xatomic_int64* s)
+	{
+	    return atomic_load_explicit(s, memory_order_relaxed);
+	}
+
+	STATIC_INLINE void atomic_set64_relaxed_inline(xatomic_int64* s, int64_t val)
+	{
+	    atomic_store_explicit(s, val, memory_order_relaxed);
+	}
+
+	STATIC_INLINE void* atomic_get_ptr_relaxed_inline(xatomic_ptr* s)
+	{
+	    return atomic_load_explicit(s, memory_order_relaxed);
+	}
+
+	STATIC_INLINE void atomic_set_ptr_relaxed_inline(xatomic_ptr* s, void* val)
+	{
+	    atomic_store_explicit(s, val, memory_order_relaxed);
+	}
+
 #endif
+
+	/* ---- Relaxed: atomico sem ordenacao ---------------------------------------------------
+	 * atomic_get/set{,64,_ptr}_relaxed_inline: o acesso nao rasga e nao e corrida de dados no
+	 * modelo de memoria do C11 (o ThreadSanitizer aceita), mas NAO ordena os outros acessos:
+	 * sem barreira e sem lock -- mov simples em x86/x64, ldr/str em ARM64, o mesmo custo de um
+	 * acesso comum. Quem le ve um valor recente do campo, nao "tudo o que veio antes" dele
+	 * (para publicar dados use set com release e get com acquire). Uso: valor que outra
+	 * thread so le como amostra (o monitor do pool lendo o progresso dos workers) e dados
+	 * publicados por outro campo com release/acquire (os slots do deque do pool).
+	 *
+	 * ---- Um so escritor -------------------------------------------------------------------
+	 * atomic_add{,64}_single_writer_inline: soma num campo que SO UMA thread escreve (as
+	 * outras so leem), com leitura e escrita relaxed e sem lock xadd. NAO e leitura-
+	 * modificacao-escrita atomica: com dois escritores, perde soma. Devolve o valor novo. */
+	STATIC_INLINE int atomic_add_single_writer_inline(xatomic_int* s, int val)
+	{
+	    int v = atomic_get_relaxed_inline(s) + val;
+	    atomic_set_relaxed_inline(s, v);
+	    return v;
+	}
+
+	STATIC_INLINE int64_t atomic_add64_single_writer_inline(xatomic_int64* s, int64_t val)
+	{
+	    int64_t v = atomic_get64_relaxed_inline(s) + val;
+	    atomic_set64_relaxed_inline(s, v);
+	    return v;
+	}
 
 
 
@@ -320,6 +408,15 @@ XPLATBASE_API uint64_t atomic_u64_add(xatomic_uint64* s, uint64_t val);
 XPLATBASE_API int      atomic_u64_cas(xatomic_uint64* s, uint64_t* expected, uint64_t desired);
 
 XPLATBASE_API int      atomic_cas_ptr(xatomic_ptr* target, void** expected, void* desired);
+
+XPLATBASE_API int      atomic_get_relaxed(xatomic_int* s);
+XPLATBASE_API void     atomic_set_relaxed(xatomic_int* s, int val);
+XPLATBASE_API int64_t  atomic_get64_relaxed(xatomic_int64* s);
+XPLATBASE_API void     atomic_set64_relaxed(xatomic_int64* s, int64_t val);
+XPLATBASE_API void*    atomic_get_ptr_relaxed(xatomic_ptr* s);
+XPLATBASE_API void     atomic_set_ptr_relaxed(xatomic_ptr* s, void* val);
+XPLATBASE_API int      atomic_add_single_writer(xatomic_int* s, int val);
+XPLATBASE_API int64_t  atomic_add64_single_writer(xatomic_int64* s, int64_t val);
 
 
 
